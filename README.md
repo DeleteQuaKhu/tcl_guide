@@ -59,13 +59,14 @@ The dialog opens at the mouse pointer.
 | *Input Model* | `hwtk::openfileentry` (or an entry + **Browse...**) with a **model** filter: `*.inp` (Abaqus) first, then `*.bdf/*.dat/*.nas` (Nastran), `*.fem` (OptiStruct), `*.h3d`, `*.odb` and an `All Files` entry. |
 | *Input Result* | Same widget with a **result** filter: `*.res` (**FEMFAT**) first, then `*.op2` (Nastran), `*.odb` (Abaqus), `*.rst` (Ansys), `*.d3plot` (LS-DYNA), `*.h3d` and an `All Files` entry. |
 | **Browse...** (per field) | Opens `tk_getOpenFile -filetypes <the same list>` - usable in every build, no matter whether the `openfileentry` widget or its `-filetypes` option is available. The chosen path is normalised, checked and written back into the field. |
-| *Reader (optional)* | Reader label for `AddModel` (see V5). Empty = let HyperView pick the reader from the file extension. Used for the model **and** the result file. |
-| **Load into window** | Loads the model file, the result file, or both, into the target window and immediately re-reads its result tree (see V10). |
+| **Load into window** | Loads the model file, the result file, or both, into the target window and immediately re-reads its result tree (see V5 / V10). There is **no Reader field**: the reader is detected from the file itself (fix 2). |
 | **Re-read results of this window** | Rebuilds the subcase / simulation / result-type / component tree of a window without reloading the file. |
-| *Information pane* | One line per loaded window: file(s), subcases, simulations, result types, components - plus a `note:` / `warning:` line for anything that was only partly accepted. |
+| *Information pane* | One line per loaded window: file(s), subcases, simulations, result types, components - plus a `note:` / `warning:` line for anything that was only partly accepted (including the reader *suggestion* of `Logic::ReaderHint`, which is never passed to HyperView). |
 
 Fill in **only what you have**: model only, result only, or both.  If both are
-given, the model is loaded first and the result file is attached to it (V10).
+given, the model is loaded first and the result file is attached to it
+(`<model> SetResult`, see V10).  Both paths are handed to HyperView **without a
+reader label** - `AddModel`/`SetResult` detect the reader from the file (fix 2).
 Repeat *Load into window* once per window; each window keeps its own file(s).
 
 ### Step 2 - contour
@@ -120,7 +121,7 @@ hwi        OpenStack, CloseStack, GetSessionHandle
 <window>   GetClientHandle
 <client>   Draw, GetActiveModel, GetModelHandle, GetModelList, AddModel,
            RemoveAllModels, SetDisplayOptions
-<model>    GetFileName, GetResultCtrlHandle, AddResultFile (V10)
+<model>    GetFileName, GetResultCtrlHandle, SetResult (V10), AddResultFile (V10)
 <result>   GetSubcaseList, GetSubcaseLabel, GetCurrentSubcase,
            SetCurrentSubcase, GetSimulationList, GetCurrentSimulation,
            SetCurrentSimulation, GetNumberOfSimulations, GetDataTypeList,
@@ -177,12 +178,12 @@ written so that a wrong guess degrades instead of failing:
 | **V2** | `<contour> SetAverageMode <mode>` | Mode strings `None Simple Advanced Maximum Minimum` live in `Logic::averagingModes`. Non-fatal: a refused mode is reported as a warning for that window. Adjust the list if your installation spells them differently. |
 | **V3** | `<contour> SetLayer <layer>` | `Logic::layerChoices` = `<default> Z1 Z2 Lower Upper Mid`. `<default>` makes the adapter skip the call completely, so a build without `SetLayer` still works; a refused layer is a warning, not an error. |
 | **V4** | `<contour> GetLegendHandle` + `<legend> SetType dynamic` | Non-fatal. If the legend handle or the dynamic legend type is refused, the contour is still applied and a warning is printed. |
-| **V5** | `<client> AddModel <file> <reader>` | Called with one argument (reader auto-detected from the file extension) when the *Reader* entry is empty, with two when it is filled in - for the model file **and** for the result file. Reader labels are installation specific, hence the optional entry (for example `Nastran OP2 Reader`, `FEMFAT Result Reader`). The info pane prints a *suggestion* for the chosen extension, it never fills the entry in by itself. `hwtk::openfileentry -filetypes` may be refused by a build - the field is then recreated without that option, and the **Browse...** button still offers the full filter list. |
+| **V5** | `<client> AddModel <file>` | Called with **one** argument - no reader label (fix 2: there is no *Reader* entry any more, HyperView detects the reader from the file itself, which is how the shipped examples call it). If a build should refuse that, use *File > Load > Model* in HyperView. Reader labels are installation specific, so no guess is handed over; `Logic::ReaderHint` only prints a *suggestion* for the chosen extension into the info pane / status line. `hwtk::openfileentry -filetypes` may be refused by a build - the field is then recreated without that option, and the **Browse...** button still offers the full filter list. |
 | **V6** | `<result> GetDataComponentList <subcaseId> <dataType>` | Queried for every result type of every subcase while the result tree is built; the form is the one used by Altair's own `result_service.tcl`. If the call is refused, the result tree still lists subcases / simulations / result types. |
 | **V7** | `hwtk::dialog` modality (`-modal`) | **Not used.** The dialog is created with only the options seen in real HyperView scripts, so it cannot fail on an unknown option. Add `-modal 1` yourself if your build accepts it. |
 | **V8** | `hwtk::combobox configure -values <list>` | Used to re-populate the subcase / result type / component lists. hwtk comboboxes are ttk widgets, so `-values` is a list option and the list is passed **as it is** (wrapping it in `[list ...]` would glue all entries into one). |
 | **V9** | `<<ComboboxSelected>>` on hwtk comboboxes | Bound so that changing the subcase refills the result type list and changing the result type refills the component list. If a build does not generate the virtual event, the **Reload lists** button in step 2 does exactly the same job. The same event - plus `<Return>` / `<FocusOut>` - guarantees that the window count and the target window reach their variables (fix 1). |
-| **V10** | Attaching a **result** file to a model that is already in the window | `Adapter::AttachResult` tries `<client> AddModel <resultFile> [<reader>]` first (HyperView attaches results to the existing model when the readers are compatible) and falls back to `<model> AddResultFile <resultFile>`. **A refusal is never fatal**: the model stays loaded and the reason is printed as a `warning:` line with the hint to use *File > Load > Results* or an explicit reader label. If only a result file is given, it is loaded with a single `AddModel` and HyperView builds the model from it. |
+| **V10** | Attaching a **result** file to a model that is already in the window | `Adapter::AttachResult` tries `<model> SetResult <resultFile>` first (the documented, reader-free way - `AddModel <result>` alone only reports the file and never attaches it, which was bug 2), falls back to `<model> AddResultFile <resultFile>` and then to `<client> AddModel <resultFile>`. **A refusal is never fatal**: the model stays loaded and the reason is printed as a `warning:` line with the hint to use *File > Load > Results*. If only a result file is given, it is loaded with a single `AddModel` and HyperView builds the model from it. |
 
 ---
 
@@ -202,18 +203,21 @@ Exit code `0` = every check passed, `1` = at least one check failed.
 
 Everything that contains no `hwi` and no widget call: the `State` store, the
 `Logic` helpers (subcase / simulation / component tree, spec assembly and
-fan-out, validation, the two file-type filters, `ReaderHint` and
-`CheckChosenFile`), the pure `UI` helpers (including the widget-first
-`ReadWindowCount` of fix 1) and the adapter paths that fail before an `hwi`
-call is reached.
+fan-out, validation, the two file-type filters, `ReaderHint` - now a status-line
+suggestion only - and `CheckChosenFile`), the pure `UI` helpers (including
+`ReadWindowCount` / `InterpretWindowCount` of fix 1) and the adapter paths that
+fail before an `hwi` call is reached.
 
 Section **4b** additionally installs a small **fake `hwi`** (skipped if a real
 `hwi` is present, so the file is safe to source inside HyperView) and walks the
-whole load sequence of fix 2 with it: model only, model + result via
-`AddModel`, model + result via the `<model> AddResultFile` fallback, both attach
-forms refused (warning path, model stays loaded), result only, and
-`LoadAllAndRefresh` carrying `mode` + `warnings` into the result tree.  Its last
-line is `ALL CHECKS PASSED` (176 checks).
+whole reader-free load sequence of fix 2 with it: model only, model + result via
+`SetResult`, via the `<model> AddResultFile` fallback and via the legacy
+`AddModel` form, all attach forms refused (warning path, model stays loaded),
+result only, and `LoadAllAndRefresh` carrying `mode` + `warnings` into the result
+tree.  `GetNumberOfWindows` answers with the scalar `4` in one scenario and with
+the list `1 2 3 4` in the other, so both shapes of fix 1 are covered.  Its last
+line is `ALL CHECKS PASSED` (203 checks; the line above it prints
+` source test   : 203 passed, 0 failed`).
 
 ### `selftest_ui_hv_model_loader.tcl` (GUI)
 
@@ -235,18 +239,22 @@ code runs and is verified:
 
 Section **5b** is the regression test of **fix 1** (the window field keeps the
 number the user picked - in the variable *and* in the widget - also when the
-layout request is refused, and the target window is no longer reset to 1).
+layout request is refused, the target window is no longer reset to 1, and
+`Logic::InterpretWindowCount` reads both the scalar and the list answer of
+`GetNumberOfWindows` as the real count, while plain `llength` would answer 1 for
+the scalar).
 Section **5c** is the regression test of **fix 2** (`*.inp` in the model filter,
 `*.res` in the result filter, `CheckChosenFile` accepting/rejecting paths,
-`ApplyChosenFile` writing the normalised path back, and both paths reaching the
-adapter).
+`ApplyChosenFile` writing the normalised path back, both paths reaching the
+adapter, and - since the reader entry was removed - that no `Load into window`
+path needs a reader field while the `ReaderHint` suggestion survives).
 
 Every `hwi` call fails in this environment - which is exactly the point: the
 test proves that all of those failures are reported to the user instead of
 aborting the GUI.  Expected summary:
 
 ```
- UI smoke test : 142 passed, 0 failed
+ UI smoke test : 149 passed, 0 failed
  stub notes    : 4 (unmodelled options, pop-up windows and the missing hwi - expected;
                  three of them are the tk_messageBox warnings of the fix-2 failure paths)
 ```
@@ -266,8 +274,8 @@ aborting the GUI.  Expected summary:
 | Averaging / layer / legend warning in the information pane | V2 / V3 / V4 - the contour itself was applied; only the optional refinement was refused. |
 | Step 2 lists do not follow the subcase | V9: the build does not emit `<<ComboboxSelected>>`. Press **Reload lists**. |
 | `.inp` / `.res` files do not show up in the browser | The filter list is the first entry of each field (`Abaqus Input Files`, `FEMFAT Result Files`). Pick the `All Files` entry at the end of the list, or type/paste the path into the field - the path is then normalised and checked when you press *Load into window*. |
-| `note : '.xyz' is unusual for a model file` | Only a hint - the file is passed to HyperView anyway. Set `Reader` to the reader of your installation when auto-detection fails. |
-| `warning : the result file '...' could not be attached` | V10: neither `client AddModel <result>` nor `model AddResultFile <result>` was accepted. The model is loaded; add the results with *File > Load > Results* or fill in the exact reader label and load again. |
+| `note : '.xyz' is unusual for a model file` | Only a hint - the file is passed to HyperView anyway (`AddModel <file>` detects the reader). Rename the file to its usual extension if the detection picks the wrong reader. |
+| `warning : the result file '...' could not be attached` | V10: none of `model SetResult <result>`, `model AddResultFile <result>` and `client AddModel <result>` was accepted. The model is loaded; add the results with *File > Load > Results*. |
 | Contour applied but nothing visible | The contour is switched on with `SetEnableState true` and `SetDisplayOptions contour true`; if the display options call is refused, enable the contour in HyperView manually. |
 
 ### Limitations
@@ -279,8 +287,9 @@ aborting the GUI.  Expected summary:
   not driven by the GUI.
 * No undo: applying a contour changes the window immediately.
 * Attaching a result file to an already loaded model (V10) is the one step whose
-  exact API could not be confirmed for 2022; both known forms are tried and a
-  refusal is only a warning, so a failed attach never blocks the workflow.
+  exact API could not be confirmed for 2022; the three known forms are tried
+  (`model SetResult`, `model AddResultFile`, `client AddModel`) and a refusal is
+  only a warning, so a failed attach never blocks the workflow.
 * The two file fields are remembered per window in the State layer, but only the
   files that HyperView itself reports (`<model> GetFileName`) are re-read when a
   window is refreshed.
@@ -335,6 +344,35 @@ Three more defects were reported from real use and fixed in this revision:
    `OnLoadModel` therefore threw as soon as a file really loaded - it was never
    reached in the earlier stubs-only runs.  All five occurrences now use plain
    `""`, and section 5c and the fake-`hwi` section execute those branches.
+
+Three defects were reported from real use *after* that and are fixed in this
+revision:
+
+8. **The window count jumped back to 1 after *Apply layout*.**  `OnApplyLayout`
+   derived the new number from `[llength [<page> GetNumberOfWindows]]`; HyperView
+   answers with a **number** (`4`), and `[llength 4]` is `1` - so every refresh
+   wrote 1 back.  `Logic::InterpretWindowCount` now turns both the scalar and the
+   list form into the real count, `OnApplyLayout` writes the applied number into
+   the variable **and** the widget, and `UI::SetWindowCountValue` adds an
+   unknown-but-valid number to `-values` instead of dropping it.  Covered by
+   section 5b of the GUI test and by the fix-1 block of the pure test (the fake
+   `hwi` switches between the scalar and the list answer).
+9. **Results were never attached** (`<client> AddModel <resultFile>` only reports
+   the file; it does not attach its results to the model already in the window).
+   `Adapter::AttachResult` now tries `<model> SetResult <resultFile>` first,
+   `<model> AddResultFile <resultFile>` second and the old `AddModel` call last,
+   and reports every refusal as a `warning:` - the model stays loaded.  Covered
+   by the fake-`hwi` scenarios of the pure test (all three forms, plus the
+   all-refused warning path).
+10. **The reader entry was pointless.**  `AddModel` detects the reader from the
+    file, so the *Reader* field (with its installation-specific labels) was
+    removed from step 1: `Logic::ReaderHint` only prints a suggestion into the
+    status line / info pane, and nothing is handed to `hwi` any more.  The GUI
+    test asserts that neither `UI::varReader` nor `UI::wReader` exists and that
+    the note "the reader is detected automatically from the file" is shown.
+    Step-1/step-2 signatures dropped their reader argument; a legacy 5-argument
+    `Adapter::LoadInputs` call is still understood (the extra argument is then
+    used as the result path).
 
 Two harness bugs were fixed on the way (they only ever affected the tests): the
 multi-pattern `-` fall-through of the fake-`hwi` `switch` needs a `-` on **both**

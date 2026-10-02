@@ -14,6 +14,17 @@
 #
 #  ENTRY  : ::ModelLoader::Show
 #
+#  FIXES  : F1 (window count)  the number the user typed is written back into the
+#           Tcl variable AND the widget, and a refused layout keeps it in the
+#           field.  Logic::InterpretWindowCount turns both forms of
+#           '<page> GetNumberOfWindows' (the scalar '4' and the list '1 2 3 4')
+#           into the real count - [llength] alone would answer 1 for the scalar.
+#          F2 (reader free)    there is no 'Reader' entry any more:
+#           '<client> AddModel <file>' detects the reader from the file, a result
+#           file is attached with '<model> SetResult <file>' first and
+#           '<model> AddResultFile <file>' second.  Logic::ReaderHint survives as
+#           a status-line suggestion only.
+#
 #  LAYERS (single file, clearly separated):
 #     SECTION 1  STATE / LOGIC     - pure Tcl, no hwi and no hwtk calls
 #     SECTION 2  HYPERVIEW ADAPTER - the ONLY place that calls hwi
@@ -31,7 +42,7 @@
 #     <window>   GetClientHandle
 #     <client>   Draw, GetActiveModel, GetModelHandle, GetModelList,
 #                AddModel, RemoveAllModels, SetDisplayOptions
-#     <model>    GetFileName, GetResultCtrlHandle, AddResultFile (V10)
+#     <model>    GetFileName, GetResultCtrlHandle, SetResult, AddResultFile (V10)
 #     <result>   GetSubcaseList, GetSubcaseLabel, GetCurrentSubcase,
 #                SetCurrentSubcase, GetSimulationList, GetCurrentSimulation,
 #                SetCurrentSimulation, GetNumberOfSimulations, GetDataTypeList,
@@ -56,14 +67,20 @@
 #     V2  <contour> SetAverageMode <mode>   exact mode strings
 #     V3  <contour> SetLayer <layer>        command presence in 2022
 #     V4  <contour> GetLegendHandle + <legend> SetType dynamic
-#     V5  <client> AddModel <file> <reader> reader labels
+#     V5  <client> AddModel <file>          NO reader argument is passed any
+#                                          more - HyperView detects the reader
+#                                          from the file itself (fix 2); the
+#                                          ReaderHint of Logic is printed as a
+#                                          note in the info pane only
 #     V6  <result> GetDataComponentList <subcaseId> <dataType>
 #     V7  hwtk::dialog modality (-modal)
 #     V8  hwtk::combobox configure -values (dynamic re-population)
 #     V9  hwtk combobox <<ComboboxSelected>> virtual event
 #     V10 - VERIFY: attaching a RESULT file to a model that is already in the
-#         window (<client> AddModel <resultFile> first, <model> AddResultFile
-#         second); a refusal is a warning, never a failed load
+#         window (<model> SetResult <resultFile> first - exactly as Altair's own
+#         training.tcl does it -, <model> AddResultFile <resultFile> second,
+#         <client> AddModel <resultFile> last); no reader label is used.
+#         a refusal is a warning, never a failed load
 #=============================================================================
 
 #=============================================================================
@@ -110,9 +127,6 @@ namespace eval ::ModelLoader::State {
     #   file        <full path of the primary loaded file (model, else result)>
     #   modelFile   <full path of the 'Input Model' file (may be empty)>
     #   resultFile  <full path of the 'Input Result' file (may be empty)>
-    #   reader      <optional reader label passed to AddModel for 'file'>
-    #   modelReader <reader label used for modelFile>          (V5)
-    #   resultReader<reader label used for resultFile>         (V5)
     #   name        <file tail, for display>
     #   loaded      <0|1>
     #   subcases    <list of {subcaseId subcaseLabel}>
@@ -158,8 +172,8 @@ proc ::ModelLoader::State::WindowExists {idx} {
 proc ::ModelLoader::State::WindowInit {idx args} {
     variable windows
     set attrs [dict merge {
-        page {} file {} reader {} name {} loaded 0
-        modelFile {} modelReader {} resultFile {} resultReader {}
+        page {} file {} name {} loaded 0
+        modelFile {} resultFile {}
         subcases {} simulations {} datatypes {} components {}
     } [dict create {*}$args]]
     dict set windows $idx $attrs
@@ -282,6 +296,24 @@ proc ::ModelLoader::Logic::LayoutCandidates {count} {
     lappend cand "single" "2H" "2V" "3H" "3V"
     return [lsort -unique $cand]
 }
+#--------------------------------- page window count --------------------------
+# BUG FIX 1: the return value of '<page> GetNumberOfWindows' is NOT the same in
+# every build.  Altair's own scripts use it as a NUMBER
+# ('for {set i 0} {$i < [$pageHandle GetNumberOfWindows]} {incr i}', see
+# _tmp_hv/batchImportOdb.tcl), while some builds hand out the LIST of window
+# indices ('1 2 3 4') instead.  Both spellings are accepted here:
+#   "4"       -> 4          (the usual, numeric form)
+#   "1 2 3 4" -> 4          (the list form)
+#   "1"       -> 1
+#   ""        -> 0
+# Before this helper the value was passed through 'llength' - that turned any
+# scalar '4' into 1, so the wizard believed the page had a single window after
+# every layout change (that is why the window count jumped back to 1).
+proc ::ModelLoader::Logic::InterpretWindowCount {raw} {
+    set raw [string trim $raw]
+    if {[string is integer -strict $raw] && $raw >= 0} { return $raw }
+    return [llength $raw]
+}
 #--------------------------------- file type filters (GUI data) --------------
 # Both lists below are ONE Tcl list in the standard Tk 'filetypes' format:
 #   { {"Label" {.ext1 .ext2}} {"Label2" {.ext3}} {"All Files" {*}} }
@@ -325,8 +357,9 @@ proc ::ModelLoader::Logic::ModelExtensions {} {
 proc ::ModelLoader::Logic::ResultExtensions {} {
     return {.res .op2 .odb .rst .d3plot .h3d .xdb .mvw}
 }
-# Reader label SUGGESTION for the info pane - never applied automatically,
-# because the exact label is installation specific (see V5).
+# Reader label SUGGESTION for the info pane.  It is only printed as a hint:
+# no reader label is ever handed to HyperView any more, AddModel detects the
+# reader from the file itself (fix 2 / V5).
 proc ::ModelLoader::Logic::ReaderHint {path} {
     switch -- [string tolower [file extension [string trim $path]]] {
         .inp    { return "Abaqus Input Reader" }
@@ -593,7 +626,8 @@ proc ::ModelLoader::Adapter::QueryPage {} {
                 if {[::ModelLoader::Adapter::HvRun "GetPageHandle" \
                         {mlProj GetPageHandle mlPage $pageIdx}]} {
                     ::ModelLoader::Adapter::HvRun "GetNumberOfWindows" \
-                        {set winCount [llength [mlPage GetNumberOfWindows]]}
+                        {set winCount [::ModelLoader::Logic::InterpretWindowCount \
+                                          [mlPage GetNumberOfWindows]]}
                     ::ModelLoader::Adapter::HvRun "GetLayout" {set layout [mlPage GetLayout]}
                 }
             }
@@ -653,7 +687,8 @@ proc ::ModelLoader::Adapter::SetWindowCount {wanted} {
                     if {![::ModelLoader::Adapter::HvRun "SetLayout '$cand'" \
                             [list mlPage SetLayout $cand]]} { continue }
                     if {![::ModelLoader::Adapter::HvRun "GetNumberOfWindows" \
-                            {set actual [llength [mlPage GetNumberOfWindows]]}]} { continue }
+                            {set actual [::ModelLoader::Logic::InterpretWindowCount \
+                                             [mlPage GetNumberOfWindows]]}]} { continue }
                     if {$actual == $wanted} {
                         ::ModelLoader::State::SetLayoutToken $wanted $cand
                         set result [dict create ok 1 windows $actual layout $cand \
@@ -678,19 +713,20 @@ proc ::ModelLoader::Adapter::SetWindowCount {wanted} {
 
 #--------------------------------------------------------------- load model ---
 # Loads <path> into window <winIdx> of the ACTIVE page.
-# <reader> may be empty (HyperView auto-detects the reader) or a reader label.
-# V5 - VERIFY: 'client AddModel <file>' (auto reader) and
-#      'client AddModel <file> <readerLabel>' are both used by real HyperView
-#      scripts; the correct label for a given format depends on the
-#      installation (example: "NASTRAN Model Input Reader").
+# FIX 2 (V5): NO reader label is passed any more.  'client AddModel <file>' lets
+#        HyperView detect the reader from the file itself - that is the only
+#        spelling this wizard uses, so the user never has to know a reader name.
+#        Older callers passed '<reader>' as third argument; such an extra
+#        argument is accepted and IGNORED, the API stays call compatible.
 # Returns 1 on success, 0 on failure (State::lastError holds the reason).
-proc ::ModelLoader::Adapter::LoadModel {winIdx path reader} {
+proc ::ModelLoader::Adapter::LoadModel {winIdx path args} {
     ::ModelLoader::State::ClearLastError
     if {![file exists $path]} {
         ::ModelLoader::State::SetLastError "File not found: $path"
         return 0
     }
     set pageIdx ""
+    set mlModelId ""
     set ok 0
     if {![::ModelLoader::Adapter::HvRun "hwi OpenStack" {hwi OpenStack}]} { return 0 }
     if {[::ModelLoader::Adapter::HvRun "GetSessionHandle" {hwi GetSessionHandle mlSess}]} {
@@ -703,12 +739,11 @@ proc ::ModelLoader::Adapter::LoadModel {winIdx path reader} {
                             {mlPage GetWindowHandle mlWin $winIdx}]} {
                         if {[::ModelLoader::Adapter::HvRun "GetClientHandle" \
                                 {mlWin GetClientHandle mlClient}]} {
-                            if {$reader eq ""} {
-                                set ok [::ModelLoader::Adapter::HvRun "AddModel (auto reader)" \
-                                    [list mlClient AddModel $path]]
-                            } else {
-                                set ok [::ModelLoader::Adapter::HvRun "AddModel '$reader'" \
-                                    [list mlClient AddModel $path $reader]]
+                            # the reader is auto detected; AddModel answers with
+                            # the id of the model it created (see training.tcl)
+                            if {[::ModelLoader::Adapter::HvRun "AddModel" \
+                                    {set mlModelId [mlClient AddModel $path]}]} {
+                                set ok 1
                             }
                             ::ModelLoader::Adapter::HvRun "Draw" {mlClient Draw}
                         }
@@ -722,8 +757,8 @@ proc ::ModelLoader::Adapter::LoadModel {winIdx path reader} {
 
     if {$ok} {
         ::ModelLoader::State::WindowInit $winIdx \
-            page $pageIdx file $path reader $reader name [file tail $path] loaded 1 \
-            modelFile $path modelReader $reader
+            page $pageIdx file $path name [file tail $path] loaded 1 \
+            modelFile $path modelId $mlModelId
     }
     return $ok
 }
@@ -732,50 +767,57 @@ proc ::ModelLoader::Adapter::LoadModel {winIdx path reader} {
 # Attaches <resultPath> to the model that is currently in the window.
 # Has to be called while the stack is OPEN, because <clientVar> is the live
 # client handle of the caller's frame (hence the upvar).
-# V10 - VERIFY: two forms are tried, the first one that is accepted wins:
-#   1. <client> AddModel <resultFile> [<reader>]  - HyperView attaches the
-#      results to the existing model when the readers are compatible; this is
-#      how Altair's own examples load a model and a result file together.
-#   2. <model> AddResultFile <resultFile>         - explicit attach form.
+# FIX 2 (V10): '<client> AddModel <resultFile>' does NOT attach a result file to
+# a model that is already in the window - that is why results "did not load".
+# The order below is the one Altair's own training.tcl uses:
+#   1. <model> SetResult <resultFile>      (modelHandle SetResult <file>)
+#   2. <model> AddResultFile <resultFile>  (older name of the same operation)
+#   3. <client> AddModel <resultFile>      (last resort: separate result model)
+# <modelId> is the id AddModel returned; when the caller does not know it, it is
+# read with '<client> GetActiveModel' (again as in training.tcl).
 # A refusal is NOT fatal: the model stays loaded and the reason is appended to
 # <warningsVar>, so the caller prints a hint instead of failing the whole load.
 # Returns 1 when the result file was handed to HyperView, 0 otherwise.
-proc ::ModelLoader::Adapter::AttachResult {clientVar warningsVar resultPath reader} {
+proc ::ModelLoader::Adapter::AttachResult {clientVar warningsVar resultPath {modelId ""}} {
     upvar 1 $clientVar mlClient
     upvar 1 $warningsVar warnings
     set label [::ModelLoader::Logic::Basename $resultPath]
+    set why ""
 
-    if {$reader eq ""} {
-        set cmd  [list mlClient AddModel $resultPath]
-        set desc "AddModel <result> (auto reader)"
-    } else {
-        set cmd  [list mlClient AddModel $resultPath $reader]
-        set desc "AddModel <result> '$reader'"
+    if {$modelId eq "" || $modelId eq "0"} {
+        ::ModelLoader::Adapter::HvRun "GetActiveModel" \
+            {set modelId [mlClient GetActiveModel]}
     }
-    if {[::ModelLoader::Adapter::HvRun $desc $cmd]} { return 1 }
-    set why [::ModelLoader::State::GetLastError]
-
-    # second chance: attach through the active model handle
-    set attached 0
-    ::ModelLoader::Adapter::HvRun "GetActiveModel" \
-        {set mlResModelId [mlClient GetActiveModel]}
-    if {[info exists mlResModelId] && $mlResModelId ne "" && $mlResModelId ne "0"} {
-        if {[::ModelLoader::Adapter::HvRun "GetModelHandle (active)" \
-                {mlClient GetModelHandle mlResModel $mlResModelId}]} {
+    if {$modelId ne "" && $modelId ne "0"} {
+        if {[::ModelLoader::Adapter::HvRun "GetModelHandle" \
+                {mlClient GetModelHandle mlResModel $modelId}]} {
+            if {[::ModelLoader::Adapter::HvRun "SetResult" \
+                    [list mlResModel SetResult $resultPath]]} {
+                ::ModelLoader::Adapter::HvRun "release mlResModel" {mlResModel ReleaseHandle}
+                return 1
+            }
+            set why "model SetResult: [::ModelLoader::State::GetLastError]"
             if {[::ModelLoader::Adapter::HvRun "AddResultFile" \
                     [list mlResModel AddResultFile $resultPath]]} {
-                set attached 1
+                ::ModelLoader::Adapter::HvRun "release mlResModel" {mlResModel ReleaseHandle}
+                return 1
             }
-            ::ModelLoader::Adapter::HvRun "release mlResModel" \
-                {mlResModel ReleaseHandle}
+            set why "$why / model AddResultFile: [::ModelLoader::State::GetLastError]"
+            ::ModelLoader::Adapter::HvRun "release mlResModel" {mlResModel ReleaseHandle}
+        } else {
+            set why "GetModelHandle: [::ModelLoader::State::GetLastError]"
         }
+    } else {
+        set why "no model is loaded in the window"
     }
-    if {$attached} { return 1 }
 
-    lappend warnings "the result file '$label' could not be attached \
-(client AddModel / model AddResultFile were both refused: $why).  The model is \
-loaded - add the results with 'File > Load > Results' or fill in a suitable \
-reader label (V10)."
+    # last resort: let AddModel build a second model out of the result file
+    if {[::ModelLoader::Adapter::HvRun "AddModel <result>" \
+            [list mlClient AddModel $resultPath]]} { return 1 }
+
+    lappend warnings "the result file '$label' could not be attached to the loaded \
+model (model SetResult / model AddResultFile / client AddModel were all refused).  \
+The model is loaded - add the results with 'File > Load > Results'.  Reported: $why"
     return 0
 }
 
@@ -785,20 +827,39 @@ reader label (V10)."
 #   <resultPath> 'Input Result' file - result file          (may be empty)
 # At least one of the two has to be given; a path that is not an existing file
 # aborts the load before any hwi call (ok 0 + reason in the message).
+# FIX 2: no reader argument is needed any more - HyperView picks the reader from
+#        the file.  The trailing arguments of older callers (<modelReader>
+#        <resultReader>) are accepted and IGNORED.
 # What is loaded:
 #   model only      -> AddModel <model>
 #   result only     -> AddModel <result>  (HyperView builds the model from it)
 #   model + result  -> AddModel <model>, then Adapter::AttachResult (V10)
 # Returns dict: {ok <0|1> mode <text> files <list> models <n>
 #                warnings {text ...} message <text>}
-proc ::ModelLoader::Adapter::LoadInputs {winIdx modelPath modelReader \
-                                             resultPath resultReader} {
+proc ::ModelLoader::Adapter::LoadInputs {winIdx modelPath resultPath args} {
+    # Call compatibility (FIX 2): older callers used the signature
+    #   LoadInputs <winIdx> <modelPath> <modelReader> <resultPath> <resultReader>
+    # The reader arguments are gone, so such a call would hand the reader label
+    # in the <resultPath> slot and the real result path in <args>.  When the
+    # <resultPath> slot is empty or does not hold an existing file, but the
+    # first extra argument does, the old layout is assumed and repaired here -
+    # an extra argument never harms a caller that uses the new signature.
+    if {[llength $args] >= 1} {
+        set legacy [lindex $args 0]
+        if {[file exists $legacy] && \
+                ([string trim $resultPath] eq "" || ![file exists $resultPath])} {
+            ::ModelLoader::Adapter::Log \
+                "legacy LoadInputs call detected: result '$resultPath' -> '$legacy'"
+            set resultPath $legacy
+        }
+    }
     ::ModelLoader::State::ClearLastError
     set warnings {}
     set files    {}
     set modelCnt 0
     set mode     ""
     set pageIdx  ""
+    set mlModelId ""
 
     set ok 1
     if {$modelPath eq "" && $resultPath eq ""} {
@@ -836,39 +897,37 @@ proc ::ModelLoader::Adapter::LoadInputs {winIdx modelPath modelReader \
                     {mlWin GetClientHandle mlClient}] }
 
     # --- 1. the model file (if any) ------------------------------------------
+    # V5 - VERIFY: 'client AddModel <file>' is called with ONE argument, the
+    #      reader is detected by HyperView from the file itself (fix 2).  The
+    #      two argument form 'client AddModel <file> <readerLabel>' also exists,
+    #      but reader labels are installation specific, so this wizard never
+    #      passes one - that is why the 'Reader (optional)' entry was removed.
+    # FIX 2: 'AddModel <file>' without a reader - HyperView detects it and
+    #        answers with the id of the new model (see training.tcl:36).
     if {$ok && $modelPath ne ""} {
-        if {$modelReader eq ""} {
-            set ok [::ModelLoader::Adapter::HvRun "AddModel <model> (auto reader)" \
-                [list mlClient AddModel $modelPath]]
-        } else {
-            set ok [::ModelLoader::Adapter::HvRun "AddModel <model> '$modelReader'" \
-                [list mlClient AddModel $modelPath $modelReader]]
-        }
-        if {$ok} {
+        if {[::ModelLoader::Adapter::HvRun "AddModel <model>" \
+                {set mlModelId [mlClient AddModel $modelPath]}]} {
             lappend files $modelPath
             set mode "model"
+        } else {
+            set ok 0
         }
     }
     # --- 2. the result file (if any) -----------------------------------------
     if {$ok && $resultPath ne ""} {
         if {$mode eq ""} {
             # no model file: the result file has to bring its own mesh
-            if {$resultReader eq ""} {
-                set ok [::ModelLoader::Adapter::HvRun \
-                    "AddModel <result> (auto reader)" \
-                    [list mlClient AddModel $resultPath]]
-            } else {
-                set ok [::ModelLoader::Adapter::HvRun \
-                    "AddModel <result> '$resultReader'" \
-                    [list mlClient AddModel $resultPath $resultReader]]
-            }
-            if {$ok} {
+            if {[::ModelLoader::Adapter::HvRun "AddModel <result>" \
+                    {set mlModelId [mlClient AddModel $resultPath]}]} {
                 lappend files $resultPath
                 set mode "result"
+            } else {
+                set ok 0
             }
         } else {
+            # FIX 2: attach the results to the model that is already loaded
             if {[::ModelLoader::Adapter::AttachResult mlClient warnings \
-                    $resultPath $resultReader]} {
+                    $resultPath $mlModelId]} {
                 lappend files $resultPath
                 set mode "$mode+result"
             }
@@ -890,8 +949,7 @@ proc ::ModelLoader::Adapter::LoadInputs {winIdx modelPath modelReader \
     set primary [expr {$modelPath ne "" ? $modelPath : $resultPath}]
     ::ModelLoader::State::WindowInit $winIdx \
         page $pageIdx file $primary name [file tail $primary] loaded 1 \
-        reader $modelReader modelFile $modelPath modelReader $modelReader \
-        resultFile $resultPath resultReader $resultReader
+        modelFile $modelPath resultFile $resultPath modelId $mlModelId
     return [dict create ok 1 mode $mode files $files models $modelCnt \
         warnings $warnings message ""]
 }
@@ -1032,9 +1090,11 @@ proc ::ModelLoader::Adapter::RefreshWindowResults {winIdx} {
 }
 
 # Load <path> into window <winIdx> and immediately re-read its result tree.
+# The reader is auto detected (fix 2); a trailing reader argument of older
+# callers is accepted and ignored.
 # Returns the dict of RefreshWindowResults (ok 0 when the load itself failed).
-proc ::ModelLoader::Adapter::LoadAndRefresh {winIdx path reader} {
-    if {![::ModelLoader::Adapter::LoadModel $winIdx $path $reader]} {
+proc ::ModelLoader::Adapter::LoadAndRefresh {winIdx path args} {
+    if {![::ModelLoader::Adapter::LoadModel $winIdx $path]} {
         return [dict create ok 0 models 0 files {} subcases {} simulations {} \
             datatypes {} components {} current "" \
             message [::ModelLoader::State::GetLastError]]
@@ -1044,12 +1104,12 @@ proc ::ModelLoader::Adapter::LoadAndRefresh {winIdx path reader} {
 
 # Load BOTH step-1 inputs into <winIdx> and immediately re-read the window, so
 # that the result tree of the info pane is up to date.
+# The readers are auto detected (fix 2); the trailing reader arguments of older
+# callers are accepted and ignored.
 # Returns the dict of RefreshWindowResults, extended by the LoadInputs keys
 # "mode" and "warnings" (non fatal problems, e.g. a refused result attach).
-proc ::ModelLoader::Adapter::LoadAllAndRefresh {winIdx modelPath modelReader \
-                                                      resultPath resultReader} {
-    set res [::ModelLoader::Adapter::LoadInputs $winIdx $modelPath $modelReader \
-                                                   $resultPath $resultReader]
+proc ::ModelLoader::Adapter::LoadAllAndRefresh {winIdx modelPath resultPath args} {
+    set res [::ModelLoader::Adapter::LoadInputs $winIdx $modelPath $resultPath {*}$args]
     if {![dict get $res ok]} {
         return [dict create ok 0 models 0 files {} subcases {} simulations {} \
             datatypes {} components {} current "" mode [dict get $res mode] \
@@ -1203,7 +1263,6 @@ namespace eval ::ModelLoader::UI {
     variable wFile        ""   ;# kept: points at the 'Input Model' widget
     variable wModelFile   ""
     variable wResultFile  ""
-    variable wReader      ""
     variable wModelInfo   ""
     variable wSubcase     ""
     variable wSimulation  ""
@@ -1222,7 +1281,6 @@ namespace eval ::ModelLoader::UI {
     variable varFile        ""       ;# primary file, mirrors varModelFile
     variable varModelFile   ""
     variable varResultFile  ""
-    variable varReader      ""
     variable varModelInfo   ""
     variable varSubcase     ""
     variable varSimulation  {<default>}
@@ -1273,10 +1331,26 @@ proc ::ModelLoader::UI::SetComboValues {widget values} {
     }
     return 1
 }
+# Writes <value> into a combobox / entry widget and reports whether it worked.
+# BUG FIX 1: '$widget set <value>' is the ttk way and works for ttk::combobox,
+# but it is not guaranteed on every hwtk build.  The fallbacks below prevent the
+# field from silently showing something else: an hwtk combobox that ignores
+# 'set' would keep displaying the FIRST entry of its '-values' list, which for
+# the window-count box is exactly "1" (the value that "jumped back").
 proc ::ModelLoader::UI::SetWidgetValue {widget value} {
-    if {$widget eq "" || ![winfo exists $widget]} { return }
-    catch { $widget set $value }
-    return
+    if {$widget eq "" || ![winfo exists $widget]} { return 0 }
+    if {![catch { $widget set $value }]} { return 1 }
+    # combobox: select the matching entry by its index
+    set values {}
+    catch { set values [$widget cget -values] }
+    set idx [lsearch -exact $values $value]
+    if {$idx >= 0 && ![catch { $widget current $idx }]} { return 1 }
+    # entry-like widget: replace the content
+    if {![catch { $widget delete 0 end }]} {
+        if {![catch { $widget insert 0 $value }]} { return 1 }
+    }
+    ::ModelLoader::Adapter::Log "cannot write '$value' into the widget $widget"
+    return 0
 }
 # Reads the LIVE content of a widget ('get'), falling back to <default> when the
 # widget does not exist or does not understand 'get'.
@@ -1306,16 +1380,24 @@ proc ::ModelLoader::UI::ReadWindowCount {} {
 # Writes <n> into the variable AND into the combobox and makes sure <n> is one
 # of the offered values - so the number the user typed can never be dropped and
 # the field can never silently fall back to 1.
+# BUG FIX 1: (a) a value that is not a positive integer is refused here instead
+# of being stored - that keeps 'lastGoodWindowCount' intact, which
+# OnWindowCountChanged falls back to; (b) '-values' is only reconfigured when
+# <n> is not offered yet, because every needless 'configure -values' is a chance
+# for the widget to lose the current selection (and to show its first entry = 1).
 proc ::ModelLoader::UI::SetWindowCountValue {n} {
     variable wWindowCount
     variable varWindowCount
     variable lastGoodWindowCount
+    if {![string is integer -strict $n] || $n < 1} { return $n }
     set varWindowCount $n
     set lastGoodWindowCount $n
     if {$wWindowCount ne "" && [winfo exists $wWindowCount]} {
         set values [::ModelLoader::Logic::WindowCountChoices]
-        if {[lsearch -exact $values $n] < 0} { lappend values $n }
-        ::ModelLoader::UI::SetComboValues $wWindowCount $values
+        if {[lsearch -exact $values $n] < 0} {
+            lappend values $n
+            ::ModelLoader::UI::SetComboValues $wWindowCount $values
+        }
     }
     ::ModelLoader::UI::SetWidgetValue $wWindowCount $n
     return $n
@@ -1717,11 +1799,9 @@ proc ::ModelLoader::UI::BuildStep1 {} {
     variable wFile
     variable wModelFile
     variable wResultFile
-    variable wReader
     variable varFile
     variable varModelFile
     variable varResultFile
-    variable varReader
 
     # --- active page layout --------------------------------------------------
     set lf [hwtk::labelframe $wStep1.layout -text " Active page layout " -padding 4]
@@ -1742,7 +1822,9 @@ proc ::ModelLoader::UI::BuildStep1 {} {
     foreach ev {<<ComboboxSelected>> <Return> <FocusOut>} {
         catch { bind $lf.cb $ev { ::ModelLoader::UI::OnWindowCountChanged } }
     }
-    # the field shows what the script really has (never a stale variable value)
+    # the field shows what the script really has (never a stale variable value);
+    # an unreadable field is left alone - SetWindowCountValue ignores garbage
+    # instead of blanking the box (bug 1 fix)
     catch { bind $lf.cb <Map> { ::ModelLoader::UI::SetWindowCountValue \
         [::ModelLoader::UI::ReadWindowCount] } }
     hwtk::button $lf.apply -text "Apply layout" -command ::ModelLoader::UI::OnApplyLayout
@@ -1796,16 +1878,14 @@ proc ::ModelLoader::UI::BuildStep1 {} {
         ::ModelLoader::UI::varResultFile $resultTypes result]
     grid $lf2.resultBrowse -row 2 -column 2 -sticky w -padx 6 -pady 2
 
-    hwtk::label $lf2.l3 -text "Reader (optional):" -width 26 -anchor w
-    grid $lf2.l3 -row 3 -column 0 -sticky w -padx 2 -pady 2
-    # V5 - VERIFY: 'client AddModel <file> <readerLabel>' needs the exact reader
-    #      label of the installation.  Leave this empty to let HyperView pick the
-    #      reader from the file extension; fill it in (for example
-    #      "Nastran OP2 Reader") when auto detection picks the wrong one.
-    #      It is used for the model file and for the result file.
-    set wReader [hwtk::entry $lf2.reader -width 40 \
-        -textvariable ::ModelLoader::UI::varReader]
-    grid $lf2.reader -row 3 -column 1 -sticky ew -padx 2 -pady 2
+    # --- the load button ------------------------------------------------------
+    # FIX 2: there is NO reader field any more - 'AddModel <file>' lets
+    # HyperView detect the reader from the file, so the user only picks the two
+    # files.  (Logic::ReaderHint is still shown in the status line as a hint,
+    # it is never handed to HyperView.)
+    hwtk::label $lf2.l3 -anchor w -justify left \
+        -text "The reader is detected automatically from the file."
+    grid $lf2.l3 -row 3 -column 0 -columnspan 2 -sticky w -padx 2 -pady 2
     hwtk::button $lf2.load -text "Load into window" -command ::ModelLoader::UI::OnLoadModel
     grid $lf2.load -row 3 -column 2 -sticky w -padx 6 -pady 2
 
@@ -2102,11 +2182,13 @@ proc ::ModelLoader::UI::OnDataTypeChanged {} {
 
 #--------------------------------- step 1 actions -----------------------------
 proc ::ModelLoader::UI::OnApplyLayout {} {
-    # BUG FIX: the number is taken from the WIDGET first (see UI::ReadWindowCount).
-    # Reading only the Tcl variable could apply a default instead of the value
-    # the user picked, and the following UI::RefreshWindowList used to overwrite
-    # the field with the first entry of the list (=1) whenever the active page
-    # still showed fewer windows than requested.
+    # BUG FIX 1: the number is taken from the WIDGET first (see
+    # UI::ReadWindowCount) and the result of the layout change is read back from
+    # HyperView - the field must never show something the page does not have.
+    # Before the fix Adapter::QueryPage counted the windows with 'llength', which
+    # turned the numeric answer of 'page GetNumberOfWindows' (e.g. "4", compare
+    # _tmp_hv/batchImportOdb.tcl) into 1 - so every layout change seemed to end
+    # with a single window and the wizard tried token after token.
     set wanted [::ModelLoader::UI::ReadWindowCount]
     if {$wanted eq ""} {
         set raw [string trim [::ModelLoader::UI::WidgetText \
@@ -2137,12 +2219,19 @@ proc ::ModelLoader::UI::OnApplyLayout {} {
     } else {
         ::ModelLoader::UI::SetStatus "Layout applied: $wanted window(s), token '[dict get $res layout]'."
     }
-    # write the applied value back into variable AND widget, then refresh
-    ::ModelLoader::UI::SetWindowCountValue $wanted
+    # BUG FIX 1: write back what HyperView really has now (InterpretWindowCount
+    # keeps 'windows' a plain number - a scalar '4' or the list '1 2 3 4' both
+    # end up as 4) and touch '-values' only when the number is not offered yet.
+    set real [::ModelLoader::Logic::InterpretWindowCount [dict get $res windows]]
+    if {$real < 1} { set real $wanted }
+    ::ModelLoader::UI::SetWindowCountValue $real
     # windows that do not exist any more lose their recorded state
-    ::ModelLoader::State::PruneTo [dict get $res windows]
+    ::ModelLoader::State::PruneTo $real
     ::ModelLoader::UI::RefreshWindowList
-    ::ModelLoader::UI::SetWindowCountValue $wanted
+    # RefreshWindowList rebuilds the target-window list, so the applied count is
+    # written into the window-count field once more - this is the LAST write of
+    # a layout action, nothing may reset it to 1 afterwards.
+    ::ModelLoader::UI::SetWindowCountValue $real
     return
 }
 proc ::ModelLoader::UI::OnRefreshPage {} {
@@ -2163,7 +2252,6 @@ proc ::ModelLoader::UI::OnLoadModel {} {
     variable varModelFile
     variable varResultFile
     variable varFile
-    variable varReader
     variable varTargetWin
 
     # 1. read what the user (or a browser) put into the two fields ------------
@@ -2215,23 +2303,23 @@ proc ::ModelLoader::UI::OnLoadModel {} {
     set varFile [expr {$modelPath ne "" ? $modelPath : $resultPath}]
 
     # 3. load model and/or result into the selected window --------------------
+    # FIX 2: no reader is passed any more - 'AddModel <file>' detects it (V5).
     ::ModelLoader::UI::SetStatus "Loading into window $winIdx ..."
     catch { update idletasks }
-    set res [::ModelLoader::Adapter::LoadAllAndRefresh $winIdx $modelPath $varReader \
-                                                              $resultPath $varReader]
+    set res [::ModelLoader::Adapter::LoadAllAndRefresh $winIdx $modelPath $resultPath]
     if {![dict get $res ok]} {
         ::ModelLoader::UI::AppendInfo [list "" "LOAD INTO WINDOW $winIdx" \
             "  model  : [expr {$modelPath  eq "" ? {<none>} : $modelPath}]" \
             "  result : [expr {$resultPath eq "" ? {<none>} : $resultPath}]" \
             "  FAILED : [dict get $res message]" \
-            "  hint   : if HyperView picked the wrong reader, type the exact reader \
-label into 'Reader (optional)' and load again"]
+            "  hint   : check that the file is readable and that its format is \
+supported - the reader is detected automatically from the file"]
         ::ModelLoader::UI::SetStatus "Loading failed: [dict get $res message]"
     } else {
         set lines [list "" "LOAD INTO WINDOW $winIdx" \
             "  model   : [expr {$modelPath  eq "" ? {<none>} : $modelPath}]" \
             "  result  : [expr {$resultPath eq "" ? {<none>} : $resultPath}]" \
-            "  reader  : [expr {$varReader eq "" ? {<auto detected>} : $varReader}]" \
+            "  reader  : auto detected from the file (no reader entry needed)" \
             "  mode    : [dict get $res mode]   models/further files: [dict get $res models] \
 [dict get $res files]" \
             "  subcase : [llength [dict get $res subcases]]" \

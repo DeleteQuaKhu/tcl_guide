@@ -12,9 +12,11 @@
 #  Exit:  0 = every check passed, 1 = at least one check failed.
 #=============================================================================
 set ::fails 0
+set ::oks   0
 
 proc check {label condition} {
     if {[expr {$condition}]} {
+        incr ::oks
         puts "  ok   : $label"
     } else {
         puts "  FAIL : $label"
@@ -23,6 +25,7 @@ proc check {label condition} {
 }
 proc checkEqual {label expected actual} {
     if {$expected eq $actual} {
+        incr ::oks
         puts "  ok   : $label"
     } else {
         puts "  FAIL : $label (expected '$expected', got '$actual')"
@@ -52,7 +55,8 @@ foreach p {
     ::ModelLoader::State::SetLayoutToken ::ModelLoader::State::GetLayoutToken
     ::ModelLoader::State::SetLastError ::ModelLoader::State::GetLastError
     ::ModelLoader::State::ResetAll
-    ::ModelLoader::Logic::LayoutCandidates ::ModelLoader::Logic::MakeSpec
+    ::ModelLoader::Logic::LayoutCandidates ::ModelLoader::Logic::InterpretWindowCount
+    ::ModelLoader::Logic::MakeSpec
     ::ModelLoader::Logic::FanOutSpec ::ModelLoader::Logic::ResultSummary
     ::ModelLoader::Logic::WindowSummary ::ModelLoader::Logic::Subcases
     ::ModelLoader::Logic::SubcaseLabels ::ModelLoader::Logic::SubcaseLabel
@@ -92,7 +96,7 @@ checkEqual "debug switch initialised" 0 $::ModelLoader::debug
 # fake-hwi scenarios of section 4b, because those need an empty State.
 proc seedState {} {
     ::ModelLoader::State::ResetAll
-    ::ModelLoader::State::WindowInit 1 page 0 file {C:/x/model.h3d} reader {} \
+    ::ModelLoader::State::WindowInit 1 page 0 file {C:/x/model.h3d} \
         name model.h3d loaded 1 \
         subcases {{1 {Subcase 1}} {2 {Subcase 2}}} \
         simulations [dict create 1 [list {Sim 1} {Sim 2}]] \
@@ -113,8 +117,8 @@ checkEqual "WindowExists free slot"      0         [::ModelLoader::State::Window
 checkEqual "LoadedWindows"               {1 2}     [::ModelLoader::State::LoadedWindows]
 checkEqual "WindowIndices"               {1 2 3}   [::ModelLoader::State::WindowIndices]
 checkEqual "AnyModelLoaded"              1         [::ModelLoader::State::AnyModelLoaded]
-checkEqual "WindowSet writes"            X         [::ModelLoader::State::WindowSet 3 reader X]
-checkEqual "WindowSet is readable"       X         [::ModelLoader::State::WindowGet 3 reader]
+checkEqual "WindowSet writes"            X         [::ModelLoader::State::WindowSet 3 note X]
+checkEqual "WindowSet is readable"       X         [::ModelLoader::State::WindowGet 3 note]
 checkEqual "PruneTo returns the drop list" {3}     [::ModelLoader::State::PruneTo 2]
 checkEqual "pruned window is gone"       0         [::ModelLoader::State::WindowExists 3]
 checkEqual "last error round trip"       hello     [::ModelLoader::State::SetLastError hello]
@@ -177,6 +181,29 @@ foreach want {2x2 1x4 4x1 4} {
     check "LayoutCandidates 4 contains $want" [expr {[lsearch -exact $cand $want] >= 0}]
 }
 checkEqual "LayoutCandidates is unique" [llength $cand] [llength [lsort -unique $cand]]
+
+# --- fix 1: the window count of '<page> GetNumberOfWindows' -----------------
+# Real HyperView answers with a NUMBER ('for {set i 0} {$i <
+# [$page GetNumberOfWindows]} {incr i}', see batchImportOdb.tcl), some builds
+# hand out the LIST of window indices.  Counting the answer with 'llength' made
+# every page look like it had ONE window - the reason why the window count of
+# the wizard jumped back to 1 after 'Apply layout'.
+checkEqual "InterpretWindowCount on the scalar 4" 4 \
+    [::ModelLoader::Logic::InterpretWindowCount 4]
+checkEqual "InterpretWindowCount on the scalar '4'" 4 \
+    [::ModelLoader::Logic::InterpretWindowCount "4"]
+checkEqual "InterpretWindowCount on '1 2 3 4'" 4 \
+    [::ModelLoader::Logic::InterpretWindowCount {1 2 3 4}]
+checkEqual "InterpretWindowCount on the scalar 1" 1 \
+    [::ModelLoader::Logic::InterpretWindowCount 1]
+checkEqual "InterpretWindowCount ignores surrounding blanks" 4 \
+    [::ModelLoader::Logic::InterpretWindowCount " 4 "]
+checkEqual "InterpretWindowCount on an empty answer" 0 \
+    [::ModelLoader::Logic::InterpretWindowCount ""]
+checkEqual "InterpretWindowCount is NOT llength" 4 \
+    [expr {[::ModelLoader::Logic::InterpretWindowCount 4] != [llength 4] ? 4 : 0}]
+check "InterpretWindowCount never returns a negative count" \
+    [expr {[::ModelLoader::Logic::InterpretWindowCount -1] >= 0}]
 
 checkEqual "ModelName"       model.h3d [::ModelLoader::Logic::ModelName 1]
 checkEqual "Subcases"        {{1 {Subcase 1}} {2 {Subcase 2}}} \
@@ -253,26 +280,35 @@ checkEqual "LoadAndRefresh failure message" 1 \
         [::ModelLoader::Adapter::LoadAndRefresh 1 {C:/nope.h3d} {}] message]] > 0}]
 
 # --- the two-input loader (fix 2) -------------------------------------------
-set twoEmpty [::ModelLoader::Adapter::LoadInputs 1 "" "" "" ""]
+# FIX 2: the reader arguments are gone - 'LoadInputs <winIdx> <model> <result>'.
+set twoEmpty [::ModelLoader::Adapter::LoadInputs 1 "" ""]
 checkEqual "LoadInputs refuses two empty fields" 0 [dict get $twoEmpty ok]
 check "LoadInputs explains the empty input" \
     [string match "*Neither 'Input Model' nor 'Input Result'*" \
         [dict get $twoEmpty message]]
-set twoBadModel [::ModelLoader::Adapter::LoadInputs 1 {C:/nope/part.inp} "" {C:/nope/part.res} ""]
+set twoBadModel [::ModelLoader::Adapter::LoadInputs 1 {C:/nope/part.inp} {C:/nope/part.res}]
 checkEqual "LoadInputs refuses a missing model file" 0 [dict get $twoBadModel ok]
 check "LoadInputs names the missing model file" \
     [string match "*model file does not exist*" [dict get $twoBadModel message]]
-set twoBadRes [::ModelLoader::Adapter::LoadInputs 1 "" "" {C:/nope/part.res} ""]
+set twoBadRes [::ModelLoader::Adapter::LoadInputs 1 "" {C:/nope/part.res}]
 checkEqual "LoadInputs refuses a missing result file" 0 [dict get $twoBadRes ok]
 check "LoadInputs names the missing result file" \
     [string match "*result file does not exist*" [dict get $twoBadRes message]]
-set twoGood [::ModelLoader::Adapter::LoadInputs 1 $wizard "" $wizard ""]
+set twoGood [::ModelLoader::Adapter::LoadInputs 1 $wizard $wizard]
 checkEqual "LoadInputs reaches hwi with two existing files (and fails there)" 0 \
     [dict get $twoGood ok]
 check "LoadInputs reported the missing hwi" \
     [expr {[string length [dict get $twoGood message]] > 0}]
 checkEqual "LoadInputs returns the warnings key" {} [dict get $twoGood warnings]
-set twoAll [::ModelLoader::Adapter::LoadAllAndRefresh 1 "" "" "" ""]
+# an old-style call (with the two reader arguments) must still work: the reader
+# slots are ignored, a real result path hiding in them is rescued (the
+# observable proof is the 'legacy' check in the hwtk-stub section below)
+set twoLegacy [::ModelLoader::Adapter::LoadInputs 1 {C:/nope/part.inp} {Some Reader} {C:/nope/part.res} ""]
+checkEqual "a legacy call with reader arguments is still accepted" 0 \
+    [dict get $twoLegacy ok]
+check "the legacy call still names the missing model file" \
+    [string match "*model file does not exist*" [dict get $twoLegacy message]]
+set twoAll [::ModelLoader::Adapter::LoadAllAndRefresh 1 "" ""]
 checkEqual "LoadAllAndRefresh propagates the refusal" 0 [dict get $twoAll ok]
 checkEqual "LoadAllAndRefresh keeps the warnings key" {} [dict get $twoAll warnings]
 
@@ -290,7 +326,9 @@ namespace eval ::fake {
     variable models {}
     variable rejectResultViaAddModel 0
     variable attachOk 1
+    variable setResultOk 1
     variable win 4
+    variable listWindows 0
 }
 # every method call is logged as {<handle> <method> <args...>}
 proc ::fake::Find {method} {
@@ -316,7 +354,16 @@ proc ::fake::Object {name method args} {
         }
         ReleaseHandle      { return 1 }
         GetActivePage      { return 0 }
-        GetNumberOfWindows { return [lrange {1 2 3 4 5 6 7 8} 0 [expr {$::fake::win - 1}]] }
+        GetNumberOfWindows {
+            # HyperView answers with a NUMBER ('for {set i 0} {$i <
+            # [$page GetNumberOfWindows]} {incr i}', see batchImportOdb.tcl).
+            # ::fake::listWindows models a build that hands out the list of
+            # window indices instead - both have to give the same count (fix 1).
+            if {$::fake::listWindows} {
+                return [lrange {1 2 3 4 5 6 7 8 9 10 11 12} 0 [expr {$::fake::win - 1}]]
+            }
+            return $::fake::win
+        }
         GetLayout          { return "1x$::fake::win" }
         AddModel {
             set file   [lindex $args 0]
@@ -328,6 +375,13 @@ proc ::fake::Object {name method args} {
             }
             lappend models [list $file $reader]
             return [llength $models]
+        }
+        SetResult {
+            # FIX 2 (V10): this is how a result file is attached to the model
+            # that is already in the window - 'AddModel <result>' cannot do it.
+            if {!$::fake::setResultOk} { error "SetResult is not available" }
+            lappend models [list [lindex $args 0] ""]
+            return 1
         }
         AddResultFile {
             if {!$::fake::attachOk} { error "AddResultFile is not available" }
@@ -355,14 +409,44 @@ proc hwi {args} {
     error "fake hwi: unknown call '$args'"
 }
 
+# --- scenario 0 (fix 1): reading the window count of the active page --------
+# 'GetNumberOfWindows' answers with a NUMBER.  The old code counted that answer
+# with 'llength' - which is 1 for every scalar - and so the wizard snapped back
+# to 1 window after 'Apply layout'.  Both answer forms are covered here.
+set ::fake::listWindows 0
+set ::fake::win 4
+set pageInfo [::ModelLoader::Adapter::QueryPage]
+checkEqual "fix 1: a scalar GetNumberOfWindows is read as a number" 4 \
+    [dict get $pageInfo windows]
+checkEqual "fix 1: the page index is read" 0 [dict get $pageInfo page]
+checkEqual "fix 1: the layout token is read" "1x4" [dict get $pageInfo layout]
+set ::fake::listWindows 1
+checkEqual "fix 1: a list GetNumberOfWindows counts its windows" 4 \
+    [dict get [::ModelLoader::Adapter::QueryPage] windows]
+set ::fake::listWindows 0
+set ::fake::win 1
+checkEqual "fix 1: one window stays one window" 1 \
+    [dict get [::ModelLoader::Adapter::QueryPage] windows]
+set ::fake::win 4
+# the same number has to come out of the layout routine (V1): the page already
+# has 4 windows, so nothing is changed and the count is NOT reduced to 1
+set lInfo [::ModelLoader::Adapter::SetWindowCount 4]
+checkEqual "fix 1: SetWindowCount 4 leaves the layout untouched" 1 \
+    [dict get $lInfo unchanged]
+checkEqual "fix 1: SetWindowCount 4 reports 4 windows" 4 [dict get $lInfo windows]
+
 # --- scenario 1: model only -------------------------------------------------
 ::ModelLoader::State::ResetAll
 set ::fake::calls {}
 set ::fake::models {}
-set resM [::ModelLoader::Adapter::LoadInputs 1 $wizard "" "" ""]
+set resM [::ModelLoader::Adapter::LoadInputs 1 $wizard ""]
 checkEqual "model only: the load succeeds" 1 [dict get $resM ok]
 checkEqual "model only: mode" "model" [dict get $resM mode]
 checkEqual "model only: exactly one AddModel call" 1 [llength [::fake::Find AddModel]]
+# FIX 2: the call is 'AddModel <file>' - no reader is passed any more
+checkEqual "model only: AddModel got exactly one argument" 3 \
+    [llength [lindex [::fake::Find AddModel] 0]]
+checkEqual "model only: no SetResult was needed" 0 [llength [::fake::Find SetResult]]
 checkEqual "model only: AddModel got the file" $wizard \
     [lindex [lindex [::fake::Find AddModel] 0] 2]
 checkEqual "model only: state keeps modelFile" $wizard \
@@ -375,47 +459,62 @@ checkEqual "model only: the window is marked as loaded" 1 \
 set pureRes [file join $here _selftest_pure.res]
 set fhRes [open $pureRes w] ; puts $fhRes "dummy" ; close $fhRes
 
-# --- scenario 2: model + result, AddModel attaches the result ---------------
+# --- scenario 2: model + result - the result is attached with SetResult -----
+# FIX 2 (V10): the old code called 'AddModel <result> <reader>' as the FIRST
+# attempt, which cannot attach a result to a model that is already in the window
+# - that is why the result never showed up.  '<model> SetResult <file>' (the
+# order Altair's own training.tcl uses) is tried first now.
 ::ModelLoader::State::ResetAll
 set ::fake::calls {}
 set ::fake::models {}
 set ::fake::rejectResultViaAddModel 0
-set resBoth [::ModelLoader::Adapter::LoadInputs 1 $wizard "My Reader" $pureRes ""]
+set ::fake::setResultOk 1
+set ::fake::attachOk 1
+set resBoth [::ModelLoader::Adapter::LoadInputs 1 $wizard $pureRes]
 checkEqual "model+result: the load succeeds" 1 [dict get $resBoth ok]
 checkEqual "model+result: mode" "model+result" [dict get $resBoth mode]
-checkEqual "model+result: two AddModel calls" 2 [llength [::fake::Find AddModel]]
-checkEqual "model+result: no AddResultFile was needed" 0 \
+checkEqual "model+result: ONE AddModel call (the model)" 1 \
+    [llength [::fake::Find AddModel]]
+checkEqual "model+result: no reader is passed to AddModel" 3 \
+    [llength [lindex [::fake::Find AddModel] 0]]
+checkEqual "model+result: the result goes through <model> SetResult" 1 \
+    [llength [::fake::Find SetResult]]
+checkEqual "model+result: SetResult got the result file" $pureRes \
+    [lindex [lindex [::fake::Find SetResult] 0] 2]
+checkEqual "model+result: AddResultFile was not needed" 0 \
     [llength [::fake::Find AddResultFile]]
-checkEqual "model+result: the reader was passed on" "My Reader" \
-    [lindex [lindex [::fake::Find AddModel] 0] 3]
+checkEqual "model+result: the model was looked up with GetModelHandle" 1 \
+    [llength [::fake::Find GetModelHandle]]
 checkEqual "model+result: no warnings" {} [dict get $resBoth warnings]
 checkEqual "model+result: state keeps both files" [list $wizard $pureRes] \
     [list [::ModelLoader::State::WindowGet 1 modelFile] \
           [::ModelLoader::State::WindowGet 1 resultFile]]
-checkEqual "model+result: state keeps both readers" [list "My Reader" ""] \
-    [list [::ModelLoader::State::WindowGet 1 modelReader] \
-          [::ModelLoader::State::WindowGet 1 resultReader]]
 
-# --- scenario 3: the result goes through <model> AddResultFile (V10) --------
+# --- scenario 3: fallback <model> AddResultFile (V10) -----------------------
 ::ModelLoader::State::ResetAll
 set ::fake::calls {}
 set ::fake::models {}
 set ::fake::rejectResultViaAddModel 1
+set ::fake::setResultOk 0
 set ::fake::attachOk 1
-set resFall [::ModelLoader::Adapter::LoadInputs 1 $wizard "" $pureRes ""]
+set resFall [::ModelLoader::Adapter::LoadInputs 1 $wizard $pureRes]
 checkEqual "fallback: the load still succeeds" 1 [dict get $resFall ok]
 checkEqual "fallback: mode" "model+result" [dict get $resFall mode]
+checkEqual "fallback: SetResult was tried first" 1 [llength [::fake::Find SetResult]]
 checkEqual "fallback: AddResultFile was used once" 1 \
     [llength [::fake::Find AddResultFile]]
+checkEqual "fallback: no AddModel <result> was needed" 1 \
+    [llength [::fake::Find AddModel]]
 checkEqual "fallback: no warning" {} [dict get $resFall warnings]
 
-# --- scenario 4: both attach forms refused -> warning, model stays ----------
+# --- scenario 4: everything refused -> warning, the model stays loaded ------
 ::ModelLoader::State::ResetAll
 set ::fake::calls {}
 set ::fake::models {}
 set ::fake::rejectResultViaAddModel 1
+set ::fake::setResultOk 0
 set ::fake::attachOk 0
-set resWarn [::ModelLoader::Adapter::LoadInputs 1 $wizard "" $pureRes ""]
+set resWarn [::ModelLoader::Adapter::LoadInputs 1 $wizard $pureRes]
 checkEqual "warning path: the model load is still a success" 1 [dict get $resWarn ok]
 checkEqual "warning path: mode stays 'model'" "model" [dict get $resWarn mode]
 checkEqual "warning path: exactly one warning" 1 \
@@ -431,8 +530,9 @@ checkEqual "warning path: the model is still recorded" 1 \
 set ::fake::calls {}
 set ::fake::models {}
 set ::fake::rejectResultViaAddModel 0
+set ::fake::setResultOk 1
 set ::fake::attachOk 1
-set resOnly [::ModelLoader::Adapter::LoadInputs 1 "" "" $pureRes ""]
+set resOnly [::ModelLoader::Adapter::LoadInputs 1 "" $pureRes]
 checkEqual "result only: the load succeeds" 1 [dict get $resOnly ok]
 checkEqual "result only: mode" "result" [dict get $resOnly mode]
 checkEqual "result only: one AddModel call" 1 [llength [::fake::Find AddModel]]
@@ -443,17 +543,38 @@ checkEqual "result only: state marks the result file" $pureRes \
 checkEqual "result only: 'file' falls back to the result file" $pureRes \
     [::ModelLoader::State::WindowGet 1 file]
 
+# --- an old-style call with reader arguments still finds the result ---------
+# FIX 2: 'LoadInputs <win> <model> <modelReader> <result> <resultReader>' has to
+# keep working - the reader slots are ignored, a real path in them is rescued.
+::ModelLoader::State::ResetAll
+set ::fake::calls {}
+set ::fake::models {}
+set ::fake::rejectResultViaAddModel 0
+set ::fake::setResultOk 1
+set resLegacy [::ModelLoader::Adapter::LoadInputs 1 $wizard {My Reader} $pureRes ""]
+checkEqual "legacy: the load succeeds" 1 [dict get $resLegacy ok]
+checkEqual "legacy: mode is model+result (the result path was rescued)" \
+    "model+result" [dict get $resLegacy mode]
+checkEqual "legacy: the result really went through SetResult" $pureRes \
+    [lindex [lindex [::fake::Find SetResult] 0] 2]
+
 # --- scenario 6: LoadAllAndRefresh carries mode + warnings into the tree ----
 ::ModelLoader::State::ResetAll
 set ::fake::calls {}
 set ::fake::models {}
-set resTree [::ModelLoader::Adapter::LoadAllAndRefresh 1 $wizard "" $pureRes ""]
+set ::fake::setResultOk 1
+set resTree [::ModelLoader::Adapter::LoadAllAndRefresh 1 $wizard $pureRes]
 checkEqual "LoadAllAndRefresh: the window read succeeds" 1 [dict get $resTree ok]
 checkEqual "LoadAllAndRefresh: mode is carried over" "model+result" \
     [dict get $resTree mode]
 checkEqual "LoadAllAndRefresh: the warnings key is carried over" {} \
     [dict get $resTree warnings]
 checkEqual "LoadAllAndRefresh: both models are seen" 2 [dict get $resTree models]
+# the old signature (with the two reader arguments) is still accepted
+set resTreeOld [::ModelLoader::Adapter::LoadAllAndRefresh 1 $wizard "" $pureRes ""]
+checkEqual "LoadAllAndRefresh: old-style call is accepted" 1 [dict get $resTreeOld ok]
+checkEqual "LoadAllAndRefresh: old-style call keeps mode" "model+result" \
+    [dict get $resTreeOld mode]
 
 file delete $pureRes
 # leave no trace of the fake API / fake handles
@@ -572,6 +693,7 @@ for {set i 0} {$i < [llength $lines]} {incr i} {
 checkEqual "every hwi call sits inside the adapter section" {} $leaked
 
 puts "======================================================================"
+puts " source test   : $::oks passed, $::fails failed"
 if {$::fails == 0} {
     puts "ALL CHECKS PASSED"
     exit 0

@@ -232,7 +232,11 @@ ok "'Input Model' field exists"          [exists .modelLoaderGUI.recess.body.ste
 ok "'Input Model' browse button exists"  [exists .modelLoaderGUI.recess.body.step1.load.modelBrowse]
 ok "'Input Result' field exists"         [exists .modelLoaderGUI.recess.body.step1.load.result]
 ok "'Input Result' browse button exists" [exists .modelLoaderGUI.recess.body.step1.load.resultBrowse]
-ok "reader entry exists"                 [exists .modelLoaderGUI.recess.body.step1.load.reader]
+ok "the reader entry is gone (fix 2)" \
+    [expr {[exists .modelLoaderGUI.recess.body.step1.load.reader] ? 0 : 1}]
+ok "an auto-detection note is shown instead" \
+    [string match "*detected automatically*" \
+        [textof .modelLoaderGUI.recess.body.step1.load.l3]]
 ok "step 1 load button exists"           [exists .modelLoaderGUI.recess.body.step1.load.load]
 ok "step 2 contour labelframe exists"    [exists .modelLoaderGUI.recess.body.step2.contour]
 ok "subcase combobox exists"             [exists .modelLoaderGUI.recess.body.step2.contour.subcase]
@@ -265,7 +269,7 @@ sec "4 - step 2 with a fabricated result tree (no hwi needed)"
 # window 1 : two subcases, one with two simulations, two result types nested
 runs "fabricate the state of window 1" {
     ::ModelLoader::State::WindowInit 1 page 0 \
-        file {C:/models/big.op2} name big.op2 reader {} loaded 1 \
+        file {C:/models/big.op2} name big.op2 loaded 1 \
         subcases [list [list 101 {Subcase 1}] [list 102 {Subcase 2}]] \
         simulations [dict create 101 {Sim 1 Sim 2} 102 {Sim 1}] \
         datatypes [dict create 101 {Displacement Stress} 102 {Displacement}] \
@@ -334,7 +338,6 @@ ok "the window failure is reported in the status line" \
 
 set ::ModelLoader::UI::varFile ""
 set ::ModelLoader::UI::varModelFile {C:/models/does_not_exist.inp}
-set ::ModelLoader::UI::varReader ""
 runs "OnLoadModel does not throw" {::ModelLoader::UI::OnLoadModel}
 ok "the missing model file is reported before any hwi call" \
     [string match "Step 1: the file does not exist:*" $::ModelLoader::UI::statusText]
@@ -393,6 +396,15 @@ set ::ModelLoader::UI::varWindowCount not-a-number
 runs "garbage is reverted to the last good number" {::ModelLoader::UI::OnWindowCountChanged}
 eq "the last good number is back" 5 $::ModelLoader::UI::varWindowCount
 
+# the pure helper behind fix 1: HyperView answers with a NUMBER, some builds hand
+# out the list of window indices - both have to give the real count
+eq "InterpretWindowCount on the scalar 4" 4 \
+    [::ModelLoader::Logic::InterpretWindowCount 4]
+eq "InterpretWindowCount on '1 2 3 4'" 4 \
+    [::ModelLoader::Logic::InterpretWindowCount {1 2 3 4}]
+ok "llength alone answers 1 for the scalar 4 (the old bug)" \
+    [expr {[llength 4] == 1 ? 1 : 0}]
+
 # the 'Target window' field must not be reset to 1 either
 set ::ModelLoader::UI::varTargetWin 3
 runs "RefreshWindowList while the page cannot be read" {::ModelLoader::UI::RefreshWindowList}
@@ -421,6 +433,15 @@ eq "the reader hint for a FEMFAT file" "FEMFAT Result Reader" \
     [::ModelLoader::Logic::ReaderHint {C:/r/part.res}]
 eq "the reader hint for an Abaqus input deck" "Abaqus Input Reader" \
     [::ModelLoader::Logic::ReaderHint {C:/m/part.inp}]
+
+# FIX 2: the hint is only printed as a note - the wizard has no reader entry any
+# more and never hands a reader label to HyperView
+ok "no varReader UI variable exists any more" \
+    [expr {[llength [info vars ::ModelLoader::UI::varReader]] == 0}]
+ok "no reader widget variable exists any more" \
+    [expr {[llength [info vars ::ModelLoader::UI::wReader]] == 0}]
+ok "the ReaderHint helper survived (status-line hint only)" \
+    [expr {[llength [info commands ::ModelLoader::Logic::ReaderHint]] == 1}]
 
 # --- path post-processing ---------------------------------------------------
 set okInp  [file join $::here _selftest_dummy.inp]
