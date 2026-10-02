@@ -228,7 +228,10 @@ ok "information labelframe exists"       [exists .modelLoaderGUI.recess.info]
 ok "information listbox exists"          [exists .modelLoaderGUI.recess.info.inner.lb]
 ok "step 1 layout labelframe exists"     [exists .modelLoaderGUI.recess.body.step1.layout]
 ok "step 1 load labelframe exists"       [exists .modelLoaderGUI.recess.body.step1.load]
-ok "openfileentry container exists"      [exists .modelLoaderGUI.recess.body.step1.load.file]
+ok "'Input Model' field exists"          [exists .modelLoaderGUI.recess.body.step1.load.model]
+ok "'Input Model' browse button exists"  [exists .modelLoaderGUI.recess.body.step1.load.modelBrowse]
+ok "'Input Result' field exists"         [exists .modelLoaderGUI.recess.body.step1.load.result]
+ok "'Input Result' browse button exists" [exists .modelLoaderGUI.recess.body.step1.load.resultBrowse]
 ok "reader entry exists"                 [exists .modelLoaderGUI.recess.body.step1.load.reader]
 ok "step 1 load button exists"           [exists .modelLoaderGUI.recess.body.step1.load.load]
 ok "step 2 contour labelframe exists"    [exists .modelLoaderGUI.recess.body.step2.contour]
@@ -312,13 +315,13 @@ ok "the preview mentions the ready selection" \
 sec "5 - every action against the missing hwi (all failure paths)"
 set ::ModelLoader::UI::varWindowCount 2
 runs "OnApplyLayout does not throw" {::ModelLoader::UI::OnApplyLayout}
-eq "the refused layout is reported" "The layout was not changed." \
-    $::ModelLoader::UI::statusText
+ok "the refused layout is reported" \
+    [string match "Layout '2' was refused*" $::ModelLoader::UI::statusText]
 set ::ModelLoader::UI::varWindowCount not-a-number
 runs "OnApplyLayout rejects garbage input" {::ModelLoader::UI::OnApplyLayout}
-eq "garbage input is reported" \
-    "Layout: 'not-a-number' is not a valid number of windows." \
-    $::ModelLoader::UI::statusText
+ok "garbage input is reported" \
+    [string match "Layout: 'not-a-number' is not a valid number of windows*" \
+        $::ModelLoader::UI::statusText]
 set ::ModelLoader::UI::varWindowCount 2
 
 runs "OnRefreshPage does not throw" {::ModelLoader::UI::OnRefreshPage}
@@ -329,11 +332,21 @@ runs "OnRefreshWindow does not throw" {::ModelLoader::UI::OnRefreshWindow}
 ok "the window failure is reported in the status line" \
     [string match "Window 1 could not be read:*" $::ModelLoader::UI::statusText]
 
-set ::ModelLoader::UI::varFile {C:/models/does_not_exist.op2}
+set ::ModelLoader::UI::varFile ""
+set ::ModelLoader::UI::varModelFile {C:/models/does_not_exist.inp}
 set ::ModelLoader::UI::varReader ""
 runs "OnLoadModel does not throw" {::ModelLoader::UI::OnLoadModel}
-ok "the load failure is reported" \
-    [string match "Loading failed:*" $::ModelLoader::UI::statusText]
+ok "the missing model file is reported before any hwi call" \
+    [string match "Step 1: the file does not exist:*" $::ModelLoader::UI::statusText]
+set ::ModelLoader::UI::varModelFile ""
+set ::ModelLoader::UI::varResultFile {C:/results/does_not_exist.res}
+runs "OnLoadModel with an empty model and a missing result" {::ModelLoader::UI::OnLoadModel}
+ok "the missing result file is reported" \
+    [string match "Step 1: the file does not exist:*" $::ModelLoader::UI::statusText]
+set ::ModelLoader::UI::varResultFile ""
+runs "OnLoadModel with both fields empty" {::ModelLoader::UI::OnLoadModel}
+ok "the empty input is refused with a hint" \
+    [string match "Step 1: choose an 'Input Model'*" $::ModelLoader::UI::statusText]
 
 runs "OnApply does not throw" {::ModelLoader::UI::OnApply}
 eq "the failed contour is counted" "Contour applied in 0 window(s), 1 failure(s)." \
@@ -347,6 +360,119 @@ runs "StepBack returns to step 1" {::ModelLoader::UI::StepBack}
 eq "step counter is 1 again" 1 $::ModelLoader::UI::step
 runs "StepNext returns to step 2" {::ModelLoader::UI::StepNext}
 eq "step counter is 2 again" 2 $::ModelLoader::UI::step
+
+sec "5b - fix 1: the 'windows on the active page' field keeps its value"
+set ::ModelLoader::UI::varWindowCount 4
+runs "SetWindowCountValue puts 4 into variable and widget" \
+    {::ModelLoader::UI::SetWindowCountValue 4}
+eq "the variable holds 4" 4 $::ModelLoader::UI::varWindowCount
+eq "the combobox shows 4" 4 [$::ModelLoader::UI::wWindowCount get]
+eq "ReadWindowCount reads the widget" 4 [::ModelLoader::UI::ReadWindowCount]
+
+set ::ModelLoader::UI::varWindowCount 6
+runs "the user picks 6 (<<ComboboxSelected>> / <Return> handler)" \
+    {::ModelLoader::UI::OnWindowCountChanged}
+eq "the picked number survives the handler" 6 $::ModelLoader::UI::varWindowCount
+eq "the widget still shows 6" 6 [$::ModelLoader::UI::wWindowCount get]
+
+runs "Apply layout with 6 (no hwi here -> refused)" {::ModelLoader::UI::OnApplyLayout}
+eq "the refused layout does NOT reset the variable to 1" 6 \
+    $::ModelLoader::UI::varWindowCount
+eq "the refused layout does NOT reset the widget to 1" 6 \
+    [$::ModelLoader::UI::wWindowCount get]
+ok "the status line says that the value stays" \
+    [string match "Layout '6' was refused*" $::ModelLoader::UI::statusText]
+
+set ::ModelLoader::UI::varWindowCount 5
+runs "a number that is not in the offered list" {::ModelLoader::UI::OnWindowCountChanged}
+eq "the odd number is kept in the variable" 5 $::ModelLoader::UI::varWindowCount
+ok "5 was added to the offered values" \
+    [expr {[lsearch -exact [valuesof $::ModelLoader::UI::wWindowCount] 5] >= 0}]
+
+set ::ModelLoader::UI::varWindowCount not-a-number
+runs "garbage is reverted to the last good number" {::ModelLoader::UI::OnWindowCountChanged}
+eq "the last good number is back" 5 $::ModelLoader::UI::varWindowCount
+
+# the 'Target window' field must not be reset to 1 either
+set ::ModelLoader::UI::varTargetWin 3
+runs "RefreshWindowList while the page cannot be read" {::ModelLoader::UI::RefreshWindowList}
+eq "the target window keeps the user's choice" 3 $::ModelLoader::UI::varTargetWin
+eq "the target-window widget shows 3" 3 [$::ModelLoader::UI::wTargetWin get]
+eq "OnTargetWindowChanged reads the widget" 3 [::ModelLoader::UI::OnTargetWindowChanged]
+set ::ModelLoader::UI::varTargetWin 1
+set ::ModelLoader::UI::varWindowCount 2
+
+sec "5c - fix 2: 'Input Model' offers *.inp, 'Input Result' offers *.res"
+set mTypes [::ModelLoader::Logic::ModelFileTypes]
+set rTypes [::ModelLoader::Logic::ResultFileTypes]
+ok "the model filter starts with the Abaqus *.inp entry" \
+    [string match "*Abaqus Input Files*.inp*" [lindex $mTypes 0]]
+ok "*.inp is in the model filter" [string match "*.inp*" $mTypes]
+ok "the result filter starts with the FEMFAT *.res entry" \
+    [string match "*FEMFAT Result Files*.res*" [lindex $rTypes 0]]
+ok "*.res is in the result filter" [string match "*.res*" $rTypes]
+ok "the model filter did not lose the model formats" \
+    [expr {[string match "*.h3d*" $mTypes] && [string match "*.bdf*" $mTypes] ? 1 : 0}]
+ok "the result filter still lists the other result formats" \
+    [expr {[string match "*.op2*" $rTypes] && [string match "*.odb*" $rTypes] ? 1 : 0}]
+ok "both filters end with an 'All Files' entry" \
+    [expr {[string match "*All Files*" $mTypes] && [string match "*All Files*" $rTypes] ? 1 : 0}]
+eq "the reader hint for a FEMFAT file" "FEMFAT Result Reader" \
+    [::ModelLoader::Logic::ReaderHint {C:/r/part.res}]
+eq "the reader hint for an Abaqus input deck" "Abaqus Input Reader" \
+    [::ModelLoader::Logic::ReaderHint {C:/m/part.inp}]
+
+# --- path post-processing ---------------------------------------------------
+set okInp  [file join $::here _selftest_dummy.inp]
+set okRes  [file join $::here _selftest_dummy.res]
+set oddTxt [file join $::here _selftest_dummy.txt]
+foreach f [list $okInp $okRes $oddTxt] {
+    set fh [open $f w] ; puts $fh "dummy" ; close $fh
+}
+set chk [::ModelLoader::Logic::CheckChosenFile $okInp model]
+eq "an existing *.inp is accepted as a model" 1 [dict get $chk ok]
+eq "and it is normalised" [file normalize $okInp] [dict get $chk path]
+eq "no warning for *.inp" "" [dict get $chk message]
+set chkRes [::ModelLoader::Logic::CheckChosenFile $okRes result]
+eq "an existing *.res is accepted as a result" 1 [dict get $chkRes ok]
+set chkBad [::ModelLoader::Logic::CheckChosenFile {C:/nope/missing.inp} model]
+eq "a missing file is refused" 0 [dict get $chkBad ok]
+set chkOdd [::ModelLoader::Logic::CheckChosenFile $oddTxt model]
+eq "an unusual extension is only a warning" 1 [dict get $chkOdd ok]
+ok "the warning explains itself" [expr {[dict get $chkOdd message] ne ""}]
+eq "an empty path is refused" 0 \
+    [dict get [::ModelLoader::Logic::CheckChosenFile "" model] ok]
+
+# ApplyChosenFile writes the normalised path back into variable and widget
+runs "ApplyChosenFile on the model field" \
+    {::ModelLoader::UI::ApplyChosenFile $::ModelLoader::UI::wModelFile \
+        ::ModelLoader::UI::varModelFile model $okInp}
+eq "the model variable holds the path" [file normalize $okInp] \
+    $::ModelLoader::UI::varModelFile
+ok "the status line names the chosen file" \
+    [string match "Chosen model file:*" $::ModelLoader::UI::statusText]
+runs "ApplyChosenFile on the result field" \
+    {::ModelLoader::UI::ApplyChosenFile $::ModelLoader::UI::wResultFile \
+        ::ModelLoader::UI::varResultFile result $okRes}
+eq "the result variable holds the path" [file normalize $okRes] \
+    $::ModelLoader::UI::varResultFile
+eq "the reader suggestion is shown" 1 \
+    [string match "*FEMFAT Result Reader*" $::ModelLoader::UI::statusText]
+runs "ApplyChosenFile with a missing file" \
+    {::ModelLoader::UI::ApplyChosenFile $::ModelLoader::UI::wModelFile \
+        ::ModelLoader::UI::varModelFile model {C:/nope/missing.inp}}
+ok "a rejected file is reported" \
+    [string match "Model file rejected:*" $::ModelLoader::UI::statusText]
+
+# both paths reach the adapter (which then fails, because hwi is missing)
+set ::ModelLoader::UI::varModelFile [file normalize $okInp]
+set ::ModelLoader::UI::varResultFile [file normalize $okRes]
+runs "OnLoadModel with two existing files" {::ModelLoader::UI::OnLoadModel}
+ok "the hwi failure of the load is reported" \
+    [string match "Loading failed:*" $::ModelLoader::UI::statusText]
+set ::ModelLoader::UI::varModelFile ""
+set ::ModelLoader::UI::varResultFile ""
+foreach f [list $okInp $okRes $oddTxt] { catch { file delete $f } }
 
 sec "6 - own button bar (hwtk build without 'insert apply')"
 runs "DoClose destroys the dialog" {::ModelLoader::UI::DoClose}

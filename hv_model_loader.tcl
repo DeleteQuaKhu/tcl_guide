@@ -31,7 +31,7 @@
 #     <window>   GetClientHandle
 #     <client>   Draw, GetActiveModel, GetModelHandle, GetModelList,
 #                AddModel, RemoveAllModels, SetDisplayOptions
-#     <model>    GetFileName, GetResultCtrlHandle
+#     <model>    GetFileName, GetResultCtrlHandle, AddResultFile (V10)
 #     <result>   GetSubcaseList, GetSubcaseLabel, GetCurrentSubcase,
 #                SetCurrentSubcase, GetSimulationList, GetCurrentSimulation,
 #                SetCurrentSimulation, GetNumberOfSimulations, GetDataTypeList,
@@ -45,7 +45,9 @@
 #     hwtk::dialog, hwtk::frame, hwtk::labelframe, hwtk::label, hwtk::button,
 #     hwtk::entry, hwtk::openfileentry, hwtk::combobox, hwtk::checkbutton
 #     <dialog> recess / insert apply / buttonconfigure / hide / post
-#     plain Tk : listbox + scrollbar (read-only information pane) and
+#     plain Tk : listbox + scrollbar (read-only information pane),
+#                tk_getOpenFile (the 'Browse...' buttons of the two file fields,
+#                with the same -filetypes list the fields offer) and
 #                tk_messageBox for the modal warnings
 #
 #  --- "# VERIFY:" list (see README.md for the detail) -----------------------
@@ -59,6 +61,9 @@
 #     V7  hwtk::dialog modality (-modal)
 #     V8  hwtk::combobox configure -values (dynamic re-population)
 #     V9  hwtk combobox <<ComboboxSelected>> virtual event
+#     V10 - VERIFY: attaching a RESULT file to a model that is already in the
+#         window (<client> AddModel <resultFile> first, <model> AddResultFile
+#         second); a refusal is a warning, never a failed load
 #=============================================================================
 
 #=============================================================================
@@ -80,12 +85,18 @@ proc ::ModelLoader::Bootstrap {} {
     # NOTE: the check must use the FULLY QUALIFIED name (::hwtk::...), a plain
     # 'hwtk::dialog' pattern is resolved against the current namespace (here
     # ::ModelLoader) and would report every command as missing.
-    foreach cmd {dialog frame label button combobox entry checkbutton labelframe
-                 openfileentry} {
+    foreach cmd {dialog frame label button combobox entry checkbutton labelframe} {
         if {[llength [info commands ::hwtk::$cmd]] == 0} { lappend missing hwtk::$cmd }
     }
     if {[llength $missing] > 0} {
         error "ModelLoader needs the HyperWorks Tk library (hwtk). Missing: $missing"
+    }
+    # hwtk::openfileentry is OPTIONAL: when a build does not provide it (or
+    # refuses -filetypes), UI::CreateFileChooser falls back to
+    # 'hwtk::entry' + a Browse button that calls 'tk_getOpenFile -filetypes'.
+    if {[llength [info commands ::hwtk::openfileentry]] == 0} {
+        puts "\[ModelLoader\] NOTE: hwtk::openfileentry is not available - \
+the file fields fall back to an entry + 'tk_getOpenFile' browser."
     }
     return 1
 }
@@ -96,8 +107,12 @@ namespace eval ::ModelLoader::State {
     # One dict keyed by "window index on the active page".
     # value = dict with the keys:
     #   page        <page index the model was loaded on>
-    #   file        <full path of the loaded model / result file>
-    #   reader      <optional reader label passed to AddModel>
+    #   file        <full path of the primary loaded file (model, else result)>
+    #   modelFile   <full path of the 'Input Model' file (may be empty)>
+    #   resultFile  <full path of the 'Input Result' file (may be empty)>
+    #   reader      <optional reader label passed to AddModel for 'file'>
+    #   modelReader <reader label used for modelFile>          (V5)
+    #   resultReader<reader label used for resultFile>         (V5)
     #   name        <file tail, for display>
     #   loaded      <0|1>
     #   subcases    <list of {subcaseId subcaseLabel}>
@@ -144,6 +159,7 @@ proc ::ModelLoader::State::WindowInit {idx args} {
     variable windows
     set attrs [dict merge {
         page {} file {} reader {} name {} loaded 0
+        modelFile {} modelReader {} resultFile {} resultReader {}
         subcases {} simulations {} datatypes {} components {}
     } [dict create {*}$args]]
     dict set windows $idx $attrs
@@ -267,18 +283,95 @@ proc ::ModelLoader::Logic::LayoutCandidates {count} {
     return [lsort -unique $cand]
 }
 #--------------------------------- file type filters (GUI data) --------------
-# hwtk::openfileentry -filetypes format confirmed in real HyperView scripts:
-#   { {"Label" {.ext1 .ext2}} {"Label2" {.ext3}} }
+# Both lists below are ONE Tcl list in the standard Tk 'filetypes' format:
+#   { {"Label" {.ext1 .ext2}} {"Label2" {.ext3}} {"All Files" {*}} }
+# The same list is handed to 'hwtk::openfileentry -filetypes' AND to
+# 'tk_getOpenFile -filetypes' (see UI::BrowseFile), so the two browsers of
+# step 1 always offer exactly the same filters.
+# The FIRST entry is the filter the browser starts with - therefore the format
+# the field is meant for comes first: Abaqus *.inp for "Input Model",
+# FEMFAT *.res for "Input Result".
+# 'Input Model' browser: FE model / input decks.
 proc ::ModelLoader::Logic::ModelFileTypes {} {
     return {
-        {"Hyper3D Files"          {.h3d}}
-        {"Nastran OP2 Results"    {.op2}}
-        {"Abaqus ODB Results"     {.odb}}
-        {"Ansys RST Results"      {.rst}}
-        {"LS-DYNA Results"        {.d3plot}}
-        {"Nastran Model"          {.bdf .dat .nas}}
-        {"All Results"            {.h3d .op2 .odb .rst .d3plot .xdb .res .mvw}}
+        {"Abaqus Input Files"  {.inp}}
+        {"Nastran Input Files" {.bdf .dat .nas}}
+        {"OptiStruct Input"    {.fem}}
+        {"Hyper3D Model Files" {.h3d}}
+        {"Abaqus ODB Model"    {.odb}}
+        {"All Model Files"     {.inp .bdf .dat .nas .fem .h3d .odb .mvw .sim .mod}}
+        {"All Files"           {*}}
     }
+}
+# 'Input Result' browser: result / output files (*.res = FEMFAT, *.op2 = Nastran,
+# *.odb = Abaqus, *.rst = Ansys, *.d3plot = LS-DYNA, *.h3d = Altair).
+proc ::ModelLoader::Logic::ResultFileTypes {} {
+    return {
+        {"FEMFAT Result Files" {.res}}
+        {"Nastran OP2 Results" {.op2}}
+        {"Abaqus ODB Results"  {.odb}}
+        {"Ansys RST Results"   {.rst}}
+        {"LS-DYNA Results"     {.d3plot}}
+        {"Hyper3D Results"     {.h3d}}
+        {"All Result Files"    {.res .op2 .odb .rst .d3plot .h3d .xdb .mvw}}
+        {"All Files"           {*}}
+    }
+}
+# Extensions the two fields accept.  They are used for a WARNING only, a file
+# with an unexpected extension is still handed to HyperView.
+proc ::ModelLoader::Logic::ModelExtensions {} {
+    return {.inp .bdf .dat .nas .fem .h3d .odb .mvw .sim .mod}
+}
+proc ::ModelLoader::Logic::ResultExtensions {} {
+    return {.res .op2 .odb .rst .d3plot .h3d .xdb .mvw}
+}
+# Reader label SUGGESTION for the info pane - never applied automatically,
+# because the exact label is installation specific (see V5).
+proc ::ModelLoader::Logic::ReaderHint {path} {
+    switch -- [string tolower [file extension [string trim $path]]] {
+        .inp    { return "Abaqus Input Reader" }
+        .res    { return "FEMFAT Result Reader" }
+        .op2    { return "Nastran OP2 Reader" }
+        .odb    { return "Abaqus ODB Reader" }
+        .rst    { return "Ansys Result Reader" }
+        .xdb    { return "Ansys Result Reader" }
+        .d3plot { return "LS-DYNA Reader" }
+        .h3d    { return "Hyper3D Reader" }
+        .fem    { return "OptiStruct Input Reader" }
+        .bdf    { return "Nastran Input Reader" }
+        .nas    { return "Nastran Input Reader" }
+        .dat    { return "Nastran Input Reader" }
+    }
+    return ""
+}
+# Post-processing of a path that was chosen in a file browser or typed by the
+# user: trims it, normalises it, checks that it really is a readable file and
+# flags an extension that does not belong to <kind> (model | result).
+# Returns dict: {ok <0|1> path <normalised path> kind <model|result>
+#                message <reason when ok 0 / warning when ok 1>}
+proc ::ModelLoader::Logic::CheckChosenFile {path kind} {
+    set raw [string trim [string map [list \" ""] $path]]
+    if {$raw eq ""} {
+        return [dict create ok 0 path "" kind $kind message "no file was chosen"]
+    }
+    set norm $raw
+    catch { set norm [file normalize $raw] }
+    if {![file exists $norm]} {
+        return [dict create ok 0 path $norm kind $kind \
+            message "the file does not exist: $norm"]
+    }
+    if {[file isdirectory $norm]} {
+        return [dict create ok 0 path $norm kind $kind \
+            message "'$norm' is a directory, not a file"]
+    }
+    set ext [string tolower [file extension $norm]]
+    if {$kind eq "model"} { set known [::ModelLoader::Logic::ModelExtensions] } \
+        else               { set known [::ModelLoader::Logic::ResultExtensions] }
+    set warn ""
+    if {[lsearch -exact $known $ext] < 0} {
+        set warn "'$ext' is unusual for a $kind file - it is passed to HyperView anyway"
+    }
+    return [dict create ok 1 path $norm kind $kind message $warn]
 }
 #--------------------------------- step validation ---------------------------
 proc ::ModelLoader::Logic::ValidateStep1 {} {
@@ -398,7 +491,12 @@ proc ::ModelLoader::Logic::WindowSummary {winIdx} {
     if {![::ModelLoader::State::WindowGet $winIdx loaded 0]} {
         return [format "Window %-2s : (empty)" $winIdx]
     }
-    return [format "Window %-2s : %s  \[%s subcase(s)\]" $winIdx $name $n]
+    set extra ""
+    set res [::ModelLoader::State::WindowGet $winIdx resultFile]
+    if {$res ne "" && $res ne [::ModelLoader::State::WindowGet $winIdx modelFile]} {
+        set extra "  + [file tail $res]"
+    }
+    return [format "Window %-2s : %s%s  \[%s subcase(s)\]" $winIdx $name $extra $n]
 }
 # Multi line dump of everything that was found for one window (step 1 + step 2).
 proc ::ModelLoader::Logic::ResultSummary {winIdx} {
@@ -624,9 +722,178 @@ proc ::ModelLoader::Adapter::LoadModel {winIdx path reader} {
 
     if {$ok} {
         ::ModelLoader::State::WindowInit $winIdx \
-            page $pageIdx file $path reader $reader name [file tail $path] loaded 1
+            page $pageIdx file $path reader $reader name [file tail $path] loaded 1 \
+            modelFile $path modelReader $reader
     }
     return $ok
+}
+
+#----------------------------------------------------------- attach a result ---
+# Attaches <resultPath> to the model that is currently in the window.
+# Has to be called while the stack is OPEN, because <clientVar> is the live
+# client handle of the caller's frame (hence the upvar).
+# V10 - VERIFY: two forms are tried, the first one that is accepted wins:
+#   1. <client> AddModel <resultFile> [<reader>]  - HyperView attaches the
+#      results to the existing model when the readers are compatible; this is
+#      how Altair's own examples load a model and a result file together.
+#   2. <model> AddResultFile <resultFile>         - explicit attach form.
+# A refusal is NOT fatal: the model stays loaded and the reason is appended to
+# <warningsVar>, so the caller prints a hint instead of failing the whole load.
+# Returns 1 when the result file was handed to HyperView, 0 otherwise.
+proc ::ModelLoader::Adapter::AttachResult {clientVar warningsVar resultPath reader} {
+    upvar 1 $clientVar mlClient
+    upvar 1 $warningsVar warnings
+    set label [::ModelLoader::Logic::Basename $resultPath]
+
+    if {$reader eq ""} {
+        set cmd  [list mlClient AddModel $resultPath]
+        set desc "AddModel <result> (auto reader)"
+    } else {
+        set cmd  [list mlClient AddModel $resultPath $reader]
+        set desc "AddModel <result> '$reader'"
+    }
+    if {[::ModelLoader::Adapter::HvRun $desc $cmd]} { return 1 }
+    set why [::ModelLoader::State::GetLastError]
+
+    # second chance: attach through the active model handle
+    set attached 0
+    ::ModelLoader::Adapter::HvRun "GetActiveModel" \
+        {set mlResModelId [mlClient GetActiveModel]}
+    if {[info exists mlResModelId] && $mlResModelId ne "" && $mlResModelId ne "0"} {
+        if {[::ModelLoader::Adapter::HvRun "GetModelHandle (active)" \
+                {mlClient GetModelHandle mlResModel $mlResModelId}]} {
+            if {[::ModelLoader::Adapter::HvRun "AddResultFile" \
+                    [list mlResModel AddResultFile $resultPath]]} {
+                set attached 1
+            }
+            ::ModelLoader::Adapter::HvRun "release mlResModel" \
+                {mlResModel ReleaseHandle}
+        }
+    }
+    if {$attached} { return 1 }
+
+    lappend warnings "the result file '$label' could not be attached \
+(client AddModel / model AddResultFile were both refused: $why).  The model is \
+loaded - add the results with 'File > Load > Results' or fill in a suitable \
+reader label (V10)."
+    return 0
+}
+
+#------------------------------------------------------------ load both inputs -
+# Loads the two step-1 inputs into window <winIdx> of the ACTIVE page:
+#   <modelPath>  'Input Model'  file - FE model / input deck (may be empty)
+#   <resultPath> 'Input Result' file - result file          (may be empty)
+# At least one of the two has to be given; a path that is not an existing file
+# aborts the load before any hwi call (ok 0 + reason in the message).
+# What is loaded:
+#   model only      -> AddModel <model>
+#   result only     -> AddModel <result>  (HyperView builds the model from it)
+#   model + result  -> AddModel <model>, then Adapter::AttachResult (V10)
+# Returns dict: {ok <0|1> mode <text> files <list> models <n>
+#                warnings {text ...} message <text>}
+proc ::ModelLoader::Adapter::LoadInputs {winIdx modelPath modelReader \
+                                             resultPath resultReader} {
+    ::ModelLoader::State::ClearLastError
+    set warnings {}
+    set files    {}
+    set modelCnt 0
+    set mode     ""
+    set pageIdx  ""
+
+    set ok 1
+    if {$modelPath eq "" && $resultPath eq ""} {
+        set ok 0
+        ::ModelLoader::State::SetLastError \
+            "Neither 'Input Model' nor 'Input Result' holds a file."
+    }
+    if {$ok} {
+        foreach {p what} [list $modelPath "model" $resultPath "result"] {
+            if {$p eq ""} { continue }
+            if {![file exists $p]} {
+                set ok 0
+                ::ModelLoader::State::SetLastError "The $what file does not exist: $p"
+                break
+            }
+        }
+    }
+    if {!$ok} {
+        return [dict create ok 0 mode "" files {} models 0 warnings {} \
+            message [::ModelLoader::State::GetLastError]]
+    }
+
+    if {$ok} { set ok [::ModelLoader::Adapter::HvRun "hwi OpenStack" {hwi OpenStack}] }
+    if {$ok} { set ok [::ModelLoader::Adapter::HvRun "GetSessionHandle" \
+                    {hwi GetSessionHandle mlSess}] }
+    if {$ok} { set ok [::ModelLoader::Adapter::HvRun "GetProjectHandle" \
+                    {mlSess GetProjectHandle mlProj}] }
+    if {$ok} { set ok [::ModelLoader::Adapter::HvRun "GetActivePage" \
+                    {set pageIdx [mlProj GetActivePage]}] }
+    if {$ok} { set ok [::ModelLoader::Adapter::HvRun "GetPageHandle" \
+                    {mlProj GetPageHandle mlPage $pageIdx}] }
+    if {$ok} { set ok [::ModelLoader::Adapter::HvRun "GetWindowHandle" \
+                    {mlPage GetWindowHandle mlWin $winIdx}] }
+    if {$ok} { set ok [::ModelLoader::Adapter::HvRun "GetClientHandle" \
+                    {mlWin GetClientHandle mlClient}] }
+
+    # --- 1. the model file (if any) ------------------------------------------
+    if {$ok && $modelPath ne ""} {
+        if {$modelReader eq ""} {
+            set ok [::ModelLoader::Adapter::HvRun "AddModel <model> (auto reader)" \
+                [list mlClient AddModel $modelPath]]
+        } else {
+            set ok [::ModelLoader::Adapter::HvRun "AddModel <model> '$modelReader'" \
+                [list mlClient AddModel $modelPath $modelReader]]
+        }
+        if {$ok} {
+            lappend files $modelPath
+            set mode "model"
+        }
+    }
+    # --- 2. the result file (if any) -----------------------------------------
+    if {$ok && $resultPath ne ""} {
+        if {$mode eq ""} {
+            # no model file: the result file has to bring its own mesh
+            if {$resultReader eq ""} {
+                set ok [::ModelLoader::Adapter::HvRun \
+                    "AddModel <result> (auto reader)" \
+                    [list mlClient AddModel $resultPath]]
+            } else {
+                set ok [::ModelLoader::Adapter::HvRun \
+                    "AddModel <result> '$resultReader'" \
+                    [list mlClient AddModel $resultPath $resultReader]]
+            }
+            if {$ok} {
+                lappend files $resultPath
+                set mode "result"
+            }
+        } else {
+            if {[::ModelLoader::Adapter::AttachResult mlClient warnings \
+                    $resultPath $resultReader]} {
+                lappend files $resultPath
+                set mode "$mode+result"
+            }
+        }
+    }
+
+    if {$ok} { ::ModelLoader::Adapter::HvRun "Draw" {mlClient Draw} }
+    if {$ok} { ::ModelLoader::Adapter::HvRun "GetModelList" \
+                    {set modelCnt [llength [mlClient GetModelList]]} }
+
+    ::ModelLoader::Adapter::ReleaseHandles \
+        {mlResModel mlClient mlWin mlPage mlProj mlSess}
+    ::ModelLoader::Adapter::HvRun "hwi CloseStack" {hwi CloseStack}
+
+    if {!$ok} {
+        return [dict create ok 0 mode $mode files $files models $modelCnt \
+            warnings $warnings message [::ModelLoader::State::GetLastError]]
+    }
+    set primary [expr {$modelPath ne "" ? $modelPath : $resultPath}]
+    ::ModelLoader::State::WindowInit $winIdx \
+        page $pageIdx file $primary name [file tail $primary] loaded 1 \
+        reader $modelReader modelFile $modelPath modelReader $modelReader \
+        resultFile $resultPath resultReader $resultReader
+    return [dict create ok 1 mode $mode files $files models $modelCnt \
+        warnings $warnings message ""]
 }
 #------------------------------------------------ read results of one window ---
 # Opens the stack, walks session -> project -> page -> window -> client ->
@@ -774,6 +1041,25 @@ proc ::ModelLoader::Adapter::LoadAndRefresh {winIdx path reader} {
     }
     return [::ModelLoader::Adapter::RefreshWindowResults $winIdx]
 }
+
+# Load BOTH step-1 inputs into <winIdx> and immediately re-read the window, so
+# that the result tree of the info pane is up to date.
+# Returns the dict of RefreshWindowResults, extended by the LoadInputs keys
+# "mode" and "warnings" (non fatal problems, e.g. a refused result attach).
+proc ::ModelLoader::Adapter::LoadAllAndRefresh {winIdx modelPath modelReader \
+                                                      resultPath resultReader} {
+    set res [::ModelLoader::Adapter::LoadInputs $winIdx $modelPath $modelReader \
+                                                   $resultPath $resultReader]
+    if {![dict get $res ok]} {
+        return [dict create ok 0 models 0 files {} subcases {} simulations {} \
+            datatypes {} components {} current "" mode [dict get $res mode] \
+            warnings [dict get $res warnings] message [dict get $res message]]
+    }
+    set tree [::ModelLoader::Adapter::RefreshWindowResults $winIdx]
+    dict set tree mode     [dict get $res mode]
+    dict set tree warnings [dict get $res warnings]
+    return $tree
+}
 #------------------------------------------------------------- contour plot ---
 # Applies one contour specification to one window.
 # <spec> is the dict built by Logic::MakeSpec:
@@ -914,7 +1200,9 @@ namespace eval ::ModelLoader::UI {
     variable wTargetWin   ""
     variable wTargetWin2  ""
     variable wPageInfo    ""
-    variable wFile        ""
+    variable wFile        ""   ;# kept: points at the 'Input Model' widget
+    variable wModelFile   ""
+    variable wResultFile  ""
     variable wReader      ""
     variable wModelInfo   ""
     variable wSubcase     ""
@@ -928,8 +1216,12 @@ namespace eval ::ModelLoader::UI {
     variable wStepHelp    ""
     # values bound to the widgets (they survive a rebuild of the dialog)
     variable varWindowCount 2
+    # last window count that was accepted (invalid typing is reverted to it)
+    variable lastGoodWindowCount 2
     variable varTargetWin   1
-    variable varFile        ""
+    variable varFile        ""       ;# primary file, mirrors varModelFile
+    variable varModelFile   ""
+    variable varResultFile  ""
     variable varReader      ""
     variable varModelInfo   ""
     variable varSubcase     ""
@@ -985,6 +1277,164 @@ proc ::ModelLoader::UI::SetWidgetValue {widget value} {
     if {$widget eq "" || ![winfo exists $widget]} { return }
     catch { $widget set $value }
     return
+}
+# Reads the LIVE content of a widget ('get'), falling back to <default> when the
+# widget does not exist or does not understand 'get'.
+# The 'winfo' guard keeps the proc usable in a session without Tk (the pure
+# selftest does exactly that).
+proc ::ModelLoader::UI::WidgetText {widget {default ""}} {
+    if {$widget eq ""} { return $default }
+    if {[llength [info commands winfo]] == 0} { return $default }
+    if {![winfo exists $widget]} { return $default }
+    if {[catch { set v [$widget get] }]} { return $default }
+    return $v
+}
+#------------------------------------------------- window count (bug 1 fix) ---
+# The window count is read from the WIDGET first and only then from the Tcl
+# variable.  If a build does not honour '-textvariable' on that combobox the
+# variable keeps its initial value, so reading the variable alone would apply
+# the default instead of what the user picked ("the value jumps back").
+# Returns the validated number, or "" when the input is not usable at all.
+proc ::ModelLoader::UI::ReadWindowCount {} {
+    variable wWindowCount
+    variable varWindowCount
+    set raw [string trim [::ModelLoader::UI::WidgetText $wWindowCount $varWindowCount]]
+    if {$raw eq ""} { set raw [string trim $varWindowCount] }
+    if {![string is integer -strict $raw] || $raw < 1} { return "" }
+    return $raw
+}
+# Writes <n> into the variable AND into the combobox and makes sure <n> is one
+# of the offered values - so the number the user typed can never be dropped and
+# the field can never silently fall back to 1.
+proc ::ModelLoader::UI::SetWindowCountValue {n} {
+    variable wWindowCount
+    variable varWindowCount
+    variable lastGoodWindowCount
+    set varWindowCount $n
+    set lastGoodWindowCount $n
+    if {$wWindowCount ne "" && [winfo exists $wWindowCount]} {
+        set values [::ModelLoader::Logic::WindowCountChoices]
+        if {[lsearch -exact $values $n] < 0} { lappend values $n }
+        ::ModelLoader::UI::SetComboValues $wWindowCount $values
+    }
+    ::ModelLoader::UI::SetWidgetValue $wWindowCount $n
+    return $n
+}
+# Handler of <<ComboboxSelected>> / <Return> / <FocusOut> of that combobox.
+# Only genuinely invalid input (letters, 0, negative) is reverted to the last
+# good number - every valid number is kept and applied.
+proc ::ModelLoader::UI::OnWindowCountChanged {} {
+    variable wWindowCount
+    variable varWindowCount
+    variable lastGoodWindowCount
+    set raw [string trim [::ModelLoader::UI::WidgetText $wWindowCount $varWindowCount]]
+    if {$raw eq ""} { set raw [string trim $varWindowCount] }
+    if {![string is integer -strict $raw] || $raw < 1} {
+        ::ModelLoader::UI::SetStatus \
+            "'$raw' is not a number of windows - kept $lastGoodWindowCount."
+        return [::ModelLoader::UI::SetWindowCountValue $lastGoodWindowCount]
+    }
+    return [::ModelLoader::UI::SetWindowCountValue $raw]
+}
+# Same widget -> variable sync for the two 'Target window' comboboxes: whatever
+# the user selected in the widget WINS over the stored variable.
+proc ::ModelLoader::UI::OnTargetWindowChanged {} {
+    variable wTargetWin
+    variable wTargetWin2
+    variable varTargetWin
+    set raw [string trim [::ModelLoader::UI::WidgetText $wTargetWin $varTargetWin]]
+    if {$raw eq ""} {
+        set raw [string trim [::ModelLoader::UI::WidgetText $wTargetWin2 $varTargetWin]]
+    }
+    if {[string is integer -strict $raw] && $raw >= 1} {
+        set varTargetWin $raw
+        ::ModelLoader::UI::SetWidgetValue $wTargetWin2 $raw
+    }
+    return $varTargetWin
+}
+#----------------------------------------------- file chooser (bug 2 fix) -----
+# Creates one file field of step 1.
+#   <parent> parent widget  <name> widget path component
+#   <varname> fully qualified variable the field is bound to
+#   <types>  filetypes list - Logic::ModelFileTypes or Logic::ResultFileTypes
+# Preferred widget is 'hwtk::openfileentry -filetypes <types>'.  When the build
+# does not provide that command, or refuses the widget / the -filetypes option,
+# the field degrades gracefully to a plain 'hwtk::entry'; the caller always adds
+# a 'Browse...' button that uses 'tk_getOpenFile -filetypes <types>' with the
+# very same list (UI::BrowseFile).
+# Returns the widget path the caller has to grid.
+proc ::ModelLoader::UI::CreateFileChooser {parent name varname types width} {
+    set path $parent.$name
+    if {[llength [info commands ::hwtk::openfileentry]] > 0} {
+        if {![catch {
+            hwtk::openfileentry $path -width $width -filetypes $types \
+                -textvariable $varname
+        } msg]} {
+            return $path
+        }
+        ::ModelLoader::Adapter::Log \
+            "openfileentry -filetypes refused on $path ($msg) - retry without it"
+        catch { destroy $path }
+        if {![catch {
+            hwtk::openfileentry $path -width $width -textvariable $varname
+        } msg2]} {
+            return $path
+        }
+        ::ModelLoader::Adapter::Log \
+            "openfileentry refused on $path ($msg2) - using entry + tk_getOpenFile"
+        catch { destroy $path }
+    }
+    return [hwtk::entry $path -width $width -textvariable $varname]
+}
+# Writes a path into a file field: the Tcl variable first (that is what the
+# script reads) and then the widget - with fallbacks, because hwtk entries are
+# ttk entries and not every build implements a 'set' subcommand.
+proc ::ModelLoader::UI::SetFileWidget {widget varname value} {
+    if {$varname ne ""} { uplevel #0 [list set $varname $value] }
+    if {$widget eq "" || ![winfo exists $widget]} { return $value }
+    if {[catch { $widget set $value }]} {
+        catch { $widget delete 0 end }
+        catch { $widget insert 0 $value }
+    }
+    return $value
+}
+# 'Browse...' button of a file field - the plain Tk browser with the same
+# filetypes list the field itself offers:
+#     tk_getOpenFile -title ... -filetypes <types>
+# The chosen path is checked, normalised and written back into the field.
+proc ::ModelLoader::UI::BrowseFile {widget varname types kind} {
+    if {[catch {
+        set file [tk_getOpenFile -title "Choose the $kind file" -filetypes $types]
+    } msg]} {
+        ::ModelLoader::UI::SetStatus "The file browser could not be opened: $msg"
+        return ""
+    }
+    if {$file eq ""} { return "" }
+    return [::ModelLoader::UI::ApplyChosenFile $widget $varname $kind $file]
+}
+# Post-processing of a path that came out of a browser (or was typed): validate
+# it with Logic::CheckChosenFile, normalise it, write it back into the field and
+# report the outcome - including a reader suggestion - in the status line.
+proc ::ModelLoader::UI::ApplyChosenFile {widget varname kind path} {
+    set check [::ModelLoader::Logic::CheckChosenFile $path $kind]
+    set norm  [dict get $check path]
+    if {$norm eq ""} { set norm $path }
+    ::ModelLoader::UI::SetFileWidget $widget $varname $norm
+    if {![dict get $check ok]} {
+        ::ModelLoader::UI::SetStatus \
+            "[string totitle $kind] file rejected: [dict get $check message]"
+        return ""
+    }
+    set hint [::ModelLoader::Logic::ReaderHint $norm]
+    if {[dict get $check message] ne ""} {
+        ::ModelLoader::UI::SetStatus "$norm - [dict get $check message]"
+    } elseif {$hint ne ""} {
+        ::ModelLoader::UI::SetStatus "Chosen $kind file: \
+[::ModelLoader::Logic::Basename $norm] (reader suggestion: $hint)"
+    } else {
+        ::ModelLoader::UI::SetStatus "Chosen $kind file: [::ModelLoader::Logic::Basename $norm]"
+    }
+    return $norm
 }
 #------------------------------------- dialog buttons --------------------------
 # Adds one button to the wizard.  Preferred place is the button box of the
@@ -1233,16 +1683,24 @@ proc ::ModelLoader::UI::RefreshWindowList {} {
     }
     ::ModelLoader::UI::SetInfo $lines
 
-    # the target-window combobox follows the windows of the active page
+    # the target-window combobox follows the windows of the active page, but it
+    # must NEVER throw away the window the user picked (bug fix): the page only
+    # reports the windows that exist RIGHT NOW (usually 1 before a layout was
+    # applied), so a blind "[lindex $choices 0]" reset the field to 1 on every
+    # refresh.  The user's number is kept and stays selectable instead.
     set choices {}
     if {[llength $info] > 0} {
         for {set i 1} {$i <= [dict get $info windows]} {incr i} { lappend choices $i }
     }
-    if {[llength $choices] == 0} { set choices {1} }
-    ::ModelLoader::UI::SetComboValues $wTargetWin $choices
-    if {[lsearch -exact $choices $varTargetWin] < 0} {
-        set varTargetWin [lindex $choices 0]
+    set cur $varTargetWin
+    if {![string is integer -strict $cur] || $cur < 1} { set cur 1 }
+    if {[llength $choices] == 0} {
+        # page could not be read: keep what the user had, do not invent a value
+        set choices [list $cur]
     }
+    while {[llength $choices] < $cur} { lappend choices [expr {[llength $choices] + 1}] }
+    set varTargetWin $cur
+    ::ModelLoader::UI::SetComboValues $wTargetWin $choices
     ::ModelLoader::UI::SetWidgetValue $wTargetWin $varTargetWin
     return $info
 }
@@ -1257,8 +1715,13 @@ proc ::ModelLoader::UI::BuildStep1 {} {
     variable wTargetWin
     variable wPageInfo
     variable wFile
+    variable wModelFile
+    variable wResultFile
     variable wReader
     variable varFile
+    variable varModelFile
+    variable varResultFile
+    variable varReader
 
     # --- active page layout --------------------------------------------------
     set lf [hwtk::labelframe $wStep1.layout -text " Active page layout " -padding 4]
@@ -1272,6 +1735,16 @@ proc ::ModelLoader::UI::BuildStep1 {} {
         -values [::ModelLoader::Logic::WindowCountChoices] \
         -textvariable ::ModelLoader::UI::varWindowCount]
     grid $lf.cb -row 0 -column 1 -sticky w -padx 2 -pady 2
+    # The value the user picked has to reach the variable - a build that does
+    # not honour '-textvariable' on this combobox would otherwise keep the
+    # initial value and "reset" the field (bug 1).
+    # V9 - VERIFY: hwtk comboboxes generate the ttk <<ComboboxSelected>> event.
+    foreach ev {<<ComboboxSelected>> <Return> <FocusOut>} {
+        catch { bind $lf.cb $ev { ::ModelLoader::UI::OnWindowCountChanged } }
+    }
+    # the field shows what the script really has (never a stale variable value)
+    catch { bind $lf.cb <Map> { ::ModelLoader::UI::SetWindowCountValue \
+        [::ModelLoader::UI::ReadWindowCount] } }
     hwtk::button $lf.apply -text "Apply layout" -command ::ModelLoader::UI::OnApplyLayout
     grid $lf.apply -row 0 -column 2 -sticky w -padx 6 -pady 2
     hwtk::button $lf.refresh -text "Refresh page info" \
@@ -1280,8 +1753,8 @@ proc ::ModelLoader::UI::BuildStep1 {} {
     set wPageInfo [hwtk::label $lf.info -text "" -anchor w -justify left -wraplength 740]
     grid $wPageInfo -row 1 -column 0 -columnspan 4 -sticky w -padx 2 -pady 2
 
-    # --- load one file -------------------------------------------------------
-    set lf2 [hwtk::labelframe $wStep1.load -text " Load a model / result file " -padding 4]
+    # --- load model and results ----------------------------------------------
+    set lf2 [hwtk::labelframe $wStep1.load -text " Load model and results " -padding 4]
     grid $lf2 -row 1 -column 0 -sticky ew -pady 2 -padx 2
     grid columnconfigure $lf2 1 -weight 1
 
@@ -1290,44 +1763,58 @@ proc ::ModelLoader::UI::BuildStep1 {} {
     set wTargetWin [hwtk::combobox $lf2.cb -state readonly -width 8 -values {1} \
         -textvariable ::ModelLoader::UI::varTargetWin]
     grid $lf2.cb -row 0 -column 1 -sticky w -padx 2 -pady 2
+    # the selection wins over the stored variable (same reason as bug 1)
+    foreach ev {<<ComboboxSelected>> <Return> <FocusOut>} {
+        catch { bind $lf2.cb $ev { ::ModelLoader::UI::OnTargetWindowChanged } }
+    }
     hwtk::button $lf2.reload -text "Re-read results of this window" \
         -command ::ModelLoader::UI::OnRefreshWindow
     grid $lf2.reload -row 0 -column 2 -sticky w -padx 6 -pady 2
 
-    hwtk::label $lf2.l2 -text "Model / result file:" -width 26 -anchor w
+    # --- 'Input Model' : FE model / input deck, *.inp first -------------------
+    hwtk::label $lf2.l2 -text "Input Model:" -width 26 -anchor w
     grid $lf2.l2 -row 1 -column 0 -sticky w -padx 2 -pady 2
-    # hwtk::openfileentry is used by real HyperView scripts (ppt2.tcl) with
-    # -filetypes {{"Label" {.ext} ...} ...} - that is exactly the format
-    # returned by Logic::ModelFileTypes.  Should this build refuse -filetypes,
-    # the widget is recreated without it instead of failing.
-    set types [::ModelLoader::Logic::ModelFileTypes]
-    if {[catch {
-        set wFile [hwtk::openfileentry $lf2.file -width 55 -filetypes $types \
-            -textvariable ::ModelLoader::UI::varFile]
-    } msg]} {
-        ::ModelLoader::Adapter::Log "openfileentry -filetypes refused ($msg) - retry without it"
-        catch { destroy $lf2.file }
-        set wFile [hwtk::openfileentry $lf2.file -width 55 \
-            -textvariable ::ModelLoader::UI::varFile]
-    }
-    grid $lf2.file -row 1 -column 1 -columnspan 2 -sticky ew -padx 2 -pady 2
+    set modelTypes [::ModelLoader::Logic::ModelFileTypes]
+    set wModelFile [::ModelLoader::UI::CreateFileChooser $lf2 model \
+        ::ModelLoader::UI::varModelFile $modelTypes 50]
+    set wFile $wModelFile ;# backwards compatible alias
+    grid $wModelFile -row 1 -column 1 -sticky ew -padx 2 -pady 2
+    hwtk::button $lf2.modelBrowse -text "Browse..." -command [list \
+        ::ModelLoader::UI::BrowseFile $wModelFile \
+        ::ModelLoader::UI::varModelFile $modelTypes model]
+    grid $lf2.modelBrowse -row 1 -column 2 -sticky w -padx 6 -pady 2
+
+    # --- 'Input Result' : result file, *.res (FEMFAT) first -------------------
+    hwtk::label $lf2.l2b -text "Input Result:" -width 26 -anchor w
+    grid $lf2.l2b -row 2 -column 0 -sticky w -padx 2 -pady 2
+    set resultTypes [::ModelLoader::Logic::ResultFileTypes]
+    set wResultFile [::ModelLoader::UI::CreateFileChooser $lf2 result \
+        ::ModelLoader::UI::varResultFile $resultTypes 50]
+    grid $wResultFile -row 2 -column 1 -sticky ew -padx 2 -pady 2
+    hwtk::button $lf2.resultBrowse -text "Browse..." -command [list \
+        ::ModelLoader::UI::BrowseFile $wResultFile \
+        ::ModelLoader::UI::varResultFile $resultTypes result]
+    grid $lf2.resultBrowse -row 2 -column 2 -sticky w -padx 6 -pady 2
 
     hwtk::label $lf2.l3 -text "Reader (optional):" -width 26 -anchor w
-    grid $lf2.l3 -row 2 -column 0 -sticky w -padx 2 -pady 2
+    grid $lf2.l3 -row 3 -column 0 -sticky w -padx 2 -pady 2
     # V5 - VERIFY: 'client AddModel <file> <readerLabel>' needs the exact reader
     #      label of the installation.  Leave this empty to let HyperView pick the
     #      reader from the file extension; fill it in (for example
     #      "Nastran OP2 Reader") when auto detection picks the wrong one.
+    #      It is used for the model file and for the result file.
     set wReader [hwtk::entry $lf2.reader -width 40 \
         -textvariable ::ModelLoader::UI::varReader]
-    grid $lf2.reader -row 2 -column 1 -sticky ew -padx 2 -pady 2
+    grid $lf2.reader -row 3 -column 1 -sticky ew -padx 2 -pady 2
     hwtk::button $lf2.load -text "Load into window" -command ::ModelLoader::UI::OnLoadModel
-    grid $lf2.load -row 2 -column 2 -sticky w -padx 6 -pady 2
+    grid $lf2.load -row 3 -column 2 -sticky w -padx 6 -pady 2
 
     hwtk::label $lf2.l4 -anchor w -justify left -wraplength 740 \
-        -text "Note: use one row per window - the file loaded into window N is kept per window, \
-and the result tree of every window is listed below."
-    grid $lf2.l4 -row 3 -column 0 -columnspan 3 -sticky w -padx 2 -pady 2
+        -text "'Input Model' offers *.inp (Abaqus) first, 'Input Result' offers *.res (FEMFAT) \
+first - the 'Browse...' buttons and the widget browsers of both fields use the same filter \
+list.  Fill in only what you have: model only, result only, or both.  \
+The file loaded into window N is kept per window; the result tree of every window is listed below."
+    grid $lf2.l4 -row 4 -column 0 -columnspan 3 -sticky w -padx 2 -pady 2
     return
 }
 
@@ -1615,17 +2102,31 @@ proc ::ModelLoader::UI::OnDataTypeChanged {} {
 
 #--------------------------------- step 1 actions -----------------------------
 proc ::ModelLoader::UI::OnApplyLayout {} {
-    variable varWindowCount
-    set wanted $varWindowCount
-    if {![string is integer -strict $wanted] || $wanted < 1} {
-        ::ModelLoader::UI::SetStatus "Layout: '$wanted' is not a valid number of windows."
+    # BUG FIX: the number is taken from the WIDGET first (see UI::ReadWindowCount).
+    # Reading only the Tcl variable could apply a default instead of the value
+    # the user picked, and the following UI::RefreshWindowList used to overwrite
+    # the field with the first entry of the list (=1) whenever the active page
+    # still showed fewer windows than requested.
+    set wanted [::ModelLoader::UI::ReadWindowCount]
+    if {$wanted eq ""} {
+        set raw [string trim [::ModelLoader::UI::WidgetText \
+            [set ::ModelLoader::UI::wWindowCount] $::ModelLoader::UI::varWindowCount]]
+        ::ModelLoader::UI::SetStatus \
+            "Layout: '$raw' is not a valid number of windows - kept $::ModelLoader::UI::lastGoodWindowCount."
+        ::ModelLoader::UI::SetWindowCountValue $::ModelLoader::UI::lastGoodWindowCount
         return
     }
+    # keep what the user picked, even while the layout is being applied
+    ::ModelLoader::UI::SetWindowCountValue $wanted
     ::ModelLoader::UI::SetStatus "Applying a $wanted window layout to the active page ..."
     catch { update idletasks }
     set res [::ModelLoader::Adapter::SetWindowCount $wanted]
     if {![dict get $res ok]} {
-        ::ModelLoader::UI::SetStatus "The layout was not changed."
+        # the request was refused: the user's number is NOT thrown away, it stays
+        # in the field so it can be retried after the layout was fixed by hand
+        ::ModelLoader::UI::SetWindowCountValue $wanted
+        ::ModelLoader::UI::SetStatus \
+            "Layout '$wanted' was refused - the value stays in the field: [dict get $res message]"
         ::ModelLoader::UI::AppendInfo [list "" "LAYOUT" \
             "  $wanted window(s) requested - refused: [dict get $res message]"]
         ::ModelLoader::UI::RefreshWindowList
@@ -1636,9 +2137,12 @@ proc ::ModelLoader::UI::OnApplyLayout {} {
     } else {
         ::ModelLoader::UI::SetStatus "Layout applied: $wanted window(s), token '[dict get $res layout]'."
     }
+    # write the applied value back into variable AND widget, then refresh
+    ::ModelLoader::UI::SetWindowCountValue $wanted
     # windows that do not exist any more lose their recorded state
     ::ModelLoader::State::PruneTo [dict get $res windows]
     ::ModelLoader::UI::RefreshWindowList
+    ::ModelLoader::UI::SetWindowCountValue $wanted
     return
 }
 proc ::ModelLoader::UI::OnRefreshPage {} {
@@ -1656,41 +2160,90 @@ proc ::ModelLoader::UI::OnRefreshPage {} {
 }
 
 proc ::ModelLoader::UI::OnLoadModel {} {
+    variable varModelFile
+    variable varResultFile
     variable varFile
     variable varReader
     variable varTargetWin
-    set path [string trim $varFile]
-    if {$path eq ""} {
-        set msg "Step 1: choose a model / result file first."
+
+    # 1. read what the user (or a browser) put into the two fields ------------
+    set winIdx [::ModelLoader::UI::OnTargetWindowChanged]
+    if {![string is integer -strict $winIdx] || $winIdx < 1} {
+        ::ModelLoader::UI::SetStatus "Step 1: 'Target window' is not a window number."
+        return
+    }
+    set modelPath  [string trim $varModelFile]
+    set resultPath [string trim $varResultFile]
+    # backwards compatible: an old single field still works
+    if {$modelPath eq "" && $resultPath eq "" && [string trim $varFile] ne ""} {
+        set maybe [string trim $varFile]
+        if {[lsearch -exact [::ModelLoader::Logic::ResultExtensions] \
+                [string tolower [file extension $maybe]]] >= 0} {
+            set resultPath $maybe
+        } else {
+            set modelPath $maybe
+        }
+    }
+    if {$modelPath eq "" && $resultPath eq ""} {
+        set msg "Step 1: choose an 'Input Model' and/or an 'Input Result' file first."
         ::ModelLoader::UI::SetStatus $msg
         catch { tk_messageBox -title "Model Loader" -icon warning -message $msg \
             -parent .modelLoaderGUI }
         return
     }
-    if {![string is integer -strict $varTargetWin]} {
-        ::ModelLoader::UI::SetStatus "Step 1: 'Target window' is not a window number."
-        return
+
+    # 2. post-process both paths (normalise, existence, extension warning) ----
+    set notes {}
+    foreach {kind path widget varname} [list \
+            model  $modelPath  $::ModelLoader::UI::wModelFile  ::ModelLoader::UI::varModelFile \
+            result $resultPath $::ModelLoader::UI::wResultFile ::ModelLoader::UI::varResultFile] {
+        if {[string trim $path] eq ""} { continue }
+        set check [::ModelLoader::Logic::CheckChosenFile $path $kind]
+        set norm  [dict get $check path]
+        if {$norm eq ""} { set norm [string trim $path] }
+        ::ModelLoader::UI::SetFileWidget $widget $varname $norm
+        if {$kind eq "model"} { set modelPath $norm } else { set resultPath $norm }
+        if {![dict get $check ok]} {
+            set msg "Step 1: [dict get $check message]"
+            ::ModelLoader::UI::SetStatus $msg
+            catch { tk_messageBox -title "Model Loader" -icon warning -message $msg \
+                -parent .modelLoaderGUI }
+            return
+        }
+        if {[dict get $check message] ne ""} { lappend notes [dict get $check message] }
     }
-    set winIdx $varTargetWin
-    ::ModelLoader::UI::SetStatus "Loading [::ModelLoader::Logic::Basename $path] into window $winIdx ..."
+    set varFile [expr {$modelPath ne "" ? $modelPath : $resultPath}]
+
+    # 3. load model and/or result into the selected window --------------------
+    ::ModelLoader::UI::SetStatus "Loading into window $winIdx ..."
     catch { update idletasks }
-    set res [::ModelLoader::Adapter::LoadAndRefresh $winIdx $path $varReader]
+    set res [::ModelLoader::Adapter::LoadAllAndRefresh $winIdx $modelPath $varReader \
+                                                              $resultPath $varReader]
     if {![dict get $res ok]} {
         ::ModelLoader::UI::AppendInfo [list "" "LOAD INTO WINDOW $winIdx" \
-            "  file   : $path" \
+            "  model  : [expr {$modelPath  eq "" ? {<none>} : $modelPath}]" \
+            "  result : [expr {$resultPath eq "" ? {<none>} : $resultPath}]" \
             "  FAILED : [dict get $res message]" \
             "  hint   : if HyperView picked the wrong reader, type the exact reader \
 label into 'Reader (optional)' and load again"]
         ::ModelLoader::UI::SetStatus "Loading failed: [dict get $res message]"
     } else {
-        ::ModelLoader::UI::AppendInfo [list "" "LOAD INTO WINDOW $winIdx" \
-            "  file    : $path" \
-            "  reader  : [expr {$varReader eq \"\" ? {<auto detected>} : $varReader}]" \
-            "  models  : [dict get $res models]  files: [dict get $res files]" \
+        set lines [list "" "LOAD INTO WINDOW $winIdx" \
+            "  model   : [expr {$modelPath  eq "" ? {<none>} : $modelPath}]" \
+            "  result  : [expr {$resultPath eq "" ? {<none>} : $resultPath}]" \
+            "  reader  : [expr {$varReader eq "" ? {<auto detected>} : $varReader}]" \
+            "  mode    : [dict get $res mode]   models/further files: [dict get $res models] \
+[dict get $res files]" \
             "  subcase : [llength [dict get $res subcases]]" \
             "  state   : stored, see the result tree below"]
-        ::ModelLoader::UI::SetStatus "Loaded [::ModelLoader::Logic::Basename $path] into window \
-$winIdx : [llength [dict get $res subcases]] subcase(s) found."
+        foreach note $notes { lappend lines "  note    : $note" }
+        foreach warn [dict get $res warnings] { lappend lines "  warning : $warn" }
+        ::ModelLoader::UI::AppendInfo $lines
+        set status "Loaded into window $winIdx : [llength [dict get $res subcases]] subcase(s) found."
+        if {[llength [dict get $res warnings]] > 0} {
+            append status " ([llength [dict get $res warnings]] warning(s), see the pane)"
+        }
+        ::ModelLoader::UI::SetStatus $status
     }
     ::ModelLoader::UI::RefreshWindowList
     return
