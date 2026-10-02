@@ -11,7 +11,10 @@ A single-file Tcl wizard for **HyperView 2022** that
    result file per window** (Abaqus `*.inp` for the model, FEMFAT `*.res` and
    the common result formats for the results), then
 2. applies a contour plot (subcase, simulation, result type, component,
-   averaging, layer) to the chosen window - or to every loaded window at once.
+   averaging, layer) to the chosen window - or to every loaded window at once -
+   and can load a saved **legend** (`*.tcl` / `*.hvl`) into it, and
+3. optionally imports a **view list** and writes **PNG captures** of the target
+   window or of every window of the active page.
 
 Everything lives in one file.  The only thing the file needs besides plain Tcl
 is the HyperWorks Tk library (`hwtk`) that ships with HyperView.
@@ -53,7 +56,8 @@ The dialog opens at the mouse pointer.
 | Widget | What it does |
 |--------|--------------|
 | *Windows on the active page* | Target number of windows (1 2 3 4 6 8 9 12 16 - any other positive number you type is added to the list). The value you enter is **kept and applied**, also when the layout request is refused (fix 1). |
-| **Apply layout** | Sets the active page to that many windows (see V1). Already correct layouts are left untouched. |
+| **Apply layout** | Sets the active page to that many windows (see V1). Already correct layouts are left untouched. The candidates follow a fixed preference order (F3): the squarest arrangement first, and a token that HyperView itself already accepted for that count always at the very front - the same count can no longer jump between `2x1`, `1 X 2` and `16`. |
+| **Learn layouts** | (F3) Probes the active page once: for every count from the current one upwards (`Logic::LayoutProbeOrder`; never a smaller one - a smaller layout would close windows with loaded models) the candidates of `Logic::LayoutCandidates` are tried until HyperView accepts one, and the accepted token is cached in `State::layoutTokenByCount`. The original layout is put back afterwards, and the learned mappings plus the restored window count are printed in the information pane. On a page that cannot be read the probe is only *reported* (`the probe did not run: ...`), never thrown at the GUI. |
 | **Refresh page info** | Re-reads page index, window count and layout token and prints them. |
 | *Target window* | The window the following actions work on. Your selection is never reset by a refresh - the list simply grows when the page has fewer windows (fix 1). |
 | *Input Model* | `hwtk::openfileentry` (or an entry + **Browse...**) with a **model** filter: `*.inp` (Abaqus) first, then `*.bdf/*.dat/*.nas` (Nastran), `*.fem` (OptiStruct), `*.h3d`, `*.odb` and an `All Files` entry. |
@@ -81,12 +85,40 @@ Repeat *Load into window* once per window; each window keeps its own file(s).
 | *Component* | Component list of the selected result type. |
 | *Averaging* | `<default>` or one of the V2 strings. |
 | *Layer* | `<default>` = skip the layer call completely, otherwise one of the V3 strings. |
+| *Legend file* | (F4) `hwtk::openfileentry` (or an entry + **Browse...**) with a legend filter: `*.tcl` (**Legend Tcl Scripts**, an exported legend) first, then `*.hvl` (**HyperView Legend**) and an `All Files` entry; `Logic::LegendExtensions` accepts `.tcl .hvl .txt` and an unusual extension is only a `warning:` - the file is sourced anyway. |
+| **Load legend** | (F4) Sources the chosen legend file into the running session (a saved legend *is* a Tcl script), switches the legend of the selected window on (`SetDisplayOptions legend true`, V11) and redraws it. The file is remembered per window (`State::legendFileByWindow`) and every failure (missing / empty / raising file) is reported in the status line and in the pane - a legend that raised an error is never drawn. |
 | **Apply to all loaded windows (same subcase label)** | Fans the settings out to every loaded window that has a subcase with the same label; windows without it are reported as skipped. |
 | **Reload lists** | Manual refresh of subcase / result type / component lists (fallback for V9). |
 | **Apply contour** | Runs the contour for the selected job(s) and reports OK / FAIL plus any V2/V3/V4 warnings per window. |
 
 Buttons: **< Back**, **Next >**, **Apply contour**, **Close** (plus the dialog's
-`cancel` re-bound to Close).
+`cancel` re-bound to Close).  *Next* walks 1 -> 2 -> 3, *Apply contour* is enabled
+on step 2 **and** step 3 (the contour settings of step 2 stay valid).
+
+### Step 3 - PNG capture
+
+| Widget | What it does |
+|--------|--------------|
+| *View list file* | (F5) Optional plain-text list, one view per line, with its own filter (**View List Files** = `*.txt *.lst *.csv` first, then `*.tcl` and `All Files`) and a **Browse...** button that offers the same list. A line is `name`, `name <orientation>` (canonical `iso front back left right top bottom`, plus the aliases of `Logic::ViewAliases` such as `rear`, `isometric`, `base`) or `name` followed by the 16 numbers of a view matrix - the format `hvw` uses. Blank lines and `#`, `//`, `;` comments are skipped. Without a view list one PNG per window is written (`w<window>_view.png`). |
+| **Import views** | Reads the file with `Logic::ViewListFromFile` / `Logic::ParseViewList`, reports every syntax error in the status line, in the pane and in a warning box (then **nothing** is imported), and stores the entries in the State layer, where the capture picks them up. The pane lists each entry and how it will be interpreted (`orientation <x>`, `matrix (<16 numbers>)` or `name only - no orientation`). |
+| *Output folder* | Target folder of the PNG files. It is **created when it does not exist** (`file mkdir`), and the folder is checked *before* the first `hwi` call. |
+| **Choose folder...** | `tk_chooseDirectory` (plain Tk - hwtk has no folder entry) and writes the folder back into the field. |
+| *Scope* | `target` (the window of step 2, default) or `all` (every window of the active page). |
+| **Capture target** / **Capture all** | Capture right away with the scope the button names - both use the scope field above and the imported view list (a view list file that is typed into the field but never imported is imported on the fly). The files are named `w<window>_<view>.png`, so the capture of a whole page can never overwrite the file of another window. |
+| *Information pane* | One `PNG CAPTURE (step 3)` section per run: `N file(s) written to <folder>`, one `OK <file>` line per written PNG (or `FAILED - <reason>`), a `warning:` for every window / view that did not work and the capture form that worked (`CaptureImage`, `CaptureActiveWindow png`, ... - remembered for the next run). |
+
+The capture itself is the single unconfirmed call of step 3: `Adapter::CapturePng`
+walks the four forms of V12 - `<client> CaptureImage <file>` (one window,
+graphic area only), `<session> CaptureActiveWindow png <file>`,
+`<session> CaptureScreen png <file>` (the spelling of the shipped `hvTest.tcl`)
+and `<session> CaptureScreen png <file> <quality>` (`training.tcl`) - and caches
+the form that worked in `State::captureMode`, so later captures start with it.
+Views are set with `<window> GetViewControlHandle` -> `<view> SetOrientation`
+(plus `<view> Fit`, like `display_service.tcl`) or `<view> SetViewMatrix`
+(V12, non-fatal - the PNG is written anyway), a single window is made active
+with `<page> SetActiveWindow` (V13).  Everything the file system can decide
+(folder exists, list parses, file names) is decided **before** the first `hwi`
+call - a typo therefore costs no HyperView round trip.
 
 ---
 
@@ -103,9 +135,9 @@ Debug logging: `set ::ModelLoader::debug 1` prints every `hwi` call and its
 result (including failures) to the Tcl console.
 
 Handle hygiene: every object handle (`mlSess`, `mlProj`, `mlPage`, `mlWin`,
-`mlClient`, `mlModel`, `mlResult`, `mlContour`, `mlLegend`) is released through
-`Adapter::ReleaseHandles`, so `info commands`-based lookups never leave stale
-handles behind.  `hwi OpenStack` / `hwi CloseStack` are paired around every
+`mlClient`, `mlModel`, `mlResult`, `mlContour`, `mlLegend`, `mlView`) is released
+through `Adapter::ReleaseHandles`, so `info commands`-based lookups never leave
+stale handles behind.  `hwi OpenStack` / `hwi CloseStack` are paired around every
 adapter entry point.
 
 ---
@@ -114,23 +146,31 @@ adapter entry point.
 
 ```
 hwi        OpenStack, CloseStack, GetSessionHandle
-<session>  GetProjectHandle
-<project>  GetActivePage, GetPageHandle, GetNumberOfPages, AddPage
-<page>     GetWindowHandle, GetNumberOfWindows, GetActiveWindow,
-           GetLayout, SetLayout
-<window>   GetClientHandle
+<session>  GetProjectHandle, CaptureActiveWindow (V12), CaptureScreen (V12)
+<project>  GetActivePage, GetPageHandle
+<page>     GetWindowHandle, GetNumberOfWindows, GetLayout, SetLayout,
+           SetActiveWindow (V13)
+<window>   GetClientHandle, GetViewControlHandle (V12)
 <client>   Draw, GetActiveModel, GetModelHandle, GetModelList, AddModel,
-           RemoveAllModels, SetDisplayOptions
+           SetDisplayOptions ('contour true' after a contour, 'legend true',
+           V11), CaptureImage (V12)
 <model>    GetFileName, GetResultCtrlHandle, SetResult (V10), AddResultFile (V10)
 <result>   GetSubcaseList, GetSubcaseLabel, GetCurrentSubcase,
            SetCurrentSubcase, GetSimulationList, GetCurrentSimulation,
-           SetCurrentSimulation, GetNumberOfSimulations, GetDataTypeList,
-           GetDataComponentList, GetContourCtrlHandle
+           SetCurrentSimulation, GetDataTypeList, GetDataComponentList,
+           GetContourCtrlHandle
 <contour>  SetDataType, SetDataComponent, SetAverageMode, SetEnableState,
            SetLayer, GetLegendHandle
 <legend>   SetType
+<view>     SetOrientation, SetViewMatrix, Fit (V12)
 any handle ReleaseHandle
 ```
+
+`<project> GetNumberOfPages` / `AddPage`, `<page> GetActiveWindow`,
+`<client> RemoveAllModels` and `<result> GetNumberOfSimulations` belong to the
+vocabulary the file header documents, but the wizard itself never calls them -
+the GUI drives the **active page** and the windows it really has (see
+*Limitations*).
 
 ---
 
@@ -147,14 +187,21 @@ hwtk::combobox      (-state readonly -values -textvariable, configure -values,
 hwtk::checkbutton   (-variable)
 ```
 
-Plain Tk is used in exactly **three** places plus the modal warnings:
+Plain Tk is used in exactly **four** places plus the modal warnings:
 
 * the read-only **information pane** - `listbox` + `scrollbar` inside a
   `hwtk::labelframe`, because hwtk has no listbox wrapper;
-* `tk_getOpenFile` for the two **Browse...** buttons of step 1 (with the same
-  `-filetypes` list the fields offer), which also serves as the fallback browser
-  when a build has no `hwtk::openfileentry` or refuses `-filetypes`;
+* `tk_getOpenFile` for the **Browse...** buttons of the file fields (with the
+  same `-filetypes` list the fields offer), which also serves as the fallback
+  browser when a build has no `hwtk::openfileentry` or refuses `-filetypes`;
+* `tk_chooseDirectory` for the **PNG output folder** of step 3 (hwtk has no
+  folder entry), which also accepts a typed-in folder that does not exist yet;
 * `tk_messageBox` for the blocking validation / error pop-ups.
+
+`wm deiconify` / `wm withdraw` are a plain-Tk **safety net** for those two
+dialog methods: when `$dlg post` / `$dlg hide` are refused in a build, the
+wizard logs the reason and falls back to them, so the dialog still appears and
+still closes.
 
 The fields themselves degrade in three steps, so the two inputs work in every
 build: `hwtk::openfileentry -filetypes` -> `hwtk::openfileentry` without the
@@ -169,12 +216,12 @@ recess (`Adapter::Log` records the reason), so the GUI stays usable.
 
 ## 7. "# VERIFY:" list - every item that could not be confirmed for 2022
 
-All of them are marked in the code with a `# VERIFY:` comment (V1 - V10) and are
+All of them are marked in the code with a `# VERIFY:` comment (V1 - V13) and are
 written so that a wrong guess degrades instead of failing:
 
 | # | Item | What is done / how to adapt |
 |---|------|-----------------------------|
-| **V1** | `<page> SetLayout <token>` | The call itself is confirmed (real scripts call `pageHandle SetLayout $layout`), but the accepted token spelling is installation specific. `Logic::LayoutCandidates` tries candidates (`1x2`, `2x1`, `1 X 2`, `1 x 2`, `2`, `single`, `2H`, ...), keeps the first token whose `GetNumberOfWindows` matches and caches it in `State::layoutTokenByCount`. An already correct layout is never touched. |
+| **V1** | `<page> SetLayout <token>` | The call itself is confirmed (real scripts call `pageHandle SetLayout $layout`), but the accepted token spelling is installation specific. `Logic::LayoutCandidates` tries the arrangements of the count, each in **four spellings** (`2x2`, `2 X 2`, `2 x 2`, `2 - 2`), then the plain count (`4`) and the legacy words (`single`, `1x1`, `2H`, `2V`, ...) - in a **fixed preference order** (F3: squarest arrangement first, `Logic::LayoutPreference`), keeps the first token whose `GetNumberOfWindows` matches and caches it in `State::layoutTokenByCount`; a token HyperView itself accepted for that count is always the first candidate and is never overwritten by a guess. An already correct layout is never touched. The **Learn layouts** button (F3) walks the counts from the current one upwards (`Logic::LayoutProbeOrder`), remembers every accepted token and puts the original layout back - so one click replaces guessing by measured data. |
 | **V2** | `<contour> SetAverageMode <mode>` | Mode strings `None Simple Advanced Maximum Minimum` live in `Logic::averagingModes`. Non-fatal: a refused mode is reported as a warning for that window. Adjust the list if your installation spells them differently. |
 | **V3** | `<contour> SetLayer <layer>` | `Logic::layerChoices` = `<default> Z1 Z2 Lower Upper Mid`. `<default>` makes the adapter skip the call completely, so a build without `SetLayer` still works; a refused layer is a warning, not an error. |
 | **V4** | `<contour> GetLegendHandle` + `<legend> SetType dynamic` | Non-fatal. If the legend handle or the dynamic legend type is refused, the contour is still applied and a warning is printed. |
@@ -184,6 +231,9 @@ written so that a wrong guess degrades instead of failing:
 | **V8** | `hwtk::combobox configure -values <list>` | Used to re-populate the subcase / result type / component lists. hwtk comboboxes are ttk widgets, so `-values` is a list option and the list is passed **as it is** (wrapping it in `[list ...]` would glue all entries into one). |
 | **V9** | `<<ComboboxSelected>>` on hwtk comboboxes | Bound so that changing the subcase refills the result type list and changing the result type refills the component list. If a build does not generate the virtual event, the **Reload lists** button in step 2 does exactly the same job. The same event - plus `<Return>` / `<FocusOut>` - guarantees that the window count and the target window reach their variables (fix 1). |
 | **V10** | Attaching a **result** file to a model that is already in the window | `Adapter::AttachResult` tries `<model> SetResult <resultFile>` first (the documented, reader-free way - `AddModel <result>` alone only reports the file and never attaches it, which was bug 2), falls back to `<model> AddResultFile <resultFile>` and then to `<client> AddModel <resultFile>`. **A refusal is never fatal**: the model stays loaded and the reason is printed as a `warning:` line with the hint to use *File > Load > Results*. If only a result file is given, it is loaded with a single `AddModel` and HyperView builds the model from it. |
+| **V11** | `<client> SetDisplayOptions legend true` after a legend file was sourced | 'Load legend' (F4) sources the chosen `*.tcl` / `*.hvl` file - there is no `hwi` command that reads a legend file, and a saved legend *is* a Tcl script of `hwi` calls. Only the switch-on and the `<client> Draw` afterwards are `hwi` calls; a legend whose script raised an error is **not** drawn and the Tcl error is printed. A refused switch-on is a warning, the file stays remembered. |
+| **V12** | PNG capture | 'Capture target' / 'Capture all' (F5) try four forms in this order: `<client> CaptureImage <file>` (one window, graphic area only), `<session> CaptureActiveWindow png <file>`, `<session> CaptureScreen png <file>` (the spelling of the shipped `hvTest.tcl`) and `<session> CaptureScreen png <file> <quality>` (`training.tcl`; the quality is `Logic::CaptureQuality`). The form that worked is cached in `State::captureMode` and tried **first** from then on; only when all four are refused is the window reported as `FAILED`. Views of an imported view list are set with `<window> GetViewControlHandle` -> `<view> SetOrientation <name>` (followed by `<view> Fit`, exactly like `display_service.tcl`) or `<view> SetViewMatrix <16 values>` (one argument, no `Fit` - that would throw the stored zoom away). Both are non-fatal: the PNG is written anyway and the refusal appears as a `warning:`. |
+| **V13** | `<page> SetActiveWindow <idx>` | Called before every single-window capture (also for each window of *Capture all*), because a form that grabs the active window or the whole screen needs it. The call is **best effort**: its answer is not checked, so a build that does not know it still captures - it may then just grab the window that was active already. Only a *really* failed capture is reported (`FAILED` plus a `warning:` per window / view) and a refusal of the call itself is visible in the Tcl console with `set ::ModelLoader::debug 1`. |
 
 ---
 
@@ -203,10 +253,18 @@ Exit code `0` = every check passed, `1` = at least one check failed.
 
 Everything that contains no `hwi` and no widget call: the `State` store, the
 `Logic` helpers (subcase / simulation / component tree, spec assembly and
-fan-out, validation, the two file-type filters, `ReaderHint` - now a status-line
-suggestion only - and `CheckChosenFile`), the pure `UI` helpers (including
-`ReadWindowCount` / `InterpretWindowCount` of fix 1) and the adapter paths that
-fail before an `hwi` call is reached.
+fan-out, validation, the file-type filters and extensions, `ReaderHint` - now a
+status-line suggestion only -, `CheckChosenFile` and `ParseViewList`), the pure
+`UI` helpers (including `ReadWindowCount` / `InterpretWindowCount` of fix 1) and
+the adapter paths that fail before an `hwi` call is reached.
+
+Sections **3b**, **3c**, **3d** and **3e** cover the three new features without
+HyperView: the layout mapping of a window count (`LayoutPreference`,
+`LayoutArrangements`, `PreferredLayoutToken`, `LayoutCandidates`,
+`LayoutProbeOrder` - fix 3), the legend file (extension checks, empty file, a
+file that raises - fix 4) and the view list plus the PNG capture plan (the parser
+with comments / orientations / matrices / malformed lines, the output folder
+rules, the file naming `w<window>_<view>.png` - fix 5).
 
 Section **4b** additionally installs a small **fake `hwi`** (skipped if a real
 `hwi` is present, so the file is safe to source inside HyperView) and walks the
@@ -216,8 +274,8 @@ whole reader-free load sequence of fix 2 with it: model only, model + result via
 result only, and `LoadAllAndRefresh` carrying `mode` + `warnings` into the result
 tree.  `GetNumberOfWindows` answers with the scalar `4` in one scenario and with
 the list `1 2 3 4` in the other, so both shapes of fix 1 are covered.  Its last
-line is `ALL CHECKS PASSED` (203 checks; the line above it prints
-` source test   : 203 passed, 0 failed`).
+line is `ALL CHECKS PASSED` (401 checks; the line above it prints
+` source test   : 401 passed, 0 failed`).
 
 ### `selftest_ui_hv_model_loader.tcl` (GUI)
 
@@ -229,12 +287,15 @@ that additionally understands the methods `recess`, `insert apply`,
 code runs and is verified:
 
 * `Bootstrap` succeeds with the stubs in place,
-* the whole dialog including banner, both steps, information pane and status
+* the whole dialog including banner, all three steps, information pane and status
   line is built, once with `insert apply` **and** once with the own-button-bar
   fallback,
-* `ShowStep` 1/2, `StepNext`, `StepBack`, `RefreshWindowList`, `RefreshStep2`,
+* `ShowStep` 1/2/3, `StepNext`, `StepBack`, `RefreshWindowList`, `RefreshStep2`,
+  `RefreshStep3`,
 * every event handler: `OnSubcaseChanged`, `OnDataTypeChanged`,
   `OnApplyLayout`, `OnRefreshPage`, `OnLoadModel`, `OnRefreshWindow`, `OnApply`,
+  `OnLearnLayouts`, `OnLoadLegend`, `OnImportViewList`, `OnCapture` (target and
+  all) and the folder pickers,
 * `DoClose` and a second `Build` afterwards.
 
 Section **5b** is the regression test of **fix 1** (the window field keeps the
@@ -248,16 +309,28 @@ Section **5c** is the regression test of **fix 2** (`*.inp` in the model filter,
 `ApplyChosenFile` writing the normalised path back, both paths reaching the
 adapter, and - since the reader entry was removed - that no `Load into window`
 path needs a reader field while the `ReaderHint` suggestion survives).
+The sections **5d** - **5g** cover the three new features on the widget level:
+the *Learn layouts* button and the layout token order (fix 3), the legend field
+of step 2 and a legend script that raises (fix 4), the step-3 navigation, the
+view list field / *Import views* / the rejected view list (fix 5) and the PNG
+output folder, the capture plan and a capture without `hwi` (fix 5).  They also
+assert that every action report really lands in the **information pane** - a
+regression test for the ordering rule that the pane is replaced (not extended)
+by `RefreshWindowList` / `RefreshStep3`.
 
 Every `hwi` call fails in this environment - which is exactly the point: the
 test proves that all of those failures are reported to the user instead of
 aborting the GUI.  Expected summary:
 
 ```
- UI smoke test : 149 passed, 0 failed
- stub notes    : 4 (unmodelled options, pop-up windows and the missing hwi - expected;
-                 three of them are the tk_messageBox warnings of the fix-2 failure paths)
+ UI smoke test : 302 passed, 0 failed
+ stub notes    : 10 (unmodelled options,
+                 pop-up windows and the missing hwi - expected)
 ```
+
+The stub notes are the places a stub cannot model (unmodelled widget options,
+the pop-up windows and the missing `hwi`) - one of them per `tk_messageBox` that
+a real HyperView would show.
 
 ---
 
@@ -277,14 +350,19 @@ aborting the GUI.  Expected summary:
 | `note : '.xyz' is unusual for a model file` | Only a hint - the file is passed to HyperView anyway (`AddModel <file>` detects the reader). Rename the file to its usual extension if the detection picks the wrong reader. |
 | `warning : the result file '...' could not be attached` | V10: none of `model SetResult <result>`, `model AddResultFile <result>` and `client AddModel <result>` was accepted. The model is loaded; add the results with *File > Load > Results*. |
 | Contour applied but nothing visible | The contour is switched on with `SetEnableState true` and `SetDisplayOptions contour true`; if the display options call is refused, enable the contour in HyperView manually. |
+| `Apply layout` reports "no candidate worked" **directly after** *Learn layouts* said the same | Both use the same candidate list. A build that accepts no token at all needs a manually set layout; the token that HyperView reports for it is then cached and used first (`Learn layouts` prints whether a token was accepted). |
+| *Learn layouts* says "the probe did not run" | The active page could not be read (no `hwi` / no layout API in that build). `set ::ModelLoader::debug 1` and repeat - the console shows the failing `hwi` call; nothing is thrown at the GUI. |
+| `Load legend` applied the file but the legend does not appear | V11: `<client> SetDisplayOptions legend true` was refused (the warning names it) - switch the legend on in HyperView's own display options; the file itself was sourced (or the Tcl error of the script is shown instead). |
+| `PNG capture` reports `FAILED` for every window | V12: none of the four capture forms was accepted. The pane shows the message of the last form that was refused (a `warning:` per window / view); `set ::ModelLoader::debug 1` prints all four attempts. Make the window active by hand and retry, or use *File > Capture* in HyperView. |
+| The PNG output folder is refused | `Logic::CheckOutputDir` rejects only an **empty** field (its message `no PNG output folder was chosen` shows up as *Choose the PNG output folder first*) and a path that is an existing **file** (`'<path>' is a file, not a folder` in the status line). A folder that does not exist yet is created together with missing parents (`file mkdir`) *before* the first `hwi` call; a folder that cannot be created is reported with the OS error. |
 
 ### Limitations
 
 * **2022 only.** Nothing newer than 2022 is used; on 2023+ everything should
   still work but the automatic token/reader discovery may find different names.
 * The wizard works on the **active page** only.  Multi-page handling
-  (`AddPage`, `GetNumberOfPages`) is prepared in the adapter's command list but
-  not driven by the GUI.
+  (`AddPage`, `GetNumberOfPages`) is part of the documented command vocabulary
+  but nothing calls it - the GUI never switches the page.
 * No undo: applying a contour changes the window immediately.
 * Attaching a result file to an already loaded model (V10) is the one step whose
   exact API could not be confirmed for 2022; the three known forms are tried
@@ -293,6 +371,16 @@ aborting the GUI.  Expected summary:
 * The two file fields are remembered per window in the State layer, but only the
   files that HyperView itself reports (`<model> GetFileName`) are re-read when a
   window is refreshed.
+* The **layout token cache**, the **legend file per window** and the **capture
+  mode** live in the State layer of the running session only - a new
+  `::ModelLoader::Show` starts from the defaults again.
+* The layout mappings learned by **Learn layouts** are remembered per window
+  count, but not written to disk: the probe costs one click per session.
+* **PNG capture** is the only step that writes files, and **Load legend** the
+  only one that changes the display outside the contour.  Both are unconfirmed
+  for 2022 (V11 / V12) and degrade with a warning instead of failing: a capture
+  that no form accepts writes nothing, a legend whose script raised is not
+  drawn.
 * No persistent settings; the dialog starts from its defaults after each
   `::ModelLoader::Show`.
 

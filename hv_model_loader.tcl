@@ -24,6 +24,24 @@
 #           file is attached with '<model> SetResult <file>' first and
 #           '<model> AddResultFile <file>' second.  Logic::ReaderHint survives as
 #           a status-line suggestion only.
+#          F3 (layout mapping) 'Apply layout' did not map a window count to ONE
+#           layout: 'Logic::LayoutCandidates' was sorted alphabetically, so the
+#           same count could be applied as '1 X 2' or as '16' or as '2x1'
+#           depending on the build - i.e. the arrangement was a lottery and a
+#           count like 6 could end up 6x1 instead of 2x3.  The candidates now
+#           follow a fixed, documented preference order (Logic::LayoutPreference:
+#           squarest arrangement first, the token HyperView itself reported for
+#           that count always at the very front), and the new 'Learn layouts'
+#           button probes the page once - it caches the token every count really
+#           accepts and puts the original layout back afterwards.
+#          F4 (legend file)    step 2 can load a saved legend from a *.tcl file
+#           into the target window (Adapter::LoadLegendFromFile): the file is
+#           sourced (that is what a saved legend script contains - hwi calls),
+#           the legend is switched on and the window is redrawn.
+#          F5 (capture png)    new step 3 captures the graphic area of the target
+#           window - or of every window of the page - as PNG files
+#           (Adapter::CapturePng).  A view list file can be imported: every
+#           entry of the file is applied as a view and gets its own PNG name.
 #
 #  LAYERS (single file, clearly separated):
 #     SECTION 1  STATE / LOGIC     - pure Tcl, no hwi and no hwtk calls
@@ -35,35 +53,47 @@
 #
 #  --- hwi commands used ------------------------------------------------------
 #     OpenStack, CloseStack, GetSessionHandle
-#     <session>  GetProjectHandle
-#     <project>  GetPageHandle, GetActivePage, GetNumberOfPages, AddPage
-#     <page>     GetWindowHandle, GetNumberOfWindows, GetActiveWindow,
-#                GetLayout, SetLayout
-#     <window>   GetClientHandle
+#     <session>  GetProjectHandle, CaptureScreen (V12), CaptureActiveWindow (V12)
+#     <project>  GetPageHandle, GetActivePage
+#     <page>     GetWindowHandle, GetNumberOfWindows,
+#                GetLayout, SetLayout, SetActiveWindow (V13)
+#     <window>   GetClientHandle, GetViewControlHandle (V12)
+#     <view>     SetOrientation, SetViewMatrix, Fit (V12)
 #     <client>   Draw, GetActiveModel, GetModelHandle, GetModelList,
-#                AddModel, RemoveAllModels, SetDisplayOptions
+#                AddModel, SetDisplayOptions ('contour true' after a contour /
+#                'legend true', V11), CaptureImage (V12)
 #     <model>    GetFileName, GetResultCtrlHandle, SetResult, AddResultFile (V10)
 #     <result>   GetSubcaseList, GetSubcaseLabel, GetCurrentSubcase,
 #                SetCurrentSubcase, GetSimulationList, GetCurrentSimulation,
-#                SetCurrentSimulation, GetNumberOfSimulations, GetDataTypeList,
+#                SetCurrentSimulation, GetDataTypeList,
 #                GetDataComponentList, GetContourCtrlHandle
 #     <contour>  SetDataType, SetDataComponent, SetAverageMode, SetEnableState,
-#                GetLegendHandle
+#                SetLayer, GetLegendHandle
 #     <legend>   SetType
 #     every handle: ReleaseHandle
+#     The vocabulary also mentions 'GetNumberOfPages / AddPage' (<project>),
+#     'GetActiveWindow' (<page>), 'RemoveAllModels' (<client>) and
+#     'GetNumberOfSimulations' (<result>) - none of them is called by the
+#     wizard, it drives the active page and the windows the page really has.
 #
 #  --- hwtk / hwt commands used ----------------------------------------------
 #     hwtk::dialog, hwtk::frame, hwtk::labelframe, hwtk::label, hwtk::button,
 #     hwtk::entry, hwtk::openfileentry, hwtk::combobox, hwtk::checkbutton
 #     <dialog> recess / insert apply / buttonconfigure / hide / post
 #     plain Tk : listbox + scrollbar (read-only information pane),
-#                tk_getOpenFile (the 'Browse...' buttons of the two file fields,
-#                with the same -filetypes list the fields offer) and
+#                tk_getOpenFile (the 'Browse...' buttons of the file fields,
+#                with the same -filetypes list the fields offer),
+#                tk_chooseDirectory (the PNG output folder of step 3) and
 #                tk_messageBox for the modal warnings
+#                (plus 'wm deiconify' / 'wm withdraw' as the fallback when the
+#                 <dialog> methods 'post' / 'hide' are refused)
 #
 #  --- "# VERIFY:" list (see README.md for the detail) -----------------------
 #     V1  <page> SetLayout <token>          token spelling is installation
 #                                          specific -> auto discovery is used
+#                                          (fix 3: ordered candidates, the
+#                                          learned token first, plus the new
+#                                          'Learn layouts' probe)
 #     V2  <contour> SetAverageMode <mode>   exact mode strings
 #     V3  <contour> SetLayer <layer>        command presence in 2022
 #     V4  <contour> GetLegendHandle + <legend> SetType dynamic
@@ -81,6 +111,28 @@
 #         training.tcl does it -, <model> AddResultFile <resultFile> second,
 #         <client> AddModel <resultFile> last); no reader label is used.
 #         a refusal is a warning, never a failed load
+#     V11 - VERIFY: 'load legend from file' (fix 4).  There is no hwi command
+#         that reads a legend file, so the file is 'source'd (a saved legend is
+#         a Tcl script of hwi calls) and only the switch-on + redraw afterwards
+#         is done with <client> SetDisplayOptions legend true / <client> Draw.
+#         A file that cannot be read or sourced is reported, never fatal
+#     V12 - VERIFY: PNG capture (fix 5).  FOUR forms are tried in this order -
+#         '<client> CaptureImage <file>' (one window, graphic area only),
+#         '<session> CaptureActiveWindow png <file>' (the active window),
+#         '<session> CaptureScreen png <file>' (the whole screen / client
+#         area - this is the form used by hvTest.tcl) and
+#         '<session> CaptureScreen png <file> <quality>' (training.tcl adds the
+#         quality argument).  Whichever form worked first is cached in
+#         State::captureMode and tried FIRST from then on.  View entries are
+#         applied with <window> GetViewControlHandle -> <view> SetOrientation
+#         (then <view> Fit, like display_service.tcl) or <view> SetViewMatrix
+#         (one argument, no Fit) - both are non fatal, the PNG is written anyway
+#     V13 - VERIFY: '<page> SetActiveWindow <idx>' before each single window
+#         capture (also for every window of 'Capture all'), because the
+#         active-window / screen forms need it.  Best effort: the answer is not
+#         checked, so a build without the call still captures - it may then just
+#         grab the window that was active already.  A capture that really fails
+#         is reported as FAILED plus a warning per window / view
 #=============================================================================
 
 #=============================================================================
@@ -112,7 +164,7 @@ proc ::ModelLoader::Bootstrap {} {
     # refuses -filetypes), UI::CreateFileChooser falls back to
     # 'hwtk::entry' + a Browse button that calls 'tk_getOpenFile -filetypes'.
     if {[llength [info commands ::hwtk::openfileentry]] == 0} {
-        puts "\[ModelLoader\] NOTE: hwtk::openfileentry is not available - \
+        puts "\[ModelLoader\] NOTE: hwtk::openfileentry is not available -\
 the file fields fall back to an entry + 'tk_getOpenFile' browser."
     }
     return 1
@@ -136,6 +188,17 @@ namespace eval ::ModelLoader::State {
     variable windows {}
     # Discovered page layout tokens: dict windowCount -> layout token   (V1)
     variable layoutTokenByCount {}
+    # Fix 4: path of the legend file that was loaded last, per window
+    # (dict windowIdx -> path).  Display only.
+    variable legendFileByWindow {}
+    # Fix 5: the imported view list.  A list of dicts
+    # {name <file name stem> orientation <front|iso|...> matrix <16 numbers|{}>}
+    variable viewList {}
+    variable viewListFile ""
+    # Fix 5: last PNG folder and the capture form that worked
+    # (V12: clientImage | activeWindow | screen)
+    variable outputDir ""
+    variable captureMode ""
     variable lastError ""
     variable statusText ""
 }
@@ -224,8 +287,17 @@ proc ::ModelLoader::State::PruneTo {maxIdx} {
     return $dropped
 }
 #--------------------------------- layout cache -------------------------------
+# The token '<page> SetLayout <token>' that was accepted for a window count
+# (fix 3).  An EMPTY token is not a token: it CLEARS the entry, so
+# GetLayoutToken answers "" and LayoutTokenMap does not report a count the
+# wizard knows nothing about.
 proc ::ModelLoader::State::SetLayoutToken {count token} {
     variable layoutTokenByCount
+    set token [string trim $token]
+    if {$token eq ""} {
+        dict unset layoutTokenByCount $count
+        return ""
+    }
     dict set layoutTokenByCount $count $token
     return $token
 }
@@ -238,13 +310,82 @@ proc ::ModelLoader::State::LayoutTokenMap {} {
     variable layoutTokenByCount
     return $layoutTokenByCount
 }
+#--------------------------------- legend file / capture (fix 4 + 5) ----------
+proc ::ModelLoader::State::SetLegendFile {idx path} {
+    variable legendFileByWindow
+    dict set legendFileByWindow $idx $path
+    return $path
+}
+proc ::ModelLoader::State::GetLegendFile {idx} {
+    variable legendFileByWindow
+    if {![dict exists $legendFileByWindow $idx]} { return "" }
+    return [dict get $legendFileByWindow $idx]
+}
+# The imported view list: a list of entry dicts, see Logic::ParseViewList.
+proc ::ModelLoader::State::SetViewList {entries {file {}}} {
+    variable viewList
+    variable viewListFile
+    set viewList $entries
+    if {$file ne ""} { set viewListFile $file }
+    return $viewList
+}
+proc ::ModelLoader::State::GetViewList {} {
+    variable viewList
+    return $viewList
+}
+proc ::ModelLoader::State::SetViewListFile {file} {
+    variable viewListFile
+    set viewListFile $file
+    return $file
+}
+proc ::ModelLoader::State::GetViewListFile {} {
+    variable viewListFile
+    return $viewListFile
+}
+proc ::ModelLoader::State::SetOutputDir {dir} {
+    variable outputDir
+    set outputDir $dir
+    return $dir
+}
+proc ::ModelLoader::State::GetOutputDir {} {
+    variable outputDir
+    return $outputDir
+}
+# V12: remember which capture form worked so the next run starts with it.
+proc ::ModelLoader::State::SetCaptureMode {mode} {
+    variable captureMode
+    set captureMode $mode
+    return $mode
+}
+proc ::ModelLoader::State::GetCaptureMode {} {
+    variable captureMode
+    return $captureMode
+}
+# Wipes the whole State layer - the wizard starts from scratch ('reset all').
+# The discovered layout tokens belong to the page that was open when they were
+# learned, so they go too (fix 3): after a ResetAll the next 'Apply layout'
+# probes again instead of replaying a token of a page that is long gone.  The
+# same is true for the legend files of the windows, the view list, the output
+# folder and the capture mode (fix 4 + fix 5).
 proc ::ModelLoader::State::ResetAll {} {
     variable windows
+    variable layoutTokenByCount
     variable lastError
     variable statusText
+    variable legendFileByWindow
+    variable viewList
+    variable viewListFile
+    variable outputDir
+    variable captureMode
     set windows {}
+    set layoutTokenByCount {}
     set lastError ""
     set statusText ""
+    set legendFileByWindow {}
+    set viewList {}
+    set viewListFile ""
+    set outputDir ""
+    set captureMode ""
     return 1
 }
 namespace eval ::ModelLoader::Logic {
@@ -258,6 +399,17 @@ namespace eval ::ModelLoader::Logic {
     #      adapter then skips the layer call completely.
     variable layerChoices {<default> Z1 Z2 Lower Upper Mid}
     variable noSelection {(none)}
+    # V12 - VERIFY: orientation names accepted by <view> SetOrientation.  They are
+    #      the view names the shipped scripts use (display_service.tcl).
+    variable viewPresets {iso front back left right top bottom}
+    # Fix 5: the two capture scopes of step 3.
+    variable captureScopes {target all}
+    # Fix 5: file filters of step 3 (view list) and step 2 (legend).
+    variable viewListExtensions {.txt .lst .csv .tcl}
+    variable legendExtensions {.tcl .hvl .txt}
+    # PNG quality passed to CaptureScreen as the third argument (0..100).  It is
+    # only used by the CaptureScreen fallback of V12.
+    variable captureQuality 100
 }
 
 #--------------------------------- pure helpers ------------------------------
@@ -282,19 +434,95 @@ proc ::ModelLoader::Logic::LayerChoices {} {
 #      scripts call 'pageHandle SetLayout $layout'), but the accepted token
 #      spelling depends on the installation, so several candidates are tried
 #      and the working one is cached in State::layoutTokenByCount.
-proc ::ModelLoader::Logic::LayoutCandidates {count} {
-    set cand {}
-    set cached [::ModelLoader::State::GetLayoutToken $count]
-    if {$cached ne ""} { lappend cand $cached }
+#
+# FIX 3 - "Windows on active page": the candidates were returned as
+# 'lsort -unique' of everything that was generated, so the order in which the
+# tokens were tried had nothing to do with the window count: for 6 windows the
+# first try could be "1 X 6", for 12 windows the token "12" (a single window!)
+# and so on.  The mapping count -> layout was therefore not stable, and a count
+# with two possible arrangements (2 -> 1x2 or 2x1, 6 -> 2x3 or 3x2, ...) could
+# end up in either of them, seemingly at random.
+#
+# The order is now generated explicitly, and it is documented:
+#   1. the token this count was already accepted with (learned automatically
+#      after a successful SetLayout, or by the 'Learn layouts' probe)
+#   2. the PREFERRED arrangement of the count (Logic::LayoutPreference): the
+#      squarest one, rows first - 2 -> 1x2, 6 -> 2x3, 8 -> 2x4, 12 -> 3x4
+#   3. the transposed arrangement (2 -> 2x1, 6 -> 3x2, ...)
+#   4. every remaining divisor arrangement, squarest first
+#   5. the plain count and the legacy tokens (single, 2H, 2V, ...)
+# so 'Apply layout' always applies THE same layout for a given count, and once
+# HyperView reported a token for that count it is the very first candidate.
+#
+# Rows and columns of a count are the divisors of the count; rows <= cols is
+# what '1x2' means here (1 row, 2 columns = side by side), so for the small
+# counts the wizard prefers the wide arrangement - which is what the "windows on
+# active page" list of step 1 offers: 2 means two windows next to each other.
+proc ::ModelLoader::Logic::LayoutPreference {count} {
+    if {$count < 1} { return {1 1} }
+    set best {}
+    set bestSpread -1
     for {set r 1} {$r <= $count} {incr r} {
         if {$count % $r} { continue }
         set c [expr {$count / $r}]
-        lappend cand "${r}x${c}" "${c}x${r}" "${r} X ${c}" "${c} X ${r}"
-        lappend cand "${r} x ${c}" "${c} x ${r}"
+        # 'spread' = how far the arrangement is from a square (0 = square).
+        set spread [expr {abs($r - $c)}]
+        if {$best eq "" || $spread < $bestSpread} {
+            set best [list $r $c]
+            set bestSpread $spread
+        }
     }
+    return $best
+}
+# All arrangements of <count> that a 'RxC' style token can express, the
+# preferred one first, each as {rows cols}.
+proc ::ModelLoader::Logic::LayoutArrangements {count} {
+    set preferred [::ModelLoader::Logic::LayoutPreference $count]
+    set out {}
+    foreach pair [list $preferred [lreverse $preferred]] {
+        if {[lsearch -exact $out $pair] < 0} { lappend out $pair }
+    }
+    set rest {}
+    for {set r 1} {$r <= $count} {incr r} {
+        if {$count % $r} { continue }
+        set c [expr {$count / $r}]
+        set spread [expr {abs($r - $c)}]
+        lappend rest [list $spread $r $c]
+    }
+    foreach item [lsort -index 0 -integer $rest] {
+        set pair [lrange $item 1 2]
+        if {[lsearch -exact $out $pair] < 0} { lappend out $pair }
+    }
+    return $out
+}
+proc ::ModelLoader::Logic::PreferredLayoutToken {count} {
+    lassign [::ModelLoader::Logic::LayoutPreference $count] r c
+    return "${r}x${c}"
+}
+proc ::ModelLoader::Logic::LayoutCandidates {count} {
+    if {![string is integer -strict $count] || $count < 1} { return {} }
+    set cand {}
+    # 1. what HyperView itself accepted for this count (never overwritten by a
+    #    guess - see Adapter::ApplyLayout / Adapter::LearnLayouts)
+    set cached [::ModelLoader::State::GetLayoutToken $count]
+    if {$cached ne ""} { lappend cand $cached }
+    # 2.-4. the arrangements, preferred one first, in four spellings each
+    foreach pair [::ModelLoader::Logic::LayoutArrangements $count] {
+        lassign $pair r c
+        foreach t [list "${r}x${c}" "${r} X ${c}" "${r} x ${c}" "${r} - ${c}"] {
+            lappend cand $t
+        }
+    }
+    # 5. the plain count and the legacy words
     lappend cand $count
-    lappend cand "single" "2H" "2V" "3H" "3V"
-    return [lsort -unique $cand]
+    foreach t [list single 1x1 2H 2V 3H 3V 4H 4V] { lappend cand $t }
+    # Remove duplicates but KEEP THE ORDER (this is the actual fix - the old
+    # code ended with 'lsort -unique', which threw the preference away).
+    set out {}
+    foreach t $cand {
+        if {[lsearch -exact $out $t] < 0} { lappend out $t }
+    }
+    return $out
 }
 #--------------------------------- page window count --------------------------
 # BUG FIX 1: the return value of '<page> GetNumberOfWindows' is NOT the same in
@@ -406,6 +634,253 @@ proc ::ModelLoader::Logic::CheckChosenFile {path kind} {
     }
     return [dict create ok 1 path $norm kind $kind message $warn]
 }
+#--------------------------------- file filters of step 2 / step 3 ------------
+# 'Legend file' browser of step 2 (fix 4): a saved legend is a Tcl script.
+proc ::ModelLoader::Logic::LegendFileTypes {} {
+    return {
+        {"Legend Tcl Scripts" {.tcl}}
+        {"HyperView Legend"   {.hvl}}
+        {"All Files"          {*}}
+    }
+}
+# 'View list' browser of step 3 (fix 5): a plain text list, one view per line.
+proc ::ModelLoader::Logic::ViewListFileTypes {} {
+    return {
+        {"View List Files" {.txt .lst .csv}}
+        {"Tcl Scripts"     {.tcl}}
+        {"All Files"       {*}}
+    }
+}
+proc ::ModelLoader::Logic::LegendExtensions {} {
+    variable legendExtensions
+    return $legendExtensions
+}
+proc ::ModelLoader::Logic::ViewListExtensions {} {
+    variable viewListExtensions
+    return $viewListExtensions
+}
+#--------------------------------- views / view list (fix 5) -----------------
+proc ::ModelLoader::Logic::ViewPresets {} {
+    variable viewPresets
+    return $viewPresets
+}
+proc ::ModelLoader::Logic::CaptureScopes {} {
+    variable captureScopes
+    return $captureScopes
+}
+proc ::ModelLoader::Logic::CaptureQuality {} {
+    variable captureQuality
+    return $captureQuality
+}
+# Alias -> canonical orientation.  The canonical names are the ones
+# display_service.tcl hands to the view control.
+proc ::ModelLoader::Logic::ViewAliases {} {
+    return {
+        iso    {iso isometric iso_view}
+        front  {front fr frontal}
+        back   {back rear}
+        left   {left}
+        right  {right}
+        top    {top}
+        bottom {bottom base}
+    }
+}
+# Maps one token of a view list onto a canonical orientation, or "" when the
+# token is not a known orientation (then it is treated as a name only).
+proc ::ModelLoader::Logic::ViewOrientation {token} {
+    set t [string tolower [string trim $token]]
+    if {$t eq ""} { return "" }
+    foreach target [::ModelLoader::Logic::ViewPresets] {
+        set aliases [dict get [::ModelLoader::Logic::ViewAliases] $target]
+        if {[lsearch -exact $aliases $t] >= 0} { return $target }
+    }
+    return ""
+}
+#--------------------------------- view list file (fix 5) --------------------
+# A view list is a small text file with ONE entry per line, e.g.
+#
+#     # my steady views
+#     iso
+#     front_left    front
+#     custom_bottom bottom
+#     tilted        0.62 -0.39 0.69 0.0  -0.35 -0.91 0.21 0.0  ...
+#
+# * blank lines and comments (#, //, ;) are skipped,
+# * the FIRST token is the name; it is sanitised so that it can be used as a
+#   PNG file name,
+# * a remaining single token is read as an orientation (front, rear, iso, ...),
+# * a remaining group of 16 numbers is read as a view MATRIX (exactly what
+#   '<view> SetViewMatrix' expects),
+# * a line with a name only is orientation AND name (so 'front' works alone),
+# * duplicate names are made unique ('iso', 'iso-2') so no PNG is overwritten.
+# Returns a list of dicts: {name <stem> orientation <front|iso|...|{}> matrix
+#                           <16 numbers|{}> raw <original line>}
+proc ::ModelLoader::Logic::ParseViewList {text} {
+    set entries {}
+    set used {}
+    foreach rawLine [split [string map [list "\r" ""] $text] "\n"] {
+        set line $rawLine
+        foreach mark {# // ;} {
+            set p [string first $mark $line]
+            if {$p >= 0} { set line [string range $line 0 [expr {$p - 1}]] }
+        }
+        set toks [split [string map [list "," " " "\t" " "] $line] " "]
+        set toks [lsearch -all -inline -not $toks ""]
+        if {[llength $toks] == 0} { continue }
+        set name [::ModelLoader::Logic::SanitizeName [lindex $toks 0]]
+        set rest [lrange $toks 1 end]
+        set orientation ""
+        set matrix ""
+        if {[llength $rest] == 16 && [::ModelLoader::Logic::AllNumbers $rest]} {
+            set matrix $rest
+        } elseif {[llength $rest] >= 1} {
+            set orientation [::ModelLoader::Logic::ViewOrientation [lindex $rest 0]]
+        } else {
+            set orientation [::ModelLoader::Logic::ViewOrientation $name]
+        }
+        set name [::ModelLoader::Logic::UniqueName $used $name]
+        lappend used $name
+        lappend entries [dict create name $name orientation $orientation \
+            matrix $matrix raw [string trim $rawLine]]
+    }
+    return $entries
+}
+proc ::ModelLoader::Logic::AllNumbers {values} {
+    if {[llength $values] == 0} { return 0 }
+    foreach v $values {
+        if {![string is double -strict $v]} { return 0 }
+    }
+    return 1
+}
+# Makes a string usable as a file name stem: spaces -> _, everything that is
+# not [A-Za-z0-9._-] -> _, and an empty result becomes 'view'.
+proc ::ModelLoader::Logic::SanitizeName {name} {
+    set n [string trim $name]
+    set n [string map [list " " "_" "\\" "_" "/" "_" ":" "_"] $n]
+    regsub -all {[^A-Za-z0-9._-]} $n "_" n
+    set n [string trim $n "_.-"]
+    if {$n eq ""} { set n "view" }
+    return $n
+}
+# 'iso' twice -> 'iso', 'iso-2'
+proc ::ModelLoader::Logic::UniqueName {used name} {
+    if {[lsearch -exact $used $name] < 0} { return $name }
+    set i 2
+    while {[lsearch -exact $used "${name}-${i}"] >= 0} { incr i }
+    return "${name}-${i}"
+}
+# Reads a view list file and parses it.  Returns
+# {ok <0|1> entries <list of entry dicts> message <reason / warning>}
+proc ::ModelLoader::Logic::ViewListFromFile {path} {
+    set p [string trim [string map [list \" ""] $path]]
+    if {$p eq ""} {
+        return [dict create ok 0 entries {} message "no view list file was chosen"]
+    }
+    set norm $p
+    catch { set norm [file normalize $p] }
+    if {![file exists $norm]} {
+        return [dict create ok 0 entries {} \
+            message "the view list does not exist: $norm"]
+    }
+    if {[file isdirectory $norm]} {
+        return [dict create ok 0 entries {} \
+            message "'$norm' is a directory, not a file"]
+    }
+    if {[catch { set fh [open $norm r] ; set text [read $fh] ; close $fh } msg]} {
+        return [dict create ok 0 entries {} \
+            message "the view list could not be read: $msg"]
+    }
+    set entries [::ModelLoader::Logic::ParseViewList $text]
+    if {[llength $entries] == 0} {
+        return [dict create ok 0 entries {} \
+            message "no view entry was found in $norm"]
+    }
+    set ext [string tolower [file extension $norm]]
+    set warn ""
+    if {[lsearch -exact [::ModelLoader::Logic::ViewListExtensions] $ext] < 0} {
+        set warn "'$ext' is unusual for a view list - it is read as plain text anyway"
+    }
+    return [dict create ok 1 entries $entries message $warn]
+}
+#--------------------------------- PNG capture (fix 5) -----------------------
+# PNG output folder of step 3: it may not exist yet (the adapter creates it),
+# but it must not be an existing file.
+proc ::ModelLoader::Logic::CheckOutputDir {dir} {
+    set d [string trim [string map [list \" ""] $dir]]
+    if {$d eq ""} {
+        return [dict create ok 0 path "" message "no PNG output folder was chosen"]
+    }
+    set norm $d
+    catch { set norm [file normalize $d] }
+    if {[file exists $norm] && ![file isdirectory $norm]} {
+        return [dict create ok 0 path $norm \
+            message "'$norm' is a file, not a folder"]
+    }
+    return [dict create ok 1 path $norm message ""]
+}
+# File name of one capture: <dir>/w<window>_<view>.png - the window index is
+# always part of the name, so a capture of 'all windows' can never overwrite a
+# file of another window.
+proc ::ModelLoader::Logic::CaptureFileName {dir window name {ext .png}} {
+    return [file join $dir "w${window}_[::ModelLoader::Logic::SanitizeName $name]${ext}"]
+}
+# Builds the list of capture jobs of step 3.
+#   <scope>        'target' (only <targetWindow>) or 'all' (<windowIndices>)
+#   <viewEntries>  the imported view list (may be empty -> one job per window)
+# Returns a list of dicts: {window <idx> name <stem> view <entry|{}> file <png>}
+proc ::ModelLoader::Logic::CapturePlan {scope targetWindow viewEntries \
+        windowIndices outDir} {
+    if {$scope eq "all"} {
+        set wins $windowIndices
+    } else {
+        set wins [list $targetWindow]
+    }
+    if {[llength $viewEntries] == 0} {
+        set viewEntries [list [dict create name view orientation "" matrix "" raw ""]]
+    }
+    set jobs {}
+    foreach w $wins {
+        foreach entry $viewEntries {
+            set name [dict get $entry name]
+            lappend jobs [dict create \
+                window $w \
+                name   $name \
+                view   $entry \
+                file   [::ModelLoader::Logic::CaptureFileName $outDir $w $name]]
+        }
+    }
+    return $jobs
+}
+# How one capture job is described in the information pane / status line.
+proc ::ModelLoader::Logic::DescribeJob {job} {
+    set entry [dict get $job view]
+    set how ""
+    if {[dict get $entry matrix] ne ""} {
+        set how " (matrix)"
+    } elseif {[dict get $entry orientation] ne ""} {
+        set how " ([dict get $entry orientation])"
+    }
+    return "window [dict get $job window], view '[dict get $job name]'$how ->\
+[::ModelLoader::Logic::Basename [dict get $job file]]"
+}
+#--------------------------------- layout probe order (fix 3) ----------------
+# Order in which the 'Learn layouts' probe visits the window counts.  It only
+# visits counts >= <current>: a probe has to change the page layout, and a page
+# that is switched to FEWER windows loses the models of the closed windows, so
+# the probe never shrinks the page.  Counts below the current one are learned
+# when the layout is really applied (Adapter::SetWindowCount caches the token
+# that worked) or from 'page GetLayout' after a manual change
+# (Adapter::QueryPage).
+proc ::ModelLoader::Logic::LayoutProbeOrder {current {choices {}}} {
+    if {[llength $choices] == 0} {
+        set choices [::ModelLoader::Logic::WindowCountChoices]
+    }
+    set out {}
+    foreach c [lsort -integer -decreasing $choices] {
+        if {$c >= $current} { set out [linsert $out 0 $c] }
+    }
+    return $out
+}
 #--------------------------------- step validation ---------------------------
 proc ::ModelLoader::Logic::ValidateStep1 {} {
     if {![::ModelLoader::State::AnyModelLoaded]} {
@@ -424,6 +899,23 @@ proc ::ModelLoader::Logic::ValidateStep2 {winIdx spec} {
         if {[dict get $spec $key] eq ""} {
             return -code error "Step 2: '$key' has not been selected."
         }
+    }
+    return 1
+}
+# Step 3 (fix 5): the capture has to know what to capture and where to put it.
+# The window is NOT checked here - 'Capture target' needs a loaded window and
+# reports that itself, but 'all windows' captures every window of the page.
+proc ::ModelLoader::Logic::ValidateStep3 {scope targetWindow outDir} {
+    if {[lsearch -exact [::ModelLoader::Logic::CaptureScopes] $scope] < 0} {
+        return -code error "Step 3: '$scope' is not a capture scope (target | all)."
+    }
+    if {$scope eq "target" && (![string is integer -strict $targetWindow] || \
+            $targetWindow < 1)} {
+        return -code error "Step 3: no target window is selected."
+    }
+    set dir [::ModelLoader::Logic::CheckOutputDir $outDir]
+    if {![dict get $dir ok]} {
+        return -code error "Step 3: [dict get $dir message]."
     }
     return 1
 }
@@ -711,6 +1203,103 @@ proc ::ModelLoader::Adapter::SetWindowCount {wanted} {
                   exactly like batchImportOdb.tcl does.)"]
 }
 
+#--------------------------------------------------- learn layouts (fix 3) ---
+# Applies ONE layout token and returns the window count the page has afterwards
+# (-1 when the token was refused / the page could not be read).  The token is
+# cached for the count it produced, so 'Apply layout' prefers it from then on.
+proc ::ModelLoader::Adapter::ApplyLayoutToken {token} {
+    set count -1
+    set info [::ModelLoader::Adapter::QueryPage]
+    if {[llength $info] == 0} { return -1 }
+    set pageIdx [dict get $info page]
+    if {![::ModelLoader::Adapter::HvRun "hwi OpenStack" {hwi OpenStack}]} { return -1 }
+    if {[::ModelLoader::Adapter::HvRun "GetSessionHandle" \
+            {hwi GetSessionHandle mlSess}]} {
+        if {[::ModelLoader::Adapter::HvRun "GetProjectHandle" \
+                {mlSess GetProjectHandle mlProj}]} {
+            if {[::ModelLoader::Adapter::HvRun "GetPageHandle" \
+                    {mlProj GetPageHandle mlPage $pageIdx}]} {
+                if {[::ModelLoader::Adapter::HvRun "SetLayout '$token'" \
+                        [list mlPage SetLayout $token]]} {
+                    ::ModelLoader::Adapter::HvRun "GetNumberOfWindows" \
+                        {set count [::ModelLoader::Logic::InterpretWindowCount \
+                                        [mlPage GetNumberOfWindows]]}
+                    if {$count >= 1} {
+                        ::ModelLoader::State::SetLayoutToken $count $token
+                    }
+                }
+            }
+        }
+    }
+    ::ModelLoader::Adapter::ReleaseHandles {mlPage mlProj mlSess}
+    ::ModelLoader::Adapter::HvRun "hwi CloseStack" {hwi CloseStack}
+    return $count
+}
+# FIX 3: learns the layout token of every window count the page can be switched
+# to, so the count -> layout mapping of the wizard is HyperView's own mapping
+# and not a guess any more.
+#   * only counts >= the current one are probed (Logic::LayoutProbeOrder): a
+#     probe has to change the layout and a page switched to FEWER windows loses
+#     the models of the closed windows - so the probe never shrinks the page
+#     (the README explains how the small counts are learned),
+#   * every count that already has a token is skipped,
+#   * afterwards the ORIGINAL layout is restored (the exact token 'page
+#     GetLayout' reported, otherwise the original window count again).
+# Returns dict: {ok <0|1> learned <dict count->token> skipped <list>
+#                restored <window count after the restore> attempted <list>
+#                message <text>}
+proc ::ModelLoader::Adapter::LearnLayouts {} {
+    ::ModelLoader::State::ClearLastError
+    set info [::ModelLoader::Adapter::QueryPage]
+    if {[llength $info] == 0} {
+        return [dict create ok 0 learned {} skipped {} attempted {} restored -1 \
+            message "Cannot read the active page: [::ModelLoader::State::GetLastError]"]
+    }
+    set current  [dict get $info windows]
+    set curToken [dict get $info layout]
+    set order    [::ModelLoader::Logic::LayoutProbeOrder $current]
+
+    set learned   {}
+    set skipped   {}
+    set attempted {}
+
+    foreach c $order {
+        set known [::ModelLoader::State::GetLayoutToken $c]
+        if {$known ne ""} { dict set learned $c $known ; continue }
+        lappend attempted $c
+        set res [::ModelLoader::Adapter::SetWindowCount $c]
+        if {[dict get $res ok] && [dict get $res layout] ne ""} {
+            dict set learned $c [dict get $res layout]
+        } elseif {[dict get $res ok]} {
+            # the page already had that many windows and 'GetLayout' answered
+            # nothing - the count is fine, the token stays unknown
+            lappend skipped $c
+        } else {
+            lappend skipped $c
+        }
+    }
+
+    # --- put the original layout back ----------------------------------------
+    set restored -1
+    if {$curToken ne ""} {
+        set restored [::ModelLoader::Adapter::ApplyLayoutToken $curToken]
+    }
+    if {$restored < 0} {
+        set res [::ModelLoader::Adapter::SetWindowCount $current]
+        if {[dict get $res ok]} { set restored [dict get $res windows] }
+    }
+
+    set msg ""
+    if {$restored != $current} {
+        set msg "The original layout of the page could not be restored\
+($current window(s) were requested, the page shows $restored)."
+    }
+    if {[llength $skipped] > 0} {
+        append msg "\nNo token found for: $skipped"
+    }
+    return [dict create ok 1 learned $learned skipped $skipped \
+        attempted $attempted restored $restored message [string trim $msg]]
+}
 #--------------------------------------------------------------- load model ---
 # Loads <path> into window <winIdx> of the ACTIVE page.
 # FIX 2 (V5): NO reader label is passed any more.  'client AddModel <file>' lets
@@ -815,7 +1404,7 @@ proc ::ModelLoader::Adapter::AttachResult {clientVar warningsVar resultPath {mod
     if {[::ModelLoader::Adapter::HvRun "AddModel <result>" \
             [list mlClient AddModel $resultPath]]} { return 1 }
 
-    lappend warnings "the result file '$label' could not be attached to the loaded \
+    lappend warnings "the result file '$label' could not be attached to the loaded\
 model (model SetResult / model AddResultFile / client AddModel were all refused).  \
 The model is loaded - add the results with 'File > Load > Results'.  Reported: $why"
     return 0
@@ -1231,13 +1820,335 @@ proc ::ModelLoader::Adapter::ApplyContour {winIdx spec} {
     }
     return [dict create ok 1 applied $applied warnings $warnings message ""]
 }
+#------------------------------------------------------- legend from file ----
+# V11 - VERIFY: loads a legend that was saved to a *.tcl file (fix 4).
+# There is no hwi command that reads a legend file, and a saved legend IS a Tcl
+# script of hwi calls, therefore the file is 'source'd:
+#   1. the file is checked (exists, is a file, not empty),
+#   2. an hwi stack is opened first, so a legend script that does NOT open its
+#      own stack works as well; a script that opens / closes its own stack is
+#      fine too, because every hwi failure of this proc is caught,
+#   3. the file is sourced and its Tcl result + the error message are captured,
+#   4. afterwards a fresh stack is opened to switch the legend of the window on
+#      and to redraw it ('<client> SetDisplayOptions legend true' + Draw), so the
+#      loaded legend is actually visible.
+# Returns dict: {ok <0|1> winIdx <n> file <path> warnings <list> message <text>}
+proc ::ModelLoader::Adapter::LoadLegendFromFile {winIdx path} {
+    ::ModelLoader::State::ClearLastError
+    set p [string trim [string map [list \" ""] $path]]
+    if {$p eq ""} {
+        return [dict create ok 0 winIdx $winIdx file "" warnings {} \
+            message "No legend file was chosen."]
+    }
+    set norm $p
+    catch { set norm [file normalize $p] }
+    if {![file exists $norm]} {
+        return [dict create ok 0 winIdx $winIdx file $norm warnings {} \
+            message "Legend file not found: $norm"]
+    }
+    if {[file isdirectory $norm]} {
+        return [dict create ok 0 winIdx $winIdx file $norm warnings {} \
+            message "'$norm' is a directory, not a legend file."]
+    }
+    if {[catch { set fh [open $norm r] ; set text [read $fh] ; close $fh } msg]} {
+        return [dict create ok 0 winIdx $winIdx file $norm warnings {} \
+            message "The legend file could not be read: $msg"]
+    }
+    if {[string trim $text] eq ""} {
+        return [dict create ok 0 winIdx $winIdx file $norm warnings {} \
+            message "The legend file $norm is empty."]
+    }
+    set warnings {}
+    set ext [string tolower [file extension $norm]]
+    if {[lsearch -exact [::ModelLoader::Logic::LegendExtensions] $ext] < 0} {
+        lappend warnings "'$ext' is unusual for a legend file - it is sourced anyway"
+    }
+
+    # 2. an ambient stack, so a 'bare' legend script works as well
+    ::ModelLoader::Adapter::HvRun "hwi OpenStack (legend)" {hwi OpenStack}
+    # 3. source the file - this is the actual 'load legend from file' step
+    set code [catch { uplevel #0 [list source $norm] } ret]
+    ::ModelLoader::Adapter::HvRun "hwi CloseStack (legend)" {hwi CloseStack}
+    if {$code} {
+        return [dict create ok 0 winIdx $winIdx file $norm warnings $warnings \
+            message "The legend file could not be applied: $ret"]
+    }
+    ::ModelLoader::Adapter::Log "legend file '$norm' sourced -> $ret"
+
+    # 4. switch the legend on and redraw the window (non fatal)
+    set drawn 0
+    set pageIdx ""
+    if {[::ModelLoader::Adapter::HvRun "hwi OpenStack" {hwi OpenStack}]} {
+        if {[::ModelLoader::Adapter::HvRun "GetSessionHandle" \
+                {hwi GetSessionHandle mlSess}]} {
+            if {[::ModelLoader::Adapter::HvRun "GetProjectHandle" \
+                    {mlSess GetProjectHandle mlProj}]} {
+                if {[::ModelLoader::Adapter::HvRun "GetActivePage" \
+                        {set pageIdx [mlProj GetActivePage]}]} {
+                    if {[::ModelLoader::Adapter::HvRun "GetPageHandle" \
+                            {mlProj GetPageHandle mlPage $pageIdx}]} {
+                        if {[::ModelLoader::Adapter::HvRun "GetWindowHandle" \
+                                {mlPage GetWindowHandle mlWin $winIdx}]} {
+                            if {[::ModelLoader::Adapter::HvRun "GetClientHandle" \
+                                    {mlWin GetClientHandle mlClient}]} {
+                                if {![::ModelLoader::Adapter::HvRun \
+                                        "SetDisplayOptions legend true" \
+                                        {mlClient SetDisplayOptions legend true}]} {
+                                    lappend warnings \
+                                        "SetDisplayOptions legend true was refused -\
+the legend may stay hidden"
+                                }
+                                ::ModelLoader::Adapter::HvRun "Draw" {mlClient Draw}
+                                set drawn 1
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    ::ModelLoader::Adapter::ReleaseHandles {mlClient mlWin mlPage mlProj mlSess}
+    ::ModelLoader::Adapter::HvRun "hwi CloseStack" {hwi CloseStack}
+    if {!$drawn} {
+        lappend warnings "the window could not be redrawn\
+([::ModelLoader::State::GetLastError])"
+    }
+    set msg "Legend loaded from [::ModelLoader::Logic::Basename $norm]"
+    if {[llength $warnings] > 0} { append msg " (with warnings)" }
+    return [dict create ok 1 winIdx $winIdx file $norm warnings $warnings \
+        redrawn $drawn message $msg]
+}
+#------------------------------------------------------------ PNG capture ----
+# One graphic-area capture.  The handle names are passed in, because hwi object
+# handles are commands in the global namespace - the caller frame does not
+# matter.  <mode> selects the API, see Adapter::CaptureWindow for the order.
+# Returns 1 on success (State::lastError holds the reason on failure).
+#   clientImage   : '<client>  CaptureImage <file>'            window only
+#   activeWindow  : '<session> CaptureActiveWindow png <file>' window only
+#   screen        : '<session> CaptureScreen png <file>'       whole application
+#   screenQuality : '<session> CaptureScreen png <file> <q>'   whole application
+# The '<session> CaptureScreen png <file>' spelling is the one used by the
+# shipped example scripts (hvTest.tcl); training.tcl adds the quality argument,
+# therefore both spellings are tried.
+proc ::ModelLoader::Adapter::CaptureGraphicArea {sess client file mode} {
+    switch -- $mode {
+        clientImage {
+            return [::ModelLoader::Adapter::HvRun "CaptureImage" \
+                [list $client CaptureImage $file]]
+        }
+        activeWindow {
+            return [::ModelLoader::Adapter::HvRun "CaptureActiveWindow png" \
+                [list $sess CaptureActiveWindow png $file]]
+        }
+        screen {
+            return [::ModelLoader::Adapter::HvRun "CaptureScreen png" \
+                [list $sess CaptureScreen png $file]]
+        }
+        screenQuality {
+            return [::ModelLoader::Adapter::HvRun "CaptureScreen png <quality>" \
+                [list $sess CaptureScreen png $file \
+                    [::ModelLoader::Logic::CaptureQuality]]]
+        }
+    }
+    ::ModelLoader::State::SetLastError "unknown capture mode '$mode'"
+    return 0
+}
+# Captures <file> and returns the mode that worked ("" when none of them did).
+# The mode that worked once is cached in State::captureMode and tried FIRST from
+# then on, so only the first capture of a session pays the probing cost.
+proc ::ModelLoader::Adapter::CaptureWindow {sess client file} {
+    set all    {clientImage activeWindow screen screenQuality}
+    set cached [::ModelLoader::State::GetCaptureMode]
+    set modes  $all
+    if {$cached ne "" && [lsearch -exact $all $cached] >= 0} {
+        set rest {}
+        foreach m $all { if {$m ne $cached} { lappend rest $m } }
+        set modes [linsert $rest 0 $cached]
+    }
+    foreach mode $modes {
+        if {[::ModelLoader::Adapter::CaptureGraphicArea $sess $client $file $mode]} {
+            if {$cached ne $mode} { ::ModelLoader::State::SetCaptureMode $mode }
+            return $mode
+        }
+    }
+    return ""
+}
+# Applies one view list entry to a window ('<window> GetViewControlHandle' ->
+# '<view> SetOrientation' / '<view> SetViewMatrix'), exactly like the shipped
+# display_service.tcl does.  The name of the window handle command is passed in.
+# A view is a nicety - nothing here is fatal, the warnings are returned.
+proc ::ModelLoader::Adapter::ApplyViewEntry {winHandle entry} {
+    set warnings {}
+    set orientation [dict get $entry orientation]
+    set matrix      [dict get $entry matrix]
+    if {$orientation eq "" && $matrix eq ""} { return $warnings }
+    if {![::ModelLoader::Adapter::HvRun "GetViewControlHandle" \
+            [list $winHandle GetViewControlHandle mlView]]} {
+        lappend warnings "'$winHandle' has no view control - the view was skipped"
+        return $warnings
+    }
+    if {$matrix ne ""} {
+        # the matrix is ONE argument, exactly like in hvTest.tcl /
+        # display_service.tcl
+        if {![::ModelLoader::Adapter::HvRun "SetViewMatrix" \
+                [list mlView SetViewMatrix $matrix]]} {
+            lappend warnings "the view matrix was refused:\
+[::ModelLoader::State::GetLastError]"
+        }
+    } elseif {$orientation ne ""} {
+        if {![::ModelLoader::Adapter::HvRun "SetOrientation $orientation" \
+                [list mlView SetOrientation $orientation]]} {
+            lappend warnings "orientation '$orientation' was refused:\
+[::ModelLoader::State::GetLastError]"
+        } else {
+            # display_service.tcl fits the view after an orientation - but NOT
+            # after a matrix (that would throw the stored zoom away)
+            ::ModelLoader::Adapter::HvRun "Fit" {mlView Fit}
+        }
+    }
+    ::ModelLoader::Adapter::ReleaseHandles {mlView}
+    return $warnings
+}
+# STEP 3 (fix 5): captures the target window or every window of the page into
+# <outDir> as PNG, one file per window and view.
+#   scope        : 'target' | 'all'   (Logic::ValidateStep3 checked it before)
+#   targetWindow : window index of 'target'
+#   viewEntries  : parsed view list (may be empty -> one view per window)
+# Every window is made the active window first (best effort, V13) so that the
+# active-window / screen capture APIs grab the right window, and every view is
+# applied before its file is written.  A failed capture does NOT abort the run -
+# the report lists what worked and what did not.
+# Returns dict: {ok <0|1> files <list of png> captured <n> failed <n>
+#                mode <used capture mode> warnings <list> message <text>}
+proc ::ModelLoader::Adapter::CapturePng {scope targetWindow viewEntries outDir} {
+    ::ModelLoader::State::ClearLastError
+    set base [dict create ok 1 files {} captured 0 failed 0 mode "" warnings {} \
+        message ""]
+    set dir [::ModelLoader::Logic::CheckOutputDir $outDir]
+    if {![dict get $dir ok]} {
+        return [dict merge $base [dict create ok 0 \
+            message "PNG capture: [dict get $dir message]."]]
+    }
+    set outDir [dict get $dir path]
+    if {[catch { file mkdir $outDir } msg]} {
+        return [dict merge $base [dict create ok 0 \
+            message "PNG capture: the output folder could not be created: $msg"]]
+    }
+
+    set indices [::ModelLoader::State::WindowIndices]
+    if {[llength $indices] == 0} {
+        set page [::ModelLoader::Adapter::QueryPage]
+        if {[llength $page] > 0} {
+            for {set i 1} {$i <= [dict get $page windows]} {incr i} {
+                lappend indices $i
+            }
+        }
+    }
+    if {$scope eq "target"} { set indices [list $targetWindow] }
+    set jobs [::ModelLoader::Logic::CapturePlan $scope $targetWindow \
+        $viewEntries $indices $outDir]
+    if {[llength $jobs] == 0} {
+        return [dict merge $base [dict create ok 0 \
+            message "PNG capture: there is no window to capture."]]
+    }
+
+    # one batch of jobs per window - a window handle is fetched once
+    set byWindow {}
+    foreach job $jobs {
+        dict lappend byWindow [dict get $job window] $job
+    }
+
+    set files    {}
+    set warnings {}
+    set captured 0
+    set failed   0
+    set mode     ""
+
+    if {![::ModelLoader::Adapter::HvRun "hwi OpenStack" {hwi OpenStack}]} {
+        return [dict merge $base [dict create ok 0 \
+            message "PNG capture: [::ModelLoader::State::GetLastError]"]]
+    }
+    set pageIdx ""
+    set ready 0
+    if {[::ModelLoader::Adapter::HvRun "GetSessionHandle" \
+            {hwi GetSessionHandle mlSess}]} {
+        if {[::ModelLoader::Adapter::HvRun "GetProjectHandle" \
+                {mlSess GetProjectHandle mlProj}]} {
+            if {[::ModelLoader::Adapter::HvRun "GetActivePage" \
+                    {set pageIdx [mlProj GetActivePage]}]} {
+                if {[::ModelLoader::Adapter::HvRun "GetPageHandle" \
+                        {mlProj GetPageHandle mlPage $pageIdx}]} {
+                    set ready 1
+                }
+            }
+        }
+    }
+    if {!$ready} {
+        ::ModelLoader::Adapter::ReleaseHandles {mlPage mlProj mlSess}
+        ::ModelLoader::Adapter::HvRun "hwi CloseStack" {hwi CloseStack}
+        return [dict merge $base [dict create ok 0 \
+            message "PNG capture: the active page is not readable:\
+[::ModelLoader::State::GetLastError]"]]
+    }
+
+    foreach w [lsort -integer [dict keys $byWindow]] {
+        set wOk 0
+        if {[::ModelLoader::Adapter::HvRun "GetWindowHandle $w" \
+                {mlPage GetWindowHandle mlWin $w}]} {
+            # V13 - VERIFY: '<page> SetActiveWindow' is not part of every
+            # HyperView build; when it is missing the capture still works, it may
+            # then just grab the window that was active already.
+            ::ModelLoader::Adapter::HvRun "SetActiveWindow $w" \
+                {mlPage SetActiveWindow $w}
+            if {[::ModelLoader::Adapter::HvRun "GetClientHandle $w" \
+                    {mlWin GetClientHandle mlClient}]} {
+                set wOk 1
+            }
+        }
+        if {!$wOk} {
+            lappend warnings "window $w: [::ModelLoader::State::GetLastError]"
+            incr failed [llength [dict get $byWindow $w]]
+            ::ModelLoader::Adapter::ReleaseHandles {mlClient mlWin}
+            continue
+        }
+        foreach job [dict get $byWindow $w] {
+            set file  [dict get $job file]
+            set entry [dict get $job view]
+            foreach wmsg [::ModelLoader::Adapter::ApplyViewEntry mlWin $entry] {
+                lappend warnings "window $w: $wmsg"
+            }
+            ::ModelLoader::Adapter::HvRun "Draw" {mlClient Draw}
+            set mode [::ModelLoader::Adapter::CaptureWindow mlSess mlClient $file]
+            if {$mode ne ""} {
+                incr captured
+                lappend files $file
+                ::ModelLoader::Adapter::Log "captured '$file' via $mode"
+            } else {
+                incr failed
+                lappend warnings "window $w, view '[dict get $job name]':\
+[::ModelLoader::State::GetLastError]"
+            }
+        }
+        ::ModelLoader::Adapter::ReleaseHandles {mlClient mlWin}
+    }
+    ::ModelLoader::Adapter::ReleaseHandles {mlView}
+    ::ModelLoader::Adapter::ReleaseHandles {mlPage mlProj mlSess}
+    ::ModelLoader::Adapter::HvRun "hwi CloseStack" {hwi CloseStack}
+
+    set msg "PNG capture: $captured file(s) written to $outDir"
+    if {$failed > 0} { append msg ", $failed capture(s) failed" }
+    return [dict merge $base [dict create ok [expr {$captured > 0}] files $files \
+        captured $captured failed $failed mode $mode warnings $warnings \
+        message $msg]]
+}
 #=============================================================================
 # SECTION 3 - UI LAYER (hwtk widgets only - Logic + Adapter are used here)
-#   The wizard has exactly two steps:
 #     STEP 1 : page layout + load one model/result file per window (all windows
 #              of the active page are handled, the results are then listed)
-#     STEP 2 : choose subcase / simulation / result type / component and apply
-#              the contour plot
+#     STEP 2 : choose subcase / simulation / result type / component, apply the
+#              contour plot and (fix 4) load a legend from a file
+#     STEP 3 : (fix 5) import a view list and capture the target window or every
+#              window of the page as PNG
 #   PLAIN TK is used in exactly one place: the read-only information listbox
 #   and its scrollbar, because hwtk has no listbox wrapper.  Everything else is
 #   hwtk (dialog / frame / labelframe / label / button / entry / combobox /
@@ -1254,6 +2165,7 @@ namespace eval ::ModelLoader::UI {
     variable wBody      ""
     variable wStep1     ""
     variable wStep2     ""
+    variable wStep3     ""
     variable wInfo      ""
     variable wStatus    ""
     variable wWindowCount ""
@@ -1271,8 +2183,15 @@ namespace eval ::ModelLoader::UI {
     variable wAveraging   ""
     variable wLayer       ""
     variable wApplyAll    ""
+    variable wLegendFile  ""   ;# FIX 4: legend file field of step 2
     variable wStepTitle   ""
     variable wStepHelp    ""
+    # FIX 5: step 3 widgets (view list + PNG capture)
+    variable wViewListFile ""
+    variable wViewListInfo ""
+    variable wOutputDir    ""
+    variable wCaptureScope ""
+    variable wTargetWin3   ""
     # values bound to the widgets (they survive a rebuild of the dialog)
     variable varWindowCount 2
     # last window count that was accepted (invalid typing is reverted to it)
@@ -1289,6 +2208,12 @@ namespace eval ::ModelLoader::UI {
     variable varAveraging   {<default>}
     variable varLayer       {<default>}
     variable varApplyAll    1
+    variable varLegendFile  ""      ;# FIX 4: legend file of the target window
+    # FIX 5: step 3 values
+    variable varViewListFile ""     ;# view list file
+    variable varViewListInfo "no view list imported - one PNG per window"
+    variable varOutputDir    ""     ;# PNG output folder
+    variable varCaptureScope target ;# 'target' | 'all'
     variable statusText     "Ready."
 }
 
@@ -1511,7 +2436,7 @@ proc ::ModelLoader::UI::ApplyChosenFile {widget varname kind path} {
     if {[dict get $check message] ne ""} {
         ::ModelLoader::UI::SetStatus "$norm - [dict get $check message]"
     } elseif {$hint ne ""} {
-        ::ModelLoader::UI::SetStatus "Chosen $kind file: \
+        ::ModelLoader::UI::SetStatus "Chosen $kind file:\
 [::ModelLoader::Logic::Basename $norm] (reader suggestion: $hint)"
     } else {
         ::ModelLoader::UI::SetStatus "Chosen $kind file: [::ModelLoader::Logic::Basename $norm]"
@@ -1585,9 +2510,9 @@ proc ::ModelLoader::UI::DoClose {} {
 #=============================================================================
 # SECTION 3a - BUILD THE WIZARD SHELL
 #=============================================================================
-# Creates the dialog, its buttons, the banner, the two step frames, the
+# Creates the dialog, its buttons, the banner, the three step frames, the
 # information pane and the status line.  The content of the steps is created by
-# BuildStep1 / BuildStep2, both of which are called from here.
+# BuildStep1 / BuildStep2 / BuildStep3, all of which are called from here.
 proc ::ModelLoader::UI::Build {} {
     variable dlg
     variable recess
@@ -1595,6 +2520,7 @@ proc ::ModelLoader::UI::Build {} {
     variable wBody
     variable wStep1
     variable wStep2
+    variable wStep3
     variable wInfo
     variable wStatus
     variable wStepTitle
@@ -1652,7 +2578,7 @@ proc ::ModelLoader::UI::Build {} {
     # --- banner --------------------------------------------------------------
     set head [hwtk::frame $recess.head]
     pack $head -side top -fill x
-    set wStepTitle [hwtk::label $head.title -text "Step 1 of 2" -justify left -anchor w]
+    set wStepTitle [hwtk::label $head.title -text "Step 1 of 3" -justify left -anchor w]
     pack $wStepTitle -side top -fill x
     set wStepHelp [hwtk::label $head.help -text "" -justify left -anchor w -wraplength 760]
     pack $wStepHelp -side top -fill x
@@ -1662,9 +2588,12 @@ proc ::ModelLoader::UI::Build {} {
     pack $wBody -side top -fill both -expand 1 -pady 4
     set wStep1 [hwtk::frame $wBody.step1]
     set wStep2 [hwtk::frame $wBody.step2]
+    set wStep3 [hwtk::frame $wBody.step3]
     ::ModelLoader::UI::BuildStep1
     ::ModelLoader::UI::BuildStep2
+    ::ModelLoader::UI::BuildStep3
     ::ModelLoader::UI::BindStep2
+    ::ModelLoader::UI::BindStep3
 
     ::ModelLoader::UI::ShowStep 1
     ::ModelLoader::UI::RefreshWindowList
@@ -1687,51 +2616,82 @@ proc ::ModelLoader::UI::ShowStep {n} {
     variable step
     variable wStep1
     variable wStep2
+    variable wStep3
     variable wStepTitle
     variable wStepHelp
 
     set step $n
     if {[winfo exists $wStep1]} { pack forget $wStep1 }
     if {[winfo exists $wStep2]} { pack forget $wStep2 }
+    if {[winfo exists $wStep3]} { pack forget $wStep3 }
 
     if {$step == 1} {
         pack $wStep1 -side top -fill both -expand 1
-        catch { $wStepTitle configure -text "STEP 1 of 2 - Page layout and model loading" }
-        catch { $wStepHelp configure -text "Set how many windows the active page shows, \
-then load one model or result file into each window.  The results that HyperView finds \
-in every window are listed in the information pane below." }
+        catch { $wStepTitle configure -text "STEP 1 of 3 - Page layout and model loading" }
+        catch { $wStepHelp configure -text "Set how many windows the active page shows,\
+then load one model or result file into each window.  'Learn layouts' lets HyperView \
+itself report which layout token belongs to which window count (fix 3).  The results that \
+HyperView finds in every window are listed in the information pane below." }
         ::ModelLoader::UI::SetButtonState Back  disabled
         ::ModelLoader::UI::SetButtonState Next  normal
         ::ModelLoader::UI::SetButtonState Apply disabled
         ::ModelLoader::UI::RefreshWindowList
-    } else {
+    } elseif {$step == 2} {
         pack $wStep2 -side top -fill both -expand 1
-        catch { $wStepTitle configure -text "STEP 2 of 2 - Contour plot" }
-        catch { $wStepHelp configure -text "Pick the subcase, the simulation, the result \
+        catch { $wStepTitle configure -text "STEP 2 of 3 - Contour plot and legend" }
+        catch { $wStepHelp configure -text "Pick the subcase, the simulation, the result\
 (data) type and the component of the selected window, then apply the contour plot.  \
 'Apply to all loaded windows' repeats the same settings in every window that holds a \
-subcase with the same label." }
+subcase with the same label.  'Load legend' applies a legend that was saved to a *.tcl \
+file (fix 4)." }
+        ::ModelLoader::UI::SetButtonState Back  normal
+        ::ModelLoader::UI::SetButtonState Next  normal
+        ::ModelLoader::UI::SetButtonState Apply normal
+        ::ModelLoader::UI::RefreshStep2
+    } else {
+        pack $wStep3 -side top -fill both -expand 1
+        catch { $wStepTitle configure -text "STEP 3 of 3 - Capture PNG" }
+        catch { $wStepHelp configure -text "Optional: import a view list (one view per\
+line), choose the PNG output folder and capture the target window or every window of the \
+active page.  A view list is a plain text file, the PNG name is \
+'w<window>_<view>.png'." }
         ::ModelLoader::UI::SetButtonState Back  normal
         ::ModelLoader::UI::SetButtonState Next  disabled
         ::ModelLoader::UI::SetButtonState Apply normal
-        ::ModelLoader::UI::RefreshStep2
+        ::ModelLoader::UI::RefreshStep3
     }
     return $step
 }
 proc ::ModelLoader::UI::StepNext {} {
+    variable step
     if {[catch { ::ModelLoader::Logic::ValidateStep1 } msg]} {
         ::ModelLoader::UI::SetStatus "Step 1 is not finished: $msg"
         catch { tk_messageBox -title "Model Loader" -icon warning -message $msg \
             -parent .modelLoaderGUI }
         return
     }
-    ::ModelLoader::UI::ShowStep 2
-    ::ModelLoader::UI::SetStatus "Step 2: choose the contour settings."
+    if {$step >= 3} { return }
+    if {$step == 1} {
+        ::ModelLoader::UI::ShowStep 2
+        ::ModelLoader::UI::SetStatus "Step 2: choose the contour settings."
+    } else {
+        # FIX 5: step 3 does not need a contour, it captures what the windows show
+        ::ModelLoader::UI::ShowStep 3
+        ::ModelLoader::UI::SetStatus "Step 3: import a view list and capture PNG files."
+    }
     return
 }
 proc ::ModelLoader::UI::StepBack {} {
-    ::ModelLoader::UI::ShowStep 1
-    ::ModelLoader::UI::SetStatus "Step 1: page layout and model loading."
+    variable step
+    if {$step <= 1} { return }
+    # compute the target step FIRST - ShowStep writes the variable
+    set target [expr {$step - 1}]
+    ::ModelLoader::UI::ShowStep $target
+    switch -- $target {
+        1 { ::ModelLoader::UI::SetStatus "Step 1: page layout and model loading." }
+        2 { ::ModelLoader::UI::SetStatus "Step 2: contour plot and legend." }
+        default { ::ModelLoader::UI::SetStatus "Step 3: PNG capture." }
+    }
     return
 }
 # Shows everything the State layer knows about all windows of the active page.
@@ -1829,9 +2789,15 @@ proc ::ModelLoader::UI::BuildStep1 {} {
         [::ModelLoader::UI::ReadWindowCount] } }
     hwtk::button $lf.apply -text "Apply layout" -command ::ModelLoader::UI::OnApplyLayout
     grid $lf.apply -row 0 -column 2 -sticky w -padx 6 -pady 2
+    # FIX 3: asks HyperView ITSELF which layout token belongs to which window
+    # count (Adapter::LearnLayouts) - one probe per count, the token every count
+    # accepted is cached and the original layout is put back afterwards.
+    hwtk::button $lf.learn -text "Learn layouts" \
+        -command ::ModelLoader::UI::OnLearnLayouts
+    grid $lf.learn -row 0 -column 3 -sticky w -padx 6 -pady 2
     hwtk::button $lf.refresh -text "Refresh page info" \
         -command ::ModelLoader::UI::OnRefreshPage
-    grid $lf.refresh -row 0 -column 3 -sticky w -padx 6 -pady 2
+    grid $lf.refresh -row 0 -column 4 -sticky w -padx 6 -pady 2
     set wPageInfo [hwtk::label $lf.info -text "" -anchor w -justify left -wraplength 740]
     grid $wPageInfo -row 1 -column 0 -columnspan 4 -sticky w -padx 2 -pady 2
 
@@ -1890,7 +2856,7 @@ proc ::ModelLoader::UI::BuildStep1 {} {
     grid $lf2.load -row 3 -column 2 -sticky w -padx 6 -pady 2
 
     hwtk::label $lf2.l4 -anchor w -justify left -wraplength 740 \
-        -text "'Input Model' offers *.inp (Abaqus) first, 'Input Result' offers *.res (FEMFAT) \
+        -text "'Input Model' offers *.inp (Abaqus) first, 'Input Result' offers *.res (FEMFAT)\
 first - the 'Browse...' buttons and the widget browsers of both fields use the same filter \
 list.  Fill in only what you have: model only, result only, or both.  \
 The file loaded into window N is kept per window; the result tree of every window is listed below."
@@ -1914,6 +2880,7 @@ proc ::ModelLoader::UI::BuildStep2 {} {
     variable wLayer
     variable wApplyAll
     variable wTargetWin2
+    variable wLegendFile
 
     set lf [hwtk::labelframe $wStep2.contour -text " Contour settings " -padding 4]
     grid $lf -row 0 -column 0 -sticky ew -pady 2 -padx 2
@@ -1989,15 +2956,134 @@ proc ::ModelLoader::UI::BuildStep2 {} {
 
     # --- row 5 : hint --------------------------------------------------------
     hwtk::label $lf.hint -anchor w -justify left -wraplength 740 \
-        -text "The result type list follows the selected subcase, the component list follows \
+        -text "The result type list follows the selected subcase, the component list follows\
 the selected result type.  Should this build not deliver the automatic update, press \
 'Reload lists' after changing the subcase or the result type."
     grid $lf.hint -row 5 -column 0 -columnspan 4 -sticky w -padx 2 -pady 2
+
+    # --- FIX 4 : legend from a file ------------------------------------------
+    # A saved legend is a Tcl script of hwi calls, so 'Load legend' sources the
+    # file (Adapter::LoadLegendFromFile) and then switches the legend on.  The
+    # file is remembered per window (State::legendFileByWindow).
+    set lfl [hwtk::labelframe $wStep2.legend -text " Legend " -padding 4]
+    grid $lfl -row 1 -column 0 -sticky ew -pady 2 -padx 2
+    grid columnconfigure $lfl 1 -weight 1
+
+    hwtk::label $lfl.l0 -text "Legend file:" -width 22 -anchor w
+    grid $lfl.l0 -row 0 -column 0 -sticky w -padx 2 -pady 2
+    set legendTypes [::ModelLoader::Logic::LegendFileTypes]
+    set wLegendFile [::ModelLoader::UI::CreateFileChooser $lfl legend \
+        ::ModelLoader::UI::varLegendFile $legendTypes 44]
+    grid $wLegendFile -row 0 -column 1 -sticky ew -padx 2 -pady 2
+    hwtk::button $lfl.legendBrowse -text "Browse..." -command [list \
+        ::ModelLoader::UI::BrowseFile $wLegendFile \
+        ::ModelLoader::UI::varLegendFile $legendTypes legend]
+    grid $lfl.legendBrowse -row 0 -column 2 -sticky w -padx 6 -pady 2
+    hwtk::button $lfl.load -text "Load legend" -command ::ModelLoader::UI::OnLoadLegend
+    grid $lfl.load -row 0 -column 3 -sticky w -padx 6 -pady 2
+
+    hwtk::label $lfl.hint -anchor w -justify left -wraplength 740 \
+        -text "A legend that was saved to a file is a Tcl script - it is sourced into the\
+running HyperView session, then the legend of the selected window is switched on and the \
+window is redrawn.  *.tcl (an exported legend), *.hvl and *.txt are offered; the legend \
+belongs to the window that is selected above."
+    grid $lfl.hint -row 1 -column 0 -columnspan 4 -sticky w -padx 2 -pady 2
     return
 }
 
 #=============================================================================
-# SECTION 3e - STEP 2 LOGIC (refresh, selection changes, spec assembly)
+# SECTION 3e - STEP 3 WIDGETS (fix 5: view list, PNG folder, capture buttons)
+#=============================================================================
+# Optional view list, PNG output folder and the two capture buttons.  The scope
+# is offered as a combobox AND as the two buttons - a button captures right away
+# with the scope it names.
+proc ::ModelLoader::UI::BuildStep3 {} {
+    variable wStep3
+    variable wViewListFile
+    variable wViewListInfo
+    variable wOutputDir
+    variable wCaptureScope
+    variable wTargetWin3
+
+    grid columnconfigure $wStep3 0 -weight 1
+
+    # --- view list ------------------------------------------------------------
+    set lfv [hwtk::labelframe $wStep3.views -text " View list (optional) " -padding 4]
+    grid $lfv -row 0 -column 0 -sticky ew -pady 2 -padx 2
+    grid columnconfigure $lfv 1 -weight 1
+
+    hwtk::label $lfv.l0 -text "View list file:" -width 22 -anchor w
+    grid $lfv.l0 -row 0 -column 0 -sticky w -padx 2 -pady 2
+    set viewTypes [::ModelLoader::Logic::ViewListFileTypes]
+    set wViewListFile [::ModelLoader::UI::CreateFileChooser $lfv viewlist \
+        ::ModelLoader::UI::varViewListFile $viewTypes 44]
+    grid $wViewListFile -row 0 -column 1 -sticky ew -padx 2 -pady 2
+    hwtk::button $lfv.browse -text "Browse..." -command [list \
+        ::ModelLoader::UI::BrowseFile $wViewListFile \
+        ::ModelLoader::UI::varViewListFile $viewTypes viewlist]
+    grid $lfv.browse -row 0 -column 2 -sticky w -padx 6 -pady 2
+    hwtk::button $lfv.import -text "Import views" -command ::ModelLoader::UI::OnImportViewList
+    grid $lfv.import -row 0 -column 3 -sticky w -padx 6 -pady 2
+
+    set wViewListInfo [hwtk::label $lfv.info -anchor w -justify left -wraplength 740 \
+        -textvariable ::ModelLoader::UI::varViewListInfo]
+    grid $lfv.info -row 1 -column 0 -columnspan 4 -sticky w -padx 2 -pady 2
+    hwtk::label $lfv.hint -anchor w -justify left -wraplength 740 \
+        -text "One view per line: 'name' (the name doubles as a view preset), 'name front'\
+(or rear / iso / left / right / top / bottom) or 'name' followed by the 16 numbers of a \
+view matrix - the format 'hvw' uses.  Blank lines and '#' / '//' / ';' comments are \
+skipped.  Without a view list one PNG per window is written."
+    grid $lfv.hint -row 2 -column 0 -columnspan 4 -sticky w -padx 2 -pady 2
+
+    # --- PNG output folder ----------------------------------------------------
+    set lfo [hwtk::labelframe $wStep3.output -text " PNG output " -padding 4]
+    grid $lfo -row 1 -column 0 -sticky ew -pady 2 -padx 2
+    grid columnconfigure $lfo 1 -weight 1
+    hwtk::label $lfo.l0 -text "Output folder:" -width 22 -anchor w
+    grid $lfo.l0 -row 0 -column 0 -sticky w -padx 2 -pady 2
+    set wOutputDir [hwtk::entry $lfo.dir -width 44 \
+        -textvariable ::ModelLoader::UI::varOutputDir]
+    grid $wOutputDir -row 0 -column 1 -sticky ew -padx 2 -pady 2
+    hwtk::button $lfo.browse -text "Choose folder..." \
+        -command ::ModelLoader::UI::OnBrowseOutputDir
+    grid $lfo.browse -row 0 -column 2 -sticky w -padx 6 -pady 2
+    hwtk::label $lfo.hint -anchor w -justify left -wraplength 740 \
+        -text "The folder is created when it does not exist.  The files are named\
+'w<window>_<view>.png', so the capture of a whole page can never overwrite a file of \
+another window.  (Plain Tk 'tk_chooseDirectory' is used for the folder browser - hwtk has \
+no folder entry.)"
+    grid $lfo.hint -row 1 -column 0 -columnspan 3 -sticky w -padx 2 -pady 2
+
+    # --- capture --------------------------------------------------------------
+    set lfc [hwtk::labelframe $wStep3.capture -text " Capture " -padding 4]
+    grid $lfc -row 2 -column 0 -sticky ew -pady 2 -padx 2
+    grid columnconfigure $lfc 1 -weight 1
+    hwtk::label $lfc.l0 -text "Scope:" -width 22 -anchor w
+    grid $lfc.l0 -row 0 -column 0 -sticky w -padx 2 -pady 2
+    set wCaptureScope [hwtk::combobox $lfc.scope -state readonly -width 28 \
+        -values [::ModelLoader::Logic::CaptureScopes] \
+        -textvariable ::ModelLoader::UI::varCaptureScope]
+    grid $lfc.scope -row 0 -column 1 -sticky w -padx 2 -pady 2
+    set wTargetWin3 [hwtk::label $lfc.target -anchor w -justify left]
+    grid $lfc.target -row 0 -column 2 -columnspan 2 -sticky w -padx 2 -pady 2
+
+    hwtk::button $lfc.bTarget -text "Capture target" \
+        -command [list ::ModelLoader::UI::OnCapture target]
+    grid $lfc.bTarget -row 1 -column 1 -sticky w -padx 2 -pady 2
+    hwtk::button $lfc.bAll -text "Capture all" \
+        -command [list ::ModelLoader::UI::OnCapture all]
+    grid $lfc.bAll -row 1 -column 2 -sticky w -padx 6 -pady 2
+
+    hwtk::label $lfc.hint -anchor w -justify left -wraplength 740 \
+        -text "'Capture target' captures the window of step 2 (default 1), 'Capture all'\
+captures every window of the active page - both use the scope field above and the view \
+list.  The contour plots of the windows should be applied in step 2 before a capture; \
+each file is written for the view the window really shows."
+    grid $lfc.hint -row 2 -column 0 -columnspan 4 -sticky w -padx 2 -pady 2
+    return
+}
+#=============================================================================
+# SECTION 3f - STEP 2 LOGIC (refresh, selection changes, spec assembly)
 #=============================================================================
 # Keeps the current value when it is still available, otherwise takes the first
 # entry of <allowed>.  Returns the value that has to be used from now on.
@@ -2037,7 +3123,7 @@ proc ::ModelLoader::UI::DescribeSpec {winIdx spec} {
         set sim [lindex [::ModelLoader::Logic::SimulationLabels $winIdx $subcaseId] $simIdx]
         if {$sim eq ""} { set sim "<index $simIdx>" }
     }
-    return "window $winIdx : subcase '$subcaseId' ($label), simulation $sim, type \
+    return "window $winIdx : subcase '$subcaseId' ($label), simulation $sim, type\
 '[dict get $spec dataType]', component '[dict get $spec component]', averaging \
 '[dict get $spec averaging]', layer '[dict get $spec layer]'"
 }
@@ -2112,7 +3198,7 @@ proc ::ModelLoader::UI::RefreshComponentLists {} {
 
 
 #=============================================================================
-# SECTION 3f - PREVIEW, EVENTS AND THE STEP 1 ACTIONS
+# SECTION 3g - PREVIEW, EVENTS AND THE STEP 1 ACTIONS
 #=============================================================================
 # Writes the current contour selection (and, when switched on, what 'apply to
 # all windows' would do) into the information pane.
@@ -2180,6 +3266,292 @@ proc ::ModelLoader::UI::OnDataTypeChanged {} {
     return
 }
 
+#=============================================================================
+# SECTION 3h - STEP 2 LEGEND + STEP 3 CAPTURE ACTIONS (fix 4 + fix 5)
+#=============================================================================
+# V9 - VERIFY: hwtk comboboxes generate <<ComboboxSelected>>; the two capture
+# buttons do not depend on it at all, they write the scope themselves.
+proc ::ModelLoader::UI::BindStep3 {} {
+    variable wCaptureScope
+    catch { bind $wCaptureScope <<ComboboxSelected>> { ::ModelLoader::UI::RefreshStep3 } }
+    return
+}
+# Shows the step 3 state: scope, target window, the imported view list and the
+# plan (how many PNG files a capture would write).  Writes it into the
+# information pane below.
+proc ::ModelLoader::UI::RefreshStep3 {} {
+    variable varTargetWin
+    variable varOutputDir
+    variable varCaptureScope
+    variable varViewListInfo
+    variable wCaptureScope
+    variable wTargetWin3
+
+    # --- scope ---------------------------------------------------------------
+    set scope $varCaptureScope
+    if {[lsearch -exact [::ModelLoader::Logic::CaptureScopes] $scope] < 0} {
+        set scope "target"
+        set varCaptureScope $scope
+    }
+    ::ModelLoader::UI::SetComboValues $wCaptureScope [::ModelLoader::Logic::CaptureScopes]
+    ::ModelLoader::UI::SetWidgetValue $wCaptureScope $scope
+    if {$wTargetWin3 ne "" && [winfo exists $wTargetWin3]} {
+        catch { $wTargetWin3 configure -text "target window: $varTargetWin" }
+    }
+
+    # --- output folder (default is a suggestion, nothing is written here) -----
+    set stored [::ModelLoader::State::GetOutputDir]
+    if {$stored ne "" && [string trim $varOutputDir] eq ""} { set varOutputDir $stored }
+    if {[string trim $varOutputDir] eq ""} {
+        set varOutputDir [file join [pwd] hv_capture]
+    }
+
+    # --- view list -----------------------------------------------------------
+    set entries [::ModelLoader::State::GetViewList]
+    if {[llength $entries] == 0} {
+        set varViewListInfo "no view list imported - one PNG per window"
+    } else {
+        set names {}
+        foreach e $entries { lappend names [dict get $e name] }
+        set varViewListInfo "[llength $entries] view(s): [join $names {, }]"
+    }
+
+    # --- plan ----------------------------------------------------------------
+    set lines {}
+    lappend lines "" "PNG CAPTURE (step 3)" \
+        "  scope         : $scope (target = window $varTargetWin, all = every window of the page)" \
+        "  view list     : $varViewListInfo"
+    if {[llength $entries] > 0} {
+        foreach e $entries {
+            set how "name only - no orientation"
+            if {[dict get $e matrix] ne ""} {
+                set how "view matrix ([llength [dict get $e matrix]] numbers)"
+            } elseif {[dict get $e orientation] ne ""} {
+                set how "orientation '[dict get $e orientation]'"
+            }
+            lappend lines "      [dict get $e name] : $how"
+        }
+    }
+    lappend lines "  output folder : $varOutputDir"
+    set check [::ModelLoader::Logic::CheckOutputDir $varOutputDir]
+    if {![dict get $check ok]} {
+        lappend lines "  not ready     : [dict get $check message]"
+    } else {
+        set dir [dict get $check path]
+        set indices [::ModelLoader::State::WindowIndices]
+        if {[llength $indices] == 0} { set indices [list $varTargetWin] }
+        set jobs [::ModelLoader::Logic::CapturePlan $scope $varTargetWin \
+            $entries $indices $dir]
+        lappend lines "  files         : [llength $jobs] PNG file(s) would be written"
+        foreach job [lrange $jobs 0 2] {
+            lappend lines "      [::ModelLoader::Logic::DescribeJob $job]"
+        }
+        if {[llength $jobs] > 3} {
+            lappend lines "      ... ([expr {[llength $jobs] - 3}] more)"
+        }
+    }
+    ::ModelLoader::UI::AppendInfo $lines
+    return
+}
+#--------------------------------- fix 5 : view list import -------------------
+# Reads and parses the view list file, keeps the parsed entries in the State
+# layer and shows what was understood.  Called by the 'Import views' button and
+# by 'Capture ...' when a file is set but was not imported yet.
+proc ::ModelLoader::UI::OnImportViewList {} {
+    variable wViewListFile
+    variable varViewListFile
+    variable varViewListInfo
+
+    set path [string trim [::ModelLoader::UI::WidgetText $wViewListFile $varViewListFile]]
+    if {$path eq ""} { set path [string trim $varViewListFile] }
+    if {$path eq ""} {
+        ::ModelLoader::State::SetViewList {}
+        set varViewListInfo "no view list imported - one PNG per window"
+        ::ModelLoader::UI::SetStatus "No view list file was chosen - one PNG per window."
+        ::ModelLoader::UI::RefreshStep3
+        return ""
+    }
+    set res [::ModelLoader::Logic::ViewListFromFile $path]
+    if {![dict get $res ok]} {
+        ::ModelLoader::State::SetViewList {}
+        set varViewListInfo "no view list imported - one PNG per window"
+        ::ModelLoader::UI::SetStatus "View list rejected: [dict get $res message]"
+        ::ModelLoader::UI::AppendInfo [list "" "VIEW LIST" \
+            "  [::ModelLoader::Logic::Basename $path] was rejected:\
+[dict get $res message]"]
+        catch { tk_messageBox -title "Model Loader" -icon warning \
+            -message "View list rejected: [dict get $res message]" \
+            -parent .modelLoaderGUI }
+        ::ModelLoader::UI::RefreshStep3
+        return ""
+    }
+
+    set entries [dict get $res entries]
+    set file    [string trim $path]
+    catch { set file [file normalize $file] }
+    ::ModelLoader::State::SetViewList $entries $file
+    ::ModelLoader::UI::SetFileWidget $wViewListFile \
+        ::ModelLoader::UI::varViewListFile $file
+    set names {}
+    foreach e $entries { lappend names [dict get $e name] }
+    set varViewListInfo "[llength $entries] view(s): [join $names {, }]"
+    if {[dict get $res message] ne ""} {
+        ::ModelLoader::UI::SetStatus "View list imported from\
+[::ModelLoader::Logic::Basename $file]: [dict get $res message]."
+    } else {
+        ::ModelLoader::UI::SetStatus "View list imported: [llength $entries] view(s) from\
+[::ModelLoader::Logic::Basename $file]."
+    }
+    ::ModelLoader::UI::AppendInfo [list "" "VIEW LIST" \
+        "  file  : $file" \
+        "  views : [join $names {, }]"]
+    foreach e $entries {
+        set how "name only - no orientation"
+        if {[dict get $e matrix] ne ""} {
+            set how "matrix ([dict get $e matrix])"
+        } elseif {[dict get $e orientation] ne ""} {
+            set how "orientation [dict get $e orientation]"
+        }
+        ::ModelLoader::UI::AppendInfo [list "      [dict get $e name] : $how"]
+    }
+    ::ModelLoader::UI::RefreshStep3
+    return $file
+}
+#--------------------------------- fix 5 : PNG output folder ------------------
+# Writes a folder into the State layer and the entry widget.  Returns the
+# normalised folder, or "" when it was refused.
+proc ::ModelLoader::UI::SetOutputDirValue {dir} {
+    variable varOutputDir
+    variable wOutputDir
+    set check [::ModelLoader::Logic::CheckOutputDir $dir]
+    if {![dict get $check ok]} {
+        ::ModelLoader::UI::SetStatus "Output folder rejected: [dict get $check message]"
+        return ""
+    }
+    set varOutputDir [dict get $check path]
+    ::ModelLoader::State::SetOutputDir $varOutputDir
+    ::ModelLoader::UI::SetFileWidget $wOutputDir \
+        ::ModelLoader::UI::varOutputDir $varOutputDir
+    return $varOutputDir
+}
+# PLAIN TK: tk_chooseDirectory - hwtk has no folder entry widget.  An empty
+# result (the user cancelled) changes nothing.
+proc ::ModelLoader::UI::OnBrowseOutputDir {} {
+    variable varOutputDir
+    set start [string trim $varOutputDir]
+    if {$start eq "" || ![file isdirectory $start]} { set start [pwd] }
+    if {[catch {
+        set dir [tk_chooseDirectory -title "Choose the PNG output folder" \
+            -initialdir $start -mustexist 0]
+    } msg]} {
+        ::ModelLoader::UI::SetStatus "The folder browser could not be opened: $msg"
+        return ""
+    }
+    if {$dir eq ""} { return "" }
+    set out [::ModelLoader::UI::SetOutputDirValue $dir]
+    if {$out ne ""} {
+        ::ModelLoader::UI::SetStatus "PNG output folder: $out"
+        ::ModelLoader::UI::RefreshStep3
+    }
+    return $out
+}
+#--------------------------------- fix 4 : load a legend from a file ----------
+proc ::ModelLoader::UI::OnLoadLegend {} {
+    variable varTargetWin
+    variable varLegendFile
+    variable wLegendFile
+
+    set path [string trim [::ModelLoader::UI::WidgetText $wLegendFile $varLegendFile]]
+    if {$path eq ""} { set path [string trim $varLegendFile] }
+    if {$path eq ""} {
+        ::ModelLoader::UI::SetStatus "Choose a legend file first."
+        return ""
+    }
+    ::ModelLoader::UI::SetStatus "Loading the legend from\
+[::ModelLoader::Logic::Basename $path] into window $varTargetWin ..."
+    catch { update idletasks }
+    set res [::ModelLoader::Adapter::LoadLegendFromFile $varTargetWin $path]
+    ::ModelLoader::UI::AppendInfo [list "" "LEGEND (step 2)"]
+    if {![dict get $res ok]} {
+        ::ModelLoader::UI::SetStatus "Legend: [dict get $res message]"
+        ::ModelLoader::UI::AppendInfo [list \
+            "  window $varTargetWin : FAILED - [dict get $res message]"]
+        catch { tk_messageBox -title "Model Loader" -icon warning \
+            -message "Legend: [dict get $res message]" -parent .modelLoaderGUI }
+        return ""
+    }
+    set file [dict get $res file]
+    ::ModelLoader::State::SetLegendFile $varTargetWin $file
+    ::ModelLoader::UI::SetFileWidget $wLegendFile \
+        ::ModelLoader::UI::varLegendFile $file
+    ::ModelLoader::UI::AppendInfo [list \
+        "  window $varTargetWin : OK - [dict get $res message]"]
+    foreach warning [dict get $res warnings] {
+        ::ModelLoader::UI::AppendInfo [list "      warning: $warning"]
+    }
+    ::ModelLoader::UI::SetStatus "[dict get $res message] (window $varTargetWin)"
+    return $file
+}
+#--------------------------------- fix 5 : capture ----------------------------
+# <scope> is 'target' or 'all' - it comes from the button that was pressed, so
+# the two buttons can never disagree with the scope field.
+proc ::ModelLoader::UI::OnCapture {scope} {
+    variable varTargetWin
+    variable varOutputDir
+    variable varCaptureScope
+    variable varViewListFile
+    variable wViewListFile
+
+    set varCaptureScope $scope
+    # a view list file that is set but was never imported is imported now
+    if {[llength [::ModelLoader::State::GetViewList]] == 0} {
+        set typed [string trim [::ModelLoader::UI::WidgetText $wViewListFile \
+            $varViewListFile]]
+        if {$typed ne ""} { ::ModelLoader::UI::OnImportViewList }
+    }
+    set dir [::ModelLoader::UI::SetOutputDirValue $varOutputDir]
+    if {$dir eq ""} {
+        ::ModelLoader::UI::RefreshStep3
+        catch { tk_messageBox -title "Model Loader" -icon warning \
+            -message "Choose the PNG output folder first (step 3)." \
+            -parent .modelLoaderGUI }
+        return
+    }
+    if {[catch { ::ModelLoader::Logic::ValidateStep3 $scope $varTargetWin $dir } msg]} {
+        ::ModelLoader::UI::SetStatus $msg
+        ::ModelLoader::UI::RefreshStep3
+        catch { tk_messageBox -title "Model Loader" -icon warning -message $msg \
+            -parent .modelLoaderGUI }
+        return
+    }
+
+    set entries [::ModelLoader::State::GetViewList]
+    ::ModelLoader::UI::SetStatus "Capturing PNG files ($scope) - please wait ..."
+    catch { update idletasks }
+    set res [::ModelLoader::Adapter::CapturePng $scope $varTargetWin $entries $dir]
+
+    ::ModelLoader::UI::AppendInfo [list "" "PNG CAPTURE (step 3)"]
+    if {[dict get $res ok]} {
+        ::ModelLoader::UI::AppendInfo [list \
+            "  [dict get $res captured] file(s) written to $dir"]
+        foreach file [dict get $res files] {
+            ::ModelLoader::UI::AppendInfo [list \
+                "      OK   [::ModelLoader::Logic::Basename $file]"]
+        }
+    } else {
+        ::ModelLoader::UI::AppendInfo [list "  FAILED - [dict get $res message]"]
+    }
+    foreach warning [dict get $res warnings] {
+        ::ModelLoader::UI::AppendInfo [list "      warning: $warning"]
+    }
+    if {[dict get $res mode] ne ""} {
+        ::ModelLoader::UI::AppendInfo [list \
+            "  capture form : [dict get $res mode] (remembered for the next run)"]
+    }
+    ::ModelLoader::UI::SetStatus [dict get $res message]
+    ::ModelLoader::UI::RefreshStep3
+    return
+}
 #--------------------------------- step 1 actions -----------------------------
 proc ::ModelLoader::UI::OnApplyLayout {} {
     # BUG FIX 1: the number is taken from the WIDGET first (see
@@ -2209,9 +3581,9 @@ proc ::ModelLoader::UI::OnApplyLayout {} {
         ::ModelLoader::UI::SetWindowCountValue $wanted
         ::ModelLoader::UI::SetStatus \
             "Layout '$wanted' was refused - the value stays in the field: [dict get $res message]"
+        ::ModelLoader::UI::RefreshWindowList
         ::ModelLoader::UI::AppendInfo [list "" "LAYOUT" \
             "  $wanted window(s) requested - refused: [dict get $res message]"]
-        ::ModelLoader::UI::RefreshWindowList
         return
     }
     if {[dict get $res unchanged]} {
@@ -2234,15 +3606,52 @@ proc ::ModelLoader::UI::OnApplyLayout {} {
     ::ModelLoader::UI::SetWindowCountValue $real
     return
 }
+proc ::ModelLoader::UI::OnLearnLayouts {} {
+    # FIX 3: the 'Learn layouts' button.  The probe asks HyperView which layout
+    # token belongs to which window count and caches every answer, so 'Apply
+    # layout' stops guessing.  A page that cannot be read is REPORTED - the
+    # handler never throws (Adapter::LearnLayouts catches everything).
+    ::ModelLoader::UI::SetStatus "Probing the layout tokens of the active page ..."
+    catch { update idletasks }
+    set res [::ModelLoader::Adapter::LearnLayouts]
+    if {![dict get $res ok]} {
+        set msg [dict get $res message]
+        ::ModelLoader::UI::SetStatus "Learn layouts: $msg"
+        # RefreshWindowList REPLACES the whole pane (SetInfo), so it has to run
+        # BEFORE the report is appended - the other way round the report of the
+        # probe would be wiped the same instant.
+        ::ModelLoader::UI::RefreshWindowList
+        ::ModelLoader::UI::AppendInfo [list "" "LAYOUT TOKENS" \
+            "  the probe did not run: $msg"]
+        return 0
+    }
+    set learned [dict get $res learned]
+    set lines [list "" "LAYOUT TOKENS (learned by the probe)"]
+    if {[dict size $learned] == 0} {
+        lappend lines "  no token was learned from this page"
+    } else {
+        foreach c [lsort -integer [dict keys $learned]] {
+            lappend lines "  [format %2d $c] window(s) -> token '[dict get $learned $c]'"
+        }
+    }
+    foreach line [split [dict get $res message] "\n"] {
+        if {$line ne ""} { lappend lines "  $line" }
+    }
+    ::ModelLoader::UI::SetStatus "Learn layouts: [dict size $learned] token(s)\
+ known, the page shows [dict get $res restored] window(s)."
+    ::ModelLoader::UI::RefreshWindowList
+    ::ModelLoader::UI::AppendInfo $lines
+    return 1
+}
 proc ::ModelLoader::UI::OnRefreshPage {} {
     ::ModelLoader::UI::SetStatus "Reading the active page ..."
     catch { update idletasks }
     set info [::ModelLoader::UI::RefreshWindowList]
     if {[llength $info] == 0} {
-        ::ModelLoader::UI::SetStatus "The active page could not be read: \
+        ::ModelLoader::UI::SetStatus "The active page could not be read:\
 [::ModelLoader::State::GetLastError]"
     } else {
-        ::ModelLoader::UI::SetStatus "Active page [dict get $info page] : \
+        ::ModelLoader::UI::SetStatus "Active page [dict get $info page] :\
 [dict get $info windows] window(s), layout token '[dict get $info layout]'."
     }
     return
@@ -2307,12 +3716,16 @@ proc ::ModelLoader::UI::OnLoadModel {} {
     ::ModelLoader::UI::SetStatus "Loading into window $winIdx ..."
     catch { update idletasks }
     set res [::ModelLoader::Adapter::LoadAllAndRefresh $winIdx $modelPath $resultPath]
+    # the page/window tree is rebuilt FIRST and the report of this action is
+    # appended afterwards: RefreshWindowList replaces the WHOLE pane (SetInfo),
+    # so an earlier AppendInfo would be wiped the same instant
+    ::ModelLoader::UI::RefreshWindowList
     if {![dict get $res ok]} {
         ::ModelLoader::UI::AppendInfo [list "" "LOAD INTO WINDOW $winIdx" \
             "  model  : [expr {$modelPath  eq "" ? {<none>} : $modelPath}]" \
             "  result : [expr {$resultPath eq "" ? {<none>} : $resultPath}]" \
             "  FAILED : [dict get $res message]" \
-            "  hint   : check that the file is readable and that its format is \
+            "  hint   : check that the file is readable and that its format is\
 supported - the reader is detected automatically from the file"]
         ::ModelLoader::UI::SetStatus "Loading failed: [dict get $res message]"
     } else {
@@ -2320,10 +3733,10 @@ supported - the reader is detected automatically from the file"]
             "  model   : [expr {$modelPath  eq "" ? {<none>} : $modelPath}]" \
             "  result  : [expr {$resultPath eq "" ? {<none>} : $resultPath}]" \
             "  reader  : auto detected from the file (no reader entry needed)" \
-            "  mode    : [dict get $res mode]   models/further files: [dict get $res models] \
-[dict get $res files]" \
+            "  mode    : [dict get $res mode]   models/further files: [dict get $res models]\
+[dict get $res files]"\
             "  subcase : [llength [dict get $res subcases]]" \
-            "  state   : stored, see the result tree below"]
+            "  state   : stored, see the result tree above"]
         foreach note $notes { lappend lines "  note    : $note" }
         foreach warn [dict get $res warnings] { lappend lines "  warning : $warn" }
         ::ModelLoader::UI::AppendInfo $lines
@@ -2333,7 +3746,6 @@ supported - the reader is detected automatically from the file"]
         }
         ::ModelLoader::UI::SetStatus $status
     }
-    ::ModelLoader::UI::RefreshWindowList
     return
 }
 proc ::ModelLoader::UI::OnRefreshWindow {} {
@@ -2343,6 +3755,8 @@ proc ::ModelLoader::UI::OnRefreshWindow {} {
     ::ModelLoader::UI::SetStatus "Re-reading the results of window $winIdx ..."
     catch { update idletasks }
     set res [::ModelLoader::Adapter::RefreshWindowResults $winIdx]
+    # same order as in OnLoadModel: refresh the tree first, report afterwards
+    ::ModelLoader::UI::RefreshWindowList
     if {![dict get $res ok]} {
         ::ModelLoader::UI::AppendInfo [list "" "RE-READ WINDOW $winIdx" \
             "  FAILED : [dict get $res message]"]
@@ -2351,10 +3765,9 @@ proc ::ModelLoader::UI::OnRefreshWindow {} {
         ::ModelLoader::UI::AppendInfo [list "" "RE-READ WINDOW $winIdx" \
             "  models   : [dict get $res models]  files: [dict get $res files]" \
             "  subcases : [llength [dict get $res subcases]]"]
-        ::ModelLoader::UI::SetStatus "Window $winIdx re-read: \
+        ::ModelLoader::UI::SetStatus "Window $winIdx re-read:\
 [llength [dict get $res subcases]] subcase(s)."
     }
-    ::ModelLoader::UI::RefreshWindowList
     return
 }
 

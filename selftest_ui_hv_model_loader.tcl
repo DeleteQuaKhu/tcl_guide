@@ -14,10 +14,14 @@
 #   * Bootstrap          (hwtk::* present thanks to the stubs)
 #   * UI::Build          (dialog, banner, steps, info pane, status line,
 #                         both button bars: dialog insert and own fallback bar)
-#   * UI::ShowStep 1/2, StepNext, StepBack
-#   * UI::RefreshWindowList, UI::RefreshStep2
-#   * the event handlers OnSubcaseChanged, OnDataTypeChanged,
-#     OnApplyLayout, OnRefreshPage, OnLoadModel, OnRefreshWindow, OnApply
+#   * UI::ShowStep 1/2/3, StepNext, StepBack
+#   * UI::RefreshWindowList, UI::RefreshStep2, UI::RefreshStep3
+#   * the event handlers OnSubcaseChanged, OnDataTypeChanged, OnLoadLegend,
+#     OnImportViewList, OnCapture, OnApplyLayout, OnRefreshPage, OnLoadModel,
+#     OnRefreshWindow, OnApply
+#   * the five fixes : 1 (the window count keeps its value), 2 (the file
+#     filters), 3 (layout token order + the 'Learn layouts' probe), 4 (the
+#     legend file of step 2), 5 (view list, PNG folder, PNG capture plan)
 #   * UI::DoClose and a second Build after the close
 #
 # Everything the hwi adapter tries is reported as a warning by the wizard
@@ -25,6 +29,9 @@
 # every failure path is handled instead of aborting the GUI.
 #
 # Run with:  tclsh selftest_ui_hv_model_loader.tcl   (from this folder)
+# A build machine usually has no tclsh with Tk, but the very same file can be
+# run with the Tcl/Tk that comes with Python (see run_ui_selftest.py):
+#     python run_ui_selftest.py selftest_ui_hv_model_loader.tcl
 #=============================================================================
 
 #-----------------------------------------------------------------------------
@@ -142,7 +149,11 @@ proc ::stub::dialogMethod {path method args} {
         }
         hide { return "" }
         buttonconfigure {
-            lassign $args name rest
+            # name + the whole option list - 'lassign $args name rest' would put
+            # only the SECOND element into rest and '-state disabled' (or
+            # '-text ... -command ...') would be truncated to '-state'.
+            lassign $args name
+            set rest [lrange $args 1 end]
             if {[winfo exists ${path}.btn_$name]} {
                 if {[catch { ${path}.btn_$name configure {*}$rest } msg]} {
                     ::stub::note "dialog buttonconfigure $name : $msg"
@@ -172,6 +183,10 @@ proc runs {name script} {
 }
 proc textof {w} { catch { $w cget -text } t ; return $t }
 proc valuesof {w} { catch { $w cget -values } v ; return $v }
+# 1 when any line of the information pane matches the regular expression
+proc infohas {pattern} {
+    expr {[lsearch -regexp [$::ModelLoader::UI::wInfo get 0 end] $pattern] >= 0 ? 1 : 0}
+}
 
 proc hwtk::openfileentry {path args} {
     if {![winfo exists $path]} {
@@ -224,6 +239,9 @@ ok "status line exists"                  [exists .modelLoaderGUI.recess.status]
 ok "body frame exists"                   [exists .modelLoaderGUI.recess.body]
 ok "step 1 frame exists"                 [exists .modelLoaderGUI.recess.body.step1]
 ok "step 2 frame exists"                 [exists .modelLoaderGUI.recess.body.step2]
+ok "step 3 frame exists"                 [exists .modelLoaderGUI.recess.body.step3]
+eq "the banner names step 1 of 3" "STEP 1 of 3 - Page layout and model loading" \
+    [textof $::ModelLoader::UI::wStepTitle]
 ok "information labelframe exists"       [exists .modelLoaderGUI.recess.info]
 ok "information listbox exists"          [exists .modelLoaderGUI.recess.info.inner.lb]
 ok "step 1 layout labelframe exists"     [exists .modelLoaderGUI.recess.body.step1.layout]
@@ -246,8 +264,38 @@ ok "component combobox exists"           [exists .modelLoaderGUI.recess.body.ste
 ok "averaging combobox exists"           [exists .modelLoaderGUI.recess.body.step2.contour.avg]
 ok "layer combobox exists"               [exists .modelLoaderGUI.recess.body.step2.contour.layer]
 ok "apply-all checkbutton exists"        [exists .modelLoaderGUI.recess.body.step2.contour.all]
+# --- fix 4 : the legend field of step 2 --------------------------------------
+ok "step 2 legend labelframe exists"     [exists .modelLoaderGUI.recess.body.step2.legend]
+ok "legend file field exists"            [exists .modelLoaderGUI.recess.body.step2.legend.legend]
+ok "legend browse button exists"         [exists .modelLoaderGUI.recess.body.step2.legend.legendBrowse]
+ok "'Load legend' button exists"         [exists .modelLoaderGUI.recess.body.step2.legend.load]
+# --- fix 5 : the widgets of step 3 ------------------------------------------
+ok "step 3 view-list labelframe exists"  [exists .modelLoaderGUI.recess.body.step3.views]
+ok "view list field exists"              [exists .modelLoaderGUI.recess.body.step3.views.viewlist]
+ok "'Import views' button exists"        [exists .modelLoaderGUI.recess.body.step3.views.import]
+ok "the view list info label exists"     [exists .modelLoaderGUI.recess.body.step3.views.info]
+ok "step 3 output labelframe exists"     [exists .modelLoaderGUI.recess.body.step3.output]
+ok "the output folder entry exists"      [exists .modelLoaderGUI.recess.body.step3.output.dir]
+ok "the folder browse button exists"     [exists .modelLoaderGUI.recess.body.step3.output.browse]
+ok "step 3 capture labelframe exists"    [exists .modelLoaderGUI.recess.body.step3.capture]
+ok "the scope combobox exists"           [exists .modelLoaderGUI.recess.body.step3.capture.scope]
+ok "'Capture target' button exists"      [exists .modelLoaderGUI.recess.body.step3.capture.bTarget]
+ok "'Capture all' button exists"         [exists .modelLoaderGUI.recess.body.step3.capture.bAll]
+eq "the scope combobox offers target and all" "target all" \
+    [valuesof $::ModelLoader::UI::wCaptureScope]
 ok "buttons went into the dialog box"    [exists {.modelLoaderGUI.btn_apply}]
 ok "own button bar was NOT created"      [expr {[exists .modelLoaderGUI.recess.btnbar] ? 0 : 1}]
+# the dialog stand-in must really apply 'buttonconfigure -text -command -state':
+# a stand-in that drops them would hide a broken or unwired wizard button.
+eq "the Next button carries its label" "Next >" [.modelLoaderGUI.btn_next cget -text]
+eq "the Back button carries its label" "< Back" [.modelLoaderGUI.btn_back cget -text]
+ok "the Next button is wired to StepNext" \
+    [string match "*StepNext*" [.modelLoaderGUI.btn_next cget -command]]
+eq "Back is disabled on step 1" disabled [.modelLoaderGUI.btn_back cget -state]
+eq "Next is enabled on step 1" normal [.modelLoaderGUI.btn_next cget -state]
+eq "Apply is disabled on step 1" disabled [.modelLoaderGUI.btn_apply cget -state]
+eq "the dialog refused no buttonconfigure" {} \
+    [lsearch -all -regexp $::stub::notes {buttonconfigure}]
 set s1seen [expr {[lsearch -exact [pack slaves .modelLoaderGUI.recess.body] \
     .modelLoaderGUI.recess.body.step1] >= 0 ? 1 : 0}]
 set s2seen [expr {[lsearch -exact [pack slaves .modelLoaderGUI.recess.body] \
@@ -280,7 +328,7 @@ runs "fabricate the state of window 1" {
 runs "StepNext with a loaded model" {::ModelLoader::UI::StepNext}
 eq "step counter is 2" 2 $::ModelLoader::UI::step
 eq "step 2 header names the step" \
-    "STEP 2 of 2 - Contour plot" [textof $::ModelLoader::UI::wStepTitle]
+    "STEP 2 of 3 - Contour plot and legend" [textof $::ModelLoader::UI::wStepTitle]
 eq "model info line" "window 1 : big.op2" $::ModelLoader::UI::varModelInfo
 # NOTE: cget -values returns the list in its Tcl list form, elements that
 # contain a blank are braced - that is why the subcase labels appear braced.
@@ -321,6 +369,9 @@ set ::ModelLoader::UI::varWindowCount 2
 runs "OnApplyLayout does not throw" {::ModelLoader::UI::OnApplyLayout}
 ok "the refused layout is reported" \
     [string match "Layout '2' was refused*" $::ModelLoader::UI::statusText]
+# the report of the action must SURVIVE the pane refresh of the same handler
+# (RefreshWindowList replaces the whole pane - an AppendInfo before it is lost)
+ok "the refusal reached the information pane" [infohas {requested - refused:}]
 set ::ModelLoader::UI::varWindowCount not-a-number
 runs "OnApplyLayout rejects garbage input" {::ModelLoader::UI::OnApplyLayout}
 ok "garbage input is reported" \
@@ -335,6 +386,7 @@ ok "the page failure was recorded" \
 runs "OnRefreshWindow does not throw" {::ModelLoader::UI::OnRefreshWindow}
 ok "the window failure is reported in the status line" \
     [string match "Window 1 could not be read:*" $::ModelLoader::UI::statusText]
+ok "the re-read report survives the pane refresh" [infohas {RE-READ WINDOW 1}]
 
 set ::ModelLoader::UI::varFile ""
 set ::ModelLoader::UI::varModelFile {C:/models/does_not_exist.inp}
@@ -491,9 +543,342 @@ set ::ModelLoader::UI::varResultFile [file normalize $okRes]
 runs "OnLoadModel with two existing files" {::ModelLoader::UI::OnLoadModel}
 ok "the hwi failure of the load is reported" \
     [string match "Loading failed:*" $::ModelLoader::UI::statusText]
+ok "the load report survives the pane refresh" [infohas {LOAD INTO WINDOW 1}]
 set ::ModelLoader::UI::varModelFile ""
 set ::ModelLoader::UI::varResultFile ""
 foreach f [list $okInp $okRes $oddTxt] { catch { file delete $f } }
+
+sec "5d - fix 3: layout token order, the cache and the 'Learn layouts' probe"
+# The old candidate builder ended with 'lsort -unique', which threw the
+# preferred arrangement away.  The preferred one has to come FIRST, and a token
+# that HyperView really accepted wins over every guess.
+set cand4 [::ModelLoader::Logic::LayoutCandidates 4]
+eq "the preferred token of a 4 window page comes first" 2x2 [lindex $cand4 0]
+eq "the candidate list has no duplicates" \
+    [llength [lsort -unique $cand4]] [llength $cand4]
+ok "the plain count is still tried" [expr {[lsearch -exact $cand4 4] >= 0}]
+ok "the legacy tokens are still tried" \
+    [expr {[lsearch -exact $cand4 2H] >= 0 && [lsearch -exact $cand4 single] >= 0}]
+eq "no candidate for a nonsense count" {} [::ModelLoader::Logic::LayoutCandidates 0]
+
+runs "a learned token is remembered" \
+    {::ModelLoader::State::SetLayoutToken 4 My4}
+eq "the learned token is read back" My4 [::ModelLoader::State::GetLayoutToken 4]
+eq "the learned token moved to the front" My4 \
+    [lindex [::ModelLoader::Logic::LayoutCandidates 4] 0]
+eq "the learned token is offered only once" 1 \
+    [llength [lsearch -all -exact [::ModelLoader::Logic::LayoutCandidates 4] My4]]
+eq "the token map holds the count" My4 \
+    [dict get [::ModelLoader::State::LayoutTokenMap] 4]
+runs "forget the token again" {::ModelLoader::State::SetLayoutToken 4 ""}
+eq "the preferred guess is first again" 2x2 \
+    [lindex [::ModelLoader::Logic::LayoutCandidates 4] 0]
+eq "and the map is empty again" {} [::ModelLoader::State::LayoutTokenMap]
+
+# the probe never shrinks the page (a smaller layout loses the models of the
+# closed windows) - it only visits counts >= the current one
+eq "the probe order of a 4 window page" "4 6 8 9 12 16" \
+    [::ModelLoader::Logic::LayoutProbeOrder 4]
+eq "the probe order starts at the current count" "6 8 9 12 16" \
+    [::ModelLoader::Logic::LayoutProbeOrder 5]
+eq "the probe order respects a custom choice list" "2 4" \
+    [::ModelLoader::Logic::LayoutProbeOrder 2 {1 2 4}]
+eq "the probe order of the largest count" 16 \
+    [::ModelLoader::Logic::LayoutProbeOrder 16]
+
+# Adapter::LearnLayouts needs hwi - without it the failure is REPORTED, never
+# thrown, and nothing is learned
+set learn [::ModelLoader::Adapter::LearnLayouts]
+eq "the probe reports the unreadable page" 0 [dict get $learn ok]
+ok "and it names the reason" \
+    [string match "Cannot read the active page:*" [dict get $learn message]]
+eq "nothing was learned" {} [dict get $learn learned]
+eq "no token was applied" {} [dict get $learn attempted]
+eq "the restore position is unknown" -1 [dict get $learn restored]
+
+# ... and the probe has its own button in step 1.  The button and its handler
+# have to work on a page that cannot be read, too (that is the case here - no
+# hwi), so the failure is reported instead of being thrown at the GUI.
+ok "the 'Learn layouts' button exists" [exists $::ModelLoader::UI::wStep1.layout.learn]
+eq "the button carries its label" "Learn layouts" \
+    [textof $::ModelLoader::UI::wStep1.layout.learn]
+ok "the button is wired to OnLearnLayouts" \
+    [string match "*OnLearnLayouts*" \
+        [$::ModelLoader::UI::wStep1.layout.learn cget -command]]
+runs "OnLearnLayouts does not throw without hwi" {::ModelLoader::UI::OnLearnLayouts}
+ok "the failed probe is reported in the status line" \
+    [string match "Learn layouts:*Cannot read the active page*" \
+        $::ModelLoader::UI::statusText]
+ok "the information pane names the failed probe" [infohas {the probe did not run}]
+eq "the failed probe left no token behind" {} \
+    [::ModelLoader::State::GetLayoutToken 4]
+
+sec "5e - fix 4: the legend file of step 2 ('Load legend')"
+eq "the legend filter starts with the Tcl entry" 1 \
+    [string match "*Legend Tcl Scripts*.tcl*" \
+        [lindex [::ModelLoader::Logic::LegendFileTypes] 0]]
+ok "the legend filter knows *.hvl" \
+    [string match "*.hvl*" [::ModelLoader::Logic::LegendFileTypes]]
+eq "the legend extensions are declared" ".tcl .hvl .txt" \
+    [::ModelLoader::Logic::LegendExtensions]
+
+set legOK    [file join $::here _selftest_legend_ok.tcl]
+set legBad   [file join $::here _selftest_legend_bad.tcl]
+set legEmpty [file join $::here _selftest_legend_empty.tcl]
+set fh [open $legOK w] ; puts $fh "# selftest legend" ; \
+    puts $fh {set ::mlLegendMarker ok} ; close $fh
+set fh [open $legBad w] ; puts $fh {error "boom"} ; close $fh
+set fh [open $legEmpty w] ; close $fh
+
+# an empty field is refused with a hint before anything else happens
+set ::ModelLoader::UI::varLegendFile ""
+runs "OnLoadLegend with an empty field does not throw" {::ModelLoader::UI::OnLoadLegend}
+eq "an empty legend field is refused" "Choose a legend file first." \
+    $::ModelLoader::UI::statusText
+
+# a legend file that does not exist is refused by the adapter
+set ::ModelLoader::UI::varLegendFile {C:/no/such/legend.tcl}
+runs "OnLoadLegend with a missing file" {::ModelLoader::UI::OnLoadLegend}
+ok "the missing legend file is reported in the status line" \
+    [string match "Legend: Legend file not found:*" $::ModelLoader::UI::statusText]
+ok "the failure also reached the information pane" \
+    [infohas {FAILED - Legend file not found}]
+
+set ::ModelLoader::UI::varLegendFile $legEmpty
+runs "OnLoadLegend with an empty file" {::ModelLoader::UI::OnLoadLegend}
+ok "the empty legend file is reported" \
+    [string match "Legend: The legend file * is empty.*" $::ModelLoader::UI::statusText]
+
+set ::ModelLoader::UI::varLegendFile $legBad
+runs "OnLoadLegend with a broken legend script" {::ModelLoader::UI::OnLoadLegend}
+ok "the broken legend script is reported" \
+    [string match "Legend: The legend file could not be applied:*" \
+        $::ModelLoader::UI::statusText]
+ok "the Tcl error of the script is shown" \
+    [string match "*boom*" $::ModelLoader::UI::statusText]
+
+# the happy path: a saved legend IS a Tcl script, so it is sourced.  The
+# switch-on + redraw afterwards needs hwi and stays a warning in this harness.
+set ::mlLegendMarker ""
+set ::ModelLoader::UI::varLegendFile $legOK
+runs "OnLoadLegend with a readable legend script" {::ModelLoader::UI::OnLoadLegend}
+eq "the legend script was really sourced" ok $::mlLegendMarker
+eq "the legend file is remembered for the window" [file normalize $legOK] \
+    [::ModelLoader::State::GetLegendFile 1]
+ok "the loaded legend is reported" \
+    [string match "Legend loaded from _selftest_legend_ok.tcl*" \
+        $::ModelLoader::UI::statusText]
+ok "the missing hwi redraw is a warning, not an error" \
+    [string match "*(with warnings)*" $::ModelLoader::UI::statusText]
+ok "the modelLoader kept the window number" \
+    [string match "* (window 1)" $::ModelLoader::UI::statusText]
+ok "the legend section is in the information pane" [infohas {LEGEND \(step 2\)}]
+ok "the window is named in the pane" [infohas {window 1 : OK - Legend loaded from}]
+eq "the normalised path went back into the field" [file normalize $legOK] \
+    $::ModelLoader::UI::varLegendFile
+set ::ModelLoader::UI::varLegendFile ""
+foreach f [list $legOK $legBad $legEmpty] { catch { file delete $f } }
+ok "the legend temporaries are gone" \
+    [expr {[file exists $legOK] ? 0 : 1}]
+
+sec "5f - fix 5: the step navigation and the view list of step 3"
+runs "StepNext from step 2 reaches step 3" {::ModelLoader::UI::StepNext}
+eq "the step counter is 3" 3 $::ModelLoader::UI::step
+eq "the banner names step 3 of 3" "STEP 3 of 3 - Capture PNG" \
+    [textof $::ModelLoader::UI::wStepTitle]
+set body [list .modelLoaderGUI.recess.body.step1 .modelLoaderGUI.recess.body.step2 \
+    .modelLoaderGUI.recess.body.step3]
+set packed {}
+foreach f $body {
+    lappend packed [expr {[lsearch -exact [pack slaves .modelLoaderGUI.recess.body] $f] >= 0
+        ? 1 : 0}]
+}
+eq "only step 3 is packed now" "0 0 1" $packed
+eq "'Next' is disabled on the last step" disabled \
+    [.modelLoaderGUI.btn_next cget -state]
+runs "StepNext on the last step does nothing" {::ModelLoader::UI::StepNext}
+eq "the step counter is still 3" 3 $::ModelLoader::UI::step
+
+# --- what ShowStep 3 / RefreshStep3 shows ------------------------------------
+eq "the view list info starts empty" "no view list imported - one PNG per window" \
+    $::ModelLoader::UI::varViewListInfo
+eq "the default scope is target" target $::ModelLoader::UI::varCaptureScope
+ok "a default PNG folder is suggested" \
+    [expr {[file tail $::ModelLoader::UI::varOutputDir] eq "hv_capture" ? 1 : 0}]
+eq "the target window is named next to the scope" "target window: 1" \
+    [textof $::ModelLoader::UI::wTargetWin3]
+ok "the pane explains what a capture would write" \
+    [infohas {PNG CAPTURE \(step 3\)}]
+
+# --- the view list parser (pure, no file needed) ------------------------------
+# blank lines and '#', '//' and ';' comments are skipped, the first token is the
+# name, a single further token is an orientation, a group of 16 numbers is a
+# view matrix and duplicate names are made unique.
+set parsed [::ModelLoader::Logic::ParseViewList {# comment
+iso
+front_left    front
+tilted  0.62 -0.39 0.69 0.0 -0.35 -0.91 0.21 0.0 0.42 0.35 0.81 0.0 0.0 0.0 0.0 1.0
+// slash comment
+top ; comment behind a value
+iso}]
+eq "five entries were parsed" 5 [llength $parsed]
+eq "the name is the first token" iso [dict get [lindex $parsed 0] name]
+eq "a name alone is its own orientation" iso \
+    [dict get [lindex $parsed 0] orientation]
+eq "the second token is the orientation" front \
+    [dict get [lindex $parsed 1] orientation]
+eq "16 numbers are read as a view matrix" 16 \
+    [llength [dict get [lindex $parsed 2] matrix]]
+eq "a matrix entry carries no orientation" "" \
+    [dict get [lindex $parsed 2] orientation]
+eq "a comment behind a value is cut off" top [dict get [lindex $parsed 3] name]
+eq "a duplicate name is made unique" iso-2 [dict get [lindex $parsed 4] name]
+
+# --- the view list of the wizard ---------------------------------------------
+set vlFile [file join $::here _selftest_viewlist.txt]
+set fh [open $vlFile w]
+puts $fh "# my steady views"
+puts $fh "iso"
+puts $fh "front_left front"
+puts $fh "tilted 0.62 -0.39 0.69 0.0 -0.35 -0.91 0.21 0.0 0.42 0.35 0.81 0.0 0.0 0.0 0.0 1.0"
+puts $fh "iso"
+close $fh
+
+set ::ModelLoader::UI::varViewListFile $vlFile
+runs "'Import views' with a good list" {::ModelLoader::UI::OnImportViewList}
+eq "the imported file is remembered" [file normalize $vlFile] \
+    [::ModelLoader::State::GetViewListFile]
+eq "the info label lists the views" "4 view(s): iso, front_left, tilted, iso-2" \
+    $::ModelLoader::UI::varViewListInfo
+ok "the status line reports the import" \
+    [string match "View list imported: 4 view(s) from _selftest_viewlist.txt*" \
+        $::ModelLoader::UI::statusText]
+eq "four entries are in the State layer" 4 \
+    [llength [::ModelLoader::State::GetViewList]]
+ok "the information pane lists the views" [infohas {VIEW LIST}]
+ok "the pane shows the matrix entry" [infohas {tilted : matrix \(}]
+ok "the pane names the window files" [infohas {w1_iso.png}]
+
+# a file that does not exist is rejected and the imported list is dropped
+set ::ModelLoader::UI::varViewListFile {C:/no/such/views.txt}
+runs "'Import views' with a missing file" {::ModelLoader::UI::OnImportViewList}
+ok "the missing view list is rejected" \
+    [string match "View list rejected: the view list does not exist:*" \
+        $::ModelLoader::UI::statusText]
+eq "the previous import was dropped" {} [::ModelLoader::State::GetViewList]
+eq "the info label falls back" "no view list imported - one PNG per window" \
+    $::ModelLoader::UI::varViewListInfo
+ok "the rejection is in the information pane" \
+    [infohas {was rejected: the view list does not exist}]
+
+# an empty file holds no view entry
+set vlEmpty [file join $::here _selftest_viewlist_empty.txt]
+set fh [open $vlEmpty w] ; close $fh
+set ::ModelLoader::UI::varViewListFile $vlEmpty
+runs "'Import views' with an empty file" {::ModelLoader::UI::OnImportViewList}
+ok "the empty view list is rejected" \
+    [string match "View list rejected: no view entry was found in *" \
+        $::ModelLoader::UI::statusText]
+
+# an empty field is not an error - it just means 'one PNG per window'
+set ::ModelLoader::UI::varViewListFile ""
+runs "'Import views' with an empty field" {::ModelLoader::UI::OnImportViewList}
+eq "the empty field is explained" \
+    "No view list file was chosen - one PNG per window." \
+    $::ModelLoader::UI::statusText
+eq "and no views are imported" {} [::ModelLoader::State::GetViewList]
+
+# the real list is imported again - the capture tests below need it
+set ::ModelLoader::UI::varViewListFile $vlFile
+runs "import the good list again" {::ModelLoader::UI::OnImportViewList}
+eq "the four views are back" 4 [llength [::ModelLoader::State::GetViewList]]
+catch { file delete $vlEmpty }
+
+sec "5g - fix 5: the PNG output folder, the capture plan and the capture"
+# --- the output folder -------------------------------------------------------
+set outFile [file join $::here _selftest_outdir_file.txt]
+set fh [open $outFile w] ; close $fh
+set ::ModelLoader::UI::varOutputDir $outFile
+set stateBefore [::ModelLoader::State::GetOutputDir]
+eq "a FILE cannot be the PNG folder" "" \
+    [::ModelLoader::UI::SetOutputDirValue $outFile]
+ok "and the refusal explains itself" \
+    [string match "Output folder rejected: * is a file, not a folder" \
+        $::ModelLoader::UI::statusText]
+eq "the refusal did not touch the State layer" $stateBefore \
+    [::ModelLoader::State::GetOutputDir]
+
+set outDir [file join $::here _selftest_png]
+catch { file delete -force $outDir }
+eq "a folder that does not exist yet is accepted" [file normalize $outDir] \
+    [::ModelLoader::UI::SetOutputDirValue $outDir]
+eq "the folder entry shows it" [file normalize $outDir] \
+    [$::ModelLoader::UI::wOutputDir get]
+eq "the State layer remembers it" [file normalize $outDir] \
+    [::ModelLoader::State::GetOutputDir]
+
+# --- the plan of RefreshStep3 ------------------------------------------------
+set ::ModelLoader::UI::varCaptureScope target
+set ::ModelLoader::UI::varTargetWin 1
+runs "RefreshStep3 with four views" {::ModelLoader::UI::RefreshStep3}
+eq "the info label lists the four views" "4 view(s): iso, front_left, tilted, iso-2" \
+    $::ModelLoader::UI::varViewListInfo
+ok "the pane counts one file per view of the one window" \
+    [infohas {files +: 4 PNG file\(s\) would be written}]
+ok "the planned file names are listed" [infohas {w1_iso.png}]
+ok "the output folder is part of the plan" \
+    [infohas {output folder : .*_selftest_png}]
+
+# the scope is validated - garbage falls back to the default
+set ::ModelLoader::UI::varCaptureScope everything
+runs "RefreshStep3 with a nonsense scope" {::ModelLoader::UI::RefreshStep3}
+eq "the scope is back to target" target $::ModelLoader::UI::varCaptureScope
+eq "and so is the combobox" target [$::ModelLoader::UI::wCaptureScope get]
+
+# --- the capture (no hwi -> the adapter reports it, the GUI survives) --------
+runs "'Capture target' does not throw" {::ModelLoader::UI::OnCapture target}
+eq "the button set the scope" target $::ModelLoader::UI::varCaptureScope
+ok "the capture failure names the missing hwi" \
+    [string match "*invalid command name*hwi*" $::ModelLoader::UI::statusText]
+ok "the pane shows the failed capture" [infohas {FAILED - PNG capture}]
+eq "no capture form was recorded without hwi" "" \
+    [::ModelLoader::State::GetCaptureMode]
+ok "the output folder was created before the hwi call" \
+    [expr {[file isdirectory $outDir] ? 1 : 0}]
+
+runs "'Capture all' does not throw either" {::ModelLoader::UI::OnCapture all}
+eq "the scope is 'all' now" all $::ModelLoader::UI::varCaptureScope
+ok "the second failure is reported as well" \
+    [string match "PNG capture:*" $::ModelLoader::UI::statusText]
+
+# a view list that was typed but never imported is imported by the capture
+::ModelLoader::State::SetViewList {}
+set ::ModelLoader::UI::varViewListFile $vlFile
+runs "'Capture all' imports a view list that was not imported yet" \
+    {::ModelLoader::UI::OnCapture all}
+eq "the auto-import brought the four views back" 4 \
+    [llength [::ModelLoader::State::GetViewList]]
+
+# without an output folder the capture is refused before any hwi call
+set notesBefore [llength $::stub::notes]
+set ::ModelLoader::UI::varOutputDir ""
+runs "'Capture target' without an output folder" {::ModelLoader::UI::OnCapture target}
+ok "the missing folder is refused" \
+    [string match "Output folder rejected:*" $::ModelLoader::UI::statusText]
+ok "and a message box was offered" \
+    [expr {[llength $::stub::notes] > $notesBefore ? 1 : 0}]
+
+# --- back to step 2, ready for the last section ------------------------------
+runs "StepBack returns to step 2" {::ModelLoader::UI::StepBack}
+eq "the step counter is 2 again" 2 $::ModelLoader::UI::step
+eq "the banner names step 2 again" "STEP 2 of 3 - Contour plot and legend" \
+    [textof $::ModelLoader::UI::wStepTitle]
+eq "'Next' is enabled again" normal [.modelLoaderGUI.btn_next cget -state]
+catch { file delete -force $outDir }
+catch { file delete $outFile }
+catch { file delete $vlFile }
+ok "the capture temporaries are gone" \
+    [expr {[file exists $vlFile] ? 0 : 1}]
 
 sec "6 - own button bar (hwtk build without 'insert apply')"
 runs "DoClose destroys the dialog" {::ModelLoader::UI::DoClose}
