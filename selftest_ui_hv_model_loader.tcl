@@ -685,6 +685,17 @@ foreach f [list $legOK $legBad $legEmpty] { catch { file delete $f } }
 ok "the legend temporaries are gone" \
     [expr {[file exists $legOK] ? 0 : 1}]
 
+# P5b: the legend field must judge a legend with the LEGEND extensions - a
+# *.hvl is a normal legend file, so no 'unusual' warning may appear.
+set legField [file join $::here _selftest_legend_field.hvl]
+set fh [open $legField w] ; puts $fh "# legend" ; close $fh
+runs "ApplyChosenFile on the legend field with a *.hvl legend" \
+    {::ModelLoader::UI::ApplyChosenFile $::ModelLoader::UI::wLegendFile \
+        ::ModelLoader::UI::varLegendFile legend $legField}
+eq "a *.hvl legend is not warned about" \
+    "Chosen legend file: _selftest_legend_field.hvl" $::ModelLoader::UI::statusText
+file delete $legField
+
 sec "5f - fix 5: the step navigation and the view list of step 3"
 runs "StepNext from step 2 reaches step 3" {::ModelLoader::UI::StepNext}
 eq "the step counter is 3" 3 $::ModelLoader::UI::step

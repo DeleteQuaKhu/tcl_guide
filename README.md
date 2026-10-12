@@ -267,7 +267,9 @@ with `xvfb-run`); the pure runner does not.
 Everything that contains no `hwi` and no widget call: the `State` store, the
 `Logic` helpers (subcase / simulation / component tree, spec assembly and
 fan-out, validation, the file-type filters and extensions, `ReaderHint` - now a
-status-line suggestion only -, `CheckChosenFile` and `ParseViewList`), the pure
+status-line suggestion only -, `CheckChosenFile` - which judges a file by the
+extensions of **its own** field (`Logic::ExtensionsForKind` / `Logic::KindLabel`);
+an unknown kind is never second-guessed - and `ParseViewList`), the pure
 `UI` helpers (including `ReadWindowCount` / `InterpretWindowCount` of fix 1) and
 the adapter paths that fail before an `hwi` call is reached.
 
@@ -441,7 +443,9 @@ Three more defects were reported from real use and fixed in this revision:
    (`Logic::ResultFileTypes`, `*.res`/FEMFAT first), each with a **Browse...**
    button that calls `tk_getOpenFile -filetypes` with the very same list, and
    `Logic::CheckChosenFile` normalises/validates the chosen path before it is
-   loaded (`Adapter::LoadInputs` -> V10).  Covered by section 5c of the GUI test
+   loaded (`Adapter::LoadInputs` -> V10) - and it is judged by the extensions of
+   its own field (`Logic::ExtensionsForKind` / `Logic::KindLabel`; an unknown
+   kind is never second-guessed).  Covered by section 5c of the GUI test
    and section 4b of the pure test.
 7. **`[expr {... \"\" ...}]` inside a quoted string.**  The braces already
    protect the quotes, so `expr` received literal backslashes

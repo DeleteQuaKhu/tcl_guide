@@ -94,6 +94,7 @@ set expectedProcs {
     ::ModelLoader::Adapter::ApplyContour
     ::ModelLoader::Logic::ModelFileTypes ::ModelLoader::Logic::ResultFileTypes
     ::ModelLoader::Logic::ReaderHint ::ModelLoader::Logic::CheckChosenFile
+    ::ModelLoader::Logic::ExtensionsForKind ::ModelLoader::Logic::KindLabel
     ::ModelLoader::UI::CreateFileChooser ::ModelLoader::UI::BrowseFile
     ::ModelLoader::UI::ApplyChosenFile ::ModelLoader::UI::SetFileWidget
     ::ModelLoader::UI::ReadWindowCount ::ModelLoader::UI::SetWindowCountValue
@@ -232,6 +233,32 @@ check "the odd-extension warning is filled in" \
     [string match "*unusual*" \
         [dict get [::ModelLoader::Logic::CheckChosenFile $wizard result] message]]
 file delete $hereInp
+
+# P5b: a chosen file is judged by the extensions of its OWN field - a *.tcl is
+# a perfectly normal legend / view list file, and a kind that is not known at
+# all is never second-guessed (no bogus warning).
+checkEqual "a *.tcl legend is a normal legend file" "" \
+    [dict get [::ModelLoader::Logic::CheckChosenFile $wizard legend] message]
+checkEqual "a *.tcl view list is a normal view list" "" \
+    [dict get [::ModelLoader::Logic::CheckChosenFile $wizard viewlist] message]
+checkEqual "an unknown kind is never second-guessed" "" \
+    [dict get [::ModelLoader::Logic::CheckChosenFile $wizard whatever] message]
+set probeTxt [file join $here _selftest_probe.txt]
+set fh [open $probeTxt w] ; puts $fh "view list" ; close $fh
+set probeHvl [file join $here _selftest_probe.hvl]
+set fh [open $probeHvl w] ; puts $fh "# legend" ; close $fh
+checkEqual "a *.hvl legend is not warned about" "" \
+    [dict get [::ModelLoader::Logic::CheckChosenFile $probeHvl legend] message]
+checkEqual "a *.txt view list is not warned about" "" \
+    [dict get [::ModelLoader::Logic::CheckChosenFile $probeTxt viewlist] message]
+check "a *.txt legend IS warned about (it is no longer a legend extension)" \
+    [string match "*unusual for a legend file*" \
+        [dict get [::ModelLoader::Logic::CheckChosenFile $probeTxt legend] message]]
+check "a *.hvl view list IS warned about, with the user's wording" \
+    [string match "*unusual for a view list file*" \
+        [dict get [::ModelLoader::Logic::CheckChosenFile $probeHvl viewlist] message]]
+file delete $probeTxt
+file delete $probeHvl
 
 ::ModelLoader::State::SetLayoutToken 4 "my token"
 set cand [::ModelLoader::Logic::LayoutCandidates 4]

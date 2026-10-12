@@ -651,10 +651,33 @@ proc ::ModelLoader::Logic::ReaderHint {path} {
     }
     return ""
 }
+# The extension list a chosen file of <kind> is judged with, and the label that
+# is used in the warning.  <kind> is the field the file was chosen in: model,
+# result, legend (step 2) or viewlist (step 3).  A kind that is not in the list
+# returns no extensions at all - and 'CheckChosenFile' then keeps quiet, an
+# unknown kind is never second-guessed.
+proc ::ModelLoader::Logic::ExtensionsForKind {kind} {
+    switch -exact -- $kind {
+        model    { return [::ModelLoader::Logic::ModelExtensions] }
+        result   { return [::ModelLoader::Logic::ResultExtensions] }
+        legend   { return [::ModelLoader::Logic::LegendExtensions] }
+        viewlist { return [::ModelLoader::Logic::ViewListExtensions] }
+    }
+    return {}
+}
+# Human wording of <kind> for the messages ('viewlist' -> 'view list').
+proc ::ModelLoader::Logic::KindLabel {kind} {
+    if {$kind eq "viewlist"} { return "view list" }
+    return $kind
+}
 # Post-processing of a path that was chosen in a file browser or typed by the
 # user: trims it, normalises it, checks that it really is a readable file and
-# flags an extension that does not belong to <kind> (model | result).
-# Returns dict: {ok <0|1> path <normalised path> kind <model|result>
+# flags an extension that does not belong to <kind>.  <kind> is the field the
+# file was chosen in - model, result, legend or viewlist (P5b: a *.tcl file is a
+# normal legend and view list file, and a file is always judged by the
+# extensions of its OWN field).  An unknown kind is never second-guessed: it
+# produces no warning (see Logic::ExtensionsForKind).
+# Returns dict: {ok <0|1> path <normalised path> kind <model|result|legend|viewlist>
 #                message <reason when ok 0 / warning when ok 1>}
 proc ::ModelLoader::Logic::CheckChosenFile {path kind} {
     set raw [string trim [string map [list \" ""] $path]]
@@ -672,11 +695,12 @@ proc ::ModelLoader::Logic::CheckChosenFile {path kind} {
             message "'$norm' is a directory, not a file"]
     }
     set ext [string tolower [file extension $norm]]
-    if {$kind eq "model"} { set known [::ModelLoader::Logic::ModelExtensions] } \
-        else               { set known [::ModelLoader::Logic::ResultExtensions] }
+    set known [::ModelLoader::Logic::ExtensionsForKind $kind]
+    set label [::ModelLoader::Logic::KindLabel $kind]
     set warn ""
-    if {[lsearch -exact $known $ext] < 0} {
-        set warn "'$ext' is unusual for a $kind file - it is passed to HyperView anyway"
+    # No extensions known for that kind (an unknown kind) -> no warning at all.
+    if {[llength $known] > 0 && [lsearch -exact $known $ext] < 0} {
+        set warn "'$ext' is unusual for a $label file - it is passed to HyperView anyway"
     }
     return [dict create ok 1 path $norm kind $kind message $warn]
 }
