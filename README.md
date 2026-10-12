@@ -247,7 +247,19 @@ tclsh selftest_hv_model_loader.tcl       ;# pure Tcl layers
 tclsh selftest_ui_hv_model_loader.tcl    ;# whole GUI against hwtk stubs
 ```
 
-Exit code `0` = every check passed, `1` = at least one check failed.
+If no `tclsh` / `wish` is installed, the Tcl/Tk that comes with **Python** runs
+the very same files - no extra package, the interpreter is embedded in CPython:
+
+```powershell
+python run_selftest.py                   ;# pure Tcl layers  (tkinter.Tcl)
+python run_ui_selftest.py                ;# whole GUI         (tkinter.Tk)
+```
+
+The runner forwards the test's own exit code (`0` = every check passed, `1` = at
+least one check failed) and adds `2` for the case that the test itself died with
+a Tcl error - it then also prints that error. Both accept another script as
+first argument. The UI runner needs a display (on a headless Linux box wrap it
+with `xvfb-run`); the pure runner does not.
 
 ### `selftest_hv_model_loader.tcl` (source-only)
 
