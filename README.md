@@ -216,7 +216,7 @@ recess (`Adapter::Log` records the reason), so the GUI stays usable.
 
 ## 7. "# VERIFY:" list - every item that could not be confirmed for 2022
 
-All of them are marked in the code with a `# VERIFY:` comment (V1 - V13) and are
+All of them are marked in the code with a `# VERIFY:` comment (V1 - V14) and are
 written so that a wrong guess degrades instead of failing:
 
 | # | Item | What is done / how to adapt |
@@ -234,6 +234,7 @@ written so that a wrong guess degrades instead of failing:
 | **V11** | `<client> SetDisplayOptions legend true` after a legend file was sourced | 'Load legend' (F4) sources the chosen `*.tcl` / `*.hvl` file - there is no `hwi` command that reads a legend file, and a saved legend *is* a Tcl script of `hwi` calls. Only the switch-on and the `<client> Draw` afterwards are `hwi` calls; a legend whose script raised an error is **not** drawn and the Tcl error is printed. A refused switch-on is a warning, the file stays remembered. |
 | **V12** | PNG capture | 'Capture target' / 'Capture all' (F5) try four forms in this order: `<client> CaptureImage <file>` (one window, graphic area only), `<session> CaptureActiveWindow png <file>`, `<session> CaptureScreen png <file>` (the spelling of the shipped `hvTest.tcl`) and `<session> CaptureScreen png <file> <quality>` (`training.tcl`; the quality is `Logic::CaptureQuality`). The form that worked is cached in `State::captureMode` and tried **first** from then on; only when all four are refused is the window reported as `FAILED`. Views of an imported view list are set with `<window> GetViewControlHandle` -> `<view> SetOrientation <name>` (followed by `<view> Fit`, exactly like `display_service.tcl`) or `<view> SetViewMatrix <16 values>` (one argument, no `Fit` - that would throw the stored zoom away). Both are non-fatal: the PNG is written anyway and the refusal appears as a `warning:`. |
 | **V13** | `<page> SetActiveWindow <idx>` | Called before every single-window capture (also for each window of *Capture all*), because a form that grabs the active window or the whole screen needs it. The call is **best effort**: its answer is not checked, so a build that does not know it still captures - it may then just grab the window that was active already. Only a *really* failed capture is reported (`FAILED` plus a `warning:` per window / view) and a refusal of the call itself is visible in the Tcl console with `set ::ModelLoader::debug 1`. |
+| **V14** | The layout token **spellings** and the `rows <= cols` convention | Only `<page> SetLayout <token>` itself is confirmed (V1). The four spellings (`2x3`, `2 X 3`, `2 x 3`, `2 - 3`), the legacy words (`single`, `1x1`, `2H`/`2V`, `3H`/`3V`, `4H`/`4V`) and "prefer the wide arrangement" (`rows <= cols`, `Logic::LayoutPreference`) come from an installed HyperView. A wrong spelling is harmless - the candidate is refused and the next one is tried. A legacy word is only offered for **its own** window count (`Logic::LegacyLayoutTokens`, P1: `2H` on a four-window page would close two windows). Confirm with **Learn layouts** on a live page, then read the cache. |
 
 ---
 

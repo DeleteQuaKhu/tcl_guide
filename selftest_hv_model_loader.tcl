@@ -1339,7 +1339,7 @@ foreach section {
 } {
     check "section present: $section" [expr {[string first $section $body] >= 0}]
 }
-foreach tag {V1 V2 V3 V4 V5 V6 V7 V8 V9 V10 V11 V12 V13} {
+foreach tag {V1 V2 V3 V4 V5 V6 V7 V8 V9 V10 V11 V12 V13 V14} {
     check "VERIFY note $tag present" [expr {[string first "$tag - VERIFY" $body] >= 0}]
 }
 foreach marker {"FIX 3" "FIX 4" "FIX 5"} {

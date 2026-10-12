@@ -135,6 +135,14 @@
 #         checked, so a build without the call still captures - it may then just
 #         grab the window that was active already.  A capture that really fails
 #         is reported as FAILED plus a warning per window / view
+#     V14 - VERIFY: the layout token SPELLINGS and the 'rows <= cols' convention.
+#         Only '<page> SetLayout <token>' itself is confirmed (V1).  The four
+#         spellings ('2x3', '2 X 3', '2 x 3', '2 - 3'), the legacy words
+#         (single, 1x1, 2H/2V, 3H/3V, 4H/4V) and 'prefer the wide arrangement'
+#         come from an installed HyperView.  A wrong spelling is harmless - the
+#         candidate is refused and the next one is tried - and a legacy word is
+#         only offered for its own window count (Logic::LegacyLayoutTokens).
+#         Confirm with 'Learn layouts' on a live page, then read the cache.
 #=============================================================================
 
 #=============================================================================
@@ -440,6 +448,7 @@ proc ::ModelLoader::Logic::LayerChoices {} {
 #      scripts call 'pageHandle SetLayout $layout'), but the accepted token
 #      spelling depends on the installation, so several candidates are tried
 #      and the working one is cached in State::layoutTokenByCount.
+#      The four SPELLINGS and the 'rows <= cols' convention are V14.
 #
 # FIX 3 - "Windows on active page": the candidates were returned as
 # 'lsort -unique' of everything that was generated, so the order in which the
@@ -525,6 +534,8 @@ proc ::ModelLoader::Logic::LayoutCandidates {count} {
     set cached [::ModelLoader::State::GetLayoutToken $count]
     if {$cached ne ""} { lappend cand $cached }
     # 2.-4. the arrangements, preferred one first, in four spellings each
+    #       (V14: the spellings and 'rows <= cols' are a guess from an
+    #        installed HyperView - a refused spelling just tries the next one)
     foreach pair [::ModelLoader::Logic::LayoutArrangements $count] {
         lassign $pair r c
         foreach t [list "${r}x${c}" "${r} X ${c}" "${r} x ${c}" "${r} - ${c}"] {
