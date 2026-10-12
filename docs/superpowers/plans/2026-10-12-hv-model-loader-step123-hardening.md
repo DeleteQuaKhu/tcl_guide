@@ -392,7 +392,7 @@ Run `python run_ui_selftest.py` → the three `P4:` checks FAIL. RED. Note that 
 | L1 §4b scenario 9, appended after :1163 | R3 guard: with an emptied state and `::fake::win 0` (page unreadable since Task 1) `CapturePng target 1 $views $outPng` still captures 2 files — green before and after; it exists because the refactor must not start asking the page for the `target` scope |
 | `expectedProcs` + README | `CaptureWindowSet`, `PageWindowIndices` |
 
-- [ ] **7.1** Add the L2 check last in 5g, directly before the "back to step 2" block (:871). Note that :864 has just emptied `varOutputDir`, so the folder has to be put back before the preview can print any plan:
+- [x] **7.1** Add the L2 check last in 5g, directly before the "back to step 2" block (:871). Note that :864 has just emptied `varOutputDir`, so the folder has to be put back before the preview can print any plan:
 ```tcl
 # P6: with 'all' the pane must not invent a file count it cannot know
 set ::ModelLoader::UI::varOutputDir $outDir
@@ -407,9 +407,9 @@ ok "P6: the pane says that the count is not known here" [infohas {files +: not k
 set ::ModelLoader::UI::varCaptureScope target
 ```
 Run `python run_ui_selftest.py` → the first `ok` FAILs today ("4 PNG file(s)" from :3345), and the second one as well (the words "not known here" do not exist yet). RED. (The block sits at the very end of 5g so `PruneTo 0` disturbs nothing; it also puts `varCaptureScope` back to `target`.)
-- [ ] **7.2** Add `proc ::ModelLoader::Logic::CaptureWindowSet {scope targetWindow windowIndices}` exactly as in the spec §5 P6 (returns the dict with `windows` and `resolvable`; `target` always resolves and always yields `[list $targetWindow]`, `all` yields the page list and resolves only for a non-empty one). Rewire `Logic::CapturePlan` :833-837 to `set wins [dict get [::ModelLoader::Logic::CaptureWindowSet $scope $targetWindow $windowIndices] windows]` and keep the job loop :838-852 untouched — the existing L1 checks :543-560 (including `all … {}` → 0 jobs and `target 3 {} {1}` → 4 jobs) must stay green.
-- [ ] **7.3** Add `proc ::ModelLoader::Adapter::PageWindowIndices {}` (in the Adapter section, next to `QueryPage` :1107) holding exactly the :2038-2046 rule — `set page [::ModelLoader::Adapter::QueryPage]`, `if {[llength $page] == 0} { return {} }`, then `for {set i 1} {$i <= [dict get $page windows]} {incr i} { lappend out $i }` — and call it from `CapturePng` **only** when `$scope eq "all"` (R3: a `target` capture never needed the page, and `QueryPage` has no `hwi` fallback of its own); `all` + empty list keeps the existing "there is no window to capture" path :2039-2045/2050-2053.
-- [ ] **7.4** `RefreshStep3` :3340-3352 (inside the `else` of the folder check): replace `set indices [::ModelLoader::State::WindowIndices]` / `if {[llength $indices] == 0} { set indices [list $varTargetWin] }` with:
+- [x] **7.2** Add `proc ::ModelLoader::Logic::CaptureWindowSet {scope targetWindow windowIndices}` exactly as in the spec §5 P6 (returns the dict with `windows` and `resolvable`; `target` always resolves and always yields `[list $targetWindow]`, `all` yields the page list and resolves only for a non-empty one). Rewire `Logic::CapturePlan` :833-837 to `set wins [dict get [::ModelLoader::Logic::CaptureWindowSet $scope $targetWindow $windowIndices] windows]` and keep the job loop :838-852 untouched — the existing L1 checks :543-560 (including `all … {}` → 0 jobs and `target 3 {} {1}` → 4 jobs) must stay green.
+- [x] **7.3** Add `proc ::ModelLoader::Adapter::PageWindowIndices {}` (in the Adapter section, next to `QueryPage` :1107) holding exactly the :2038-2046 rule — `set page [::ModelLoader::Adapter::QueryPage]`, `if {[llength $page] == 0} { return {} }`, then `for {set i 1} {$i <= [dict get $page windows]} {incr i} { lappend out $i }` — and call it from `CapturePng` **only** when `$scope eq "all"` (R3: a `target` capture never needed the page, and `QueryPage` has no `hwi` fallback of its own); `all` + empty list keeps the existing "there is no window to capture" path :2039-2045/2050-2053.
+- [x] **7.4** `RefreshStep3` :3340-3352 (inside the `else` of the folder check): replace `set indices [::ModelLoader::State::WindowIndices]` / `if {[llength $indices] == 0} { set indices [list $varTargetWin] }` with:
 ```tcl
 set indices [::ModelLoader::State::WindowIndices]
 if {$scope eq "all" && [llength $indices] == 0} {
@@ -426,8 +426,39 @@ if {$scope eq "all" && ![dict get $winSet resolvable]} {
 }
 ```
 Every other line of the pane stays untouched, and `target` keeps the exact behaviour the L2 checks at :823-830 assert (state indices if any, else the target window).
-- [ ] **7.5** L1: add the `CaptureWindowSet` checks after :560 and the `PageWindowIndices` checks at the end of scenario 0 (after the P2 block) plus the R3 guard at the end of scenario 9 (:1163); extend `expectedProcs` (next to `CapturePlan`); README: name both procs in the :261-267 paragraph (which already lists the capture helpers), extend the step-3 / step-5g description and the **V12** row with "`all` needs a readable page: the preview then prints no count (`not known here`) and the capture resolves the list itself, while `target` never asks the page".
-- [ ] **7.6** `python run_selftest.py` → green (+6 checks, `0 failed`); `python run_ui_selftest.py` → green (+2 checks, `0 failed`). Commit `fix: make the PNG preview and the capture agree on the window set`.
+- [x] **7.5** L1: add the `CaptureWindowSet` checks after :560 and the `PageWindowIndices` checks at the end of scenario 0 (after the P2 block) plus the R3 guard at the end of scenario 9 (:1163); extend `expectedProcs` (next to `CapturePlan`); README: name both procs in the :261-267 paragraph (which already lists the capture helpers), extend the step-3 / step-5g description and the **V12** row with "`all` needs a readable page: the preview then prints no count (`not known here`) and the capture resolves the list itself, while `target` never asks the page".
+- [x] **7.6** `python run_selftest.py` → green (+6 checks, `0 failed`); `python run_ui_selftest.py` → green (+2 checks, `0 failed`). Commit `fix: make the PNG preview and the capture agree on the window set`.
+
+**Deviations found while doing Task 7** (the numbers above are the plan's
+estimate; what the tests really contain):
+
+* **7.1** - the pane of the UI test is not cleared by itself: `UI::AppendInfo`
+  keeps every plan it ever printed, so the new block starts with
+  `UI::SetInfo {}` before **each** assertion (otherwise the check would still see
+  the `4 PNG file(s)` of the earlier `:879` plan and never go RED).  It also got
+  two extra counter-checks for the other half of the rule - with `scope target`,
+  `PruneTo 0` and the same unreadable page the pane still prints
+  `files : 4 PNG file(s) would be written` and `w1_iso.png`.  That makes the L2
+  delta **+6** (two `runs` + four `ok`), not +2.
+* **7.2** - the shared rule is used as planned (`CapturePlan` only reads
+  `windows` off it); the existing `CapturePlan` checks stayed green untouched.
+* **7.3** - `CapturePng` asks the page not literally "when `$scope eq "all"`" but
+  when the set of that scope is *unresolvable* - which is exactly `all` with an
+  empty window list - so the R3 property (a `target` capture never reads the page
+  info) holds for any future scope that is always resolvable.
+* **7.5** - the L1 additions are 13 checks: 5 `CaptureWindowSet` checks plus 2
+  that pin the *shared* rule (`CapturePlan` uses the set of
+  `CaptureWindowSet` for a resolvable and for an unresolvable `all`), 3
+  `PageWindowIndices` checks (both `listWindows` forms + the unreadable page) and
+  3 R3 guards at the end of scenario 9.  The third guard is stronger than the
+  plan's - `::fake::Find GetNumberOfWindows` must stay empty for a `target`
+  capture, i.e. the page *info* is never read; it was proven **RED** against the
+  pre-Task-7 code (which queried the page whenever the State was empty) and the
+  `GetActivePage` call of the capture itself is deliberately *not* asserted,
+  because the page **handle** is still fetched once per job.  README: besides
+  the two proc names the stale check counts were corrected (`source test`
+  401 → 444, `UI smoke test` 302 → 322), the P6 paragraph after the
+  `CapturePng` description and the *Scope* row / **V12** row were extended.
 
 ---
 

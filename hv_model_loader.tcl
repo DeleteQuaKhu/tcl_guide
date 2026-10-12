@@ -900,17 +900,26 @@ proc ::ModelLoader::Logic::CheckOutputDir {dir} {
 proc ::ModelLoader::Logic::CaptureFileName {dir window name {ext .png}} {
     return [file join $dir "w${window}_[::ModelLoader::Logic::SanitizeName $name]${ext}"]
 }
+# One rule for the window set of a capture, shared by the step-3 preview and the
+# engine (P6): two different fallbacks for the same scope cannot disagree any
+# more.  'target' always resolves (it never needs the page, R3); 'all' is only
+# resolvable when the caller has a window list - an empty one means "the page
+# could not be read", which the preview reports instead of a made-up count.
+# Returns a dict: {windows <list of indices> resolvable <0|1>}
+proc ::ModelLoader::Logic::CaptureWindowSet {scope targetWindow windowIndices} {
+    if {$scope ne "all"} { return [list windows [list $targetWindow] resolvable 1] }
+    if {[llength $windowIndices] == 0} { return [list windows {} resolvable 0] }
+    return [list windows $windowIndices resolvable 1]
+}
 # Builds the list of capture jobs of step 3.
 #   <scope>        'target' (only <targetWindow>) or 'all' (<windowIndices>)
 #   <viewEntries>  the imported view list (may be empty -> one job per window)
 # Returns a list of dicts: {window <idx> name <stem> view <entry|{}> file <png>}
 proc ::ModelLoader::Logic::CapturePlan {scope targetWindow viewEntries \
         windowIndices outDir} {
-    if {$scope eq "all"} {
-        set wins $windowIndices
-    } else {
-        set wins [list $targetWindow]
-    }
+    set wins [dict get \
+        [::ModelLoader::Logic::CaptureWindowSet $scope $targetWindow \
+            $windowIndices] windows]
     if {[llength $viewEntries] == 0} {
         set viewEntries [list [dict create name view orientation "" matrix "" raw ""]]
     }
@@ -1216,6 +1225,20 @@ proc ::ModelLoader::Adapter::QueryPage {} {
         ::ModelLoader::Adapter::Log "layout cache: $winCount windows -> '$layout'"
     }
     return $out
+}
+# The windows 1..N of the active page, for the callers that really need the page
+# (P6: the step-3 preview and 'Capture all').  The loop lives here once instead of
+# in CapturePng.  An unreadable page yields {} - that is "not known here", never
+# a made-up list, and it is the reason a 'target' capture must not call this.
+# Returns a list of 1-based window indices (may be empty).
+proc ::ModelLoader::Adapter::PageWindowIndices {} {
+    set indices {}
+    set page [::ModelLoader::Adapter::QueryPage]
+    if {[llength $page] == 0} { return {} }
+    for {set i 1} {$i <= [dict get $page windows]} {incr i} {
+        lappend indices $i
+    }
+    return $indices
 }
 #-------------------------------------------------------------- layout (V1) ---
 # Makes the active page show exactly <wanted> windows.
@@ -2113,16 +2136,15 @@ proc ::ModelLoader::Adapter::CapturePng {scope targetWindow viewEntries outDir} 
             message "PNG capture: the output folder could not be created: $msg"]]
     }
 
+    # P6: the window set comes from the same rule the preview uses.  Only 'all'
+    # can be unresolvable here, and only then is the page asked - R3: a target
+    # capture never depended on a readable page (QueryPage has no hwi fallback).
     set indices [::ModelLoader::State::WindowIndices]
-    if {[llength $indices] == 0} {
-        set page [::ModelLoader::Adapter::QueryPage]
-        if {[llength $page] > 0} {
-            for {set i 1} {$i <= [dict get $page windows]} {incr i} {
-                lappend indices $i
-            }
-        }
+    set winSet [::ModelLoader::Logic::CaptureWindowSet $scope $targetWindow \
+        $indices]
+    if {![dict get $winSet resolvable]} {
+        set indices [::ModelLoader::Adapter::PageWindowIndices]
     }
-    if {$scope eq "target"} { set indices [list $targetWindow] }
     set jobs [::ModelLoader::Logic::CapturePlan $scope $targetWindow \
         $viewEntries $indices $outDir]
     if {[llength $jobs] == 0} {
@@ -3447,15 +3469,27 @@ proc ::ModelLoader::UI::RefreshStep3 {} {
     } else {
         set dir [dict get $check path]
         set indices [::ModelLoader::State::WindowIndices]
-        if {[llength $indices] == 0} { set indices [list $varTargetWin] }
+        if {$scope eq "all" && [llength $indices] == 0} {
+            # P6/R3: only 'all' needs the page - a target capture must keep
+            # working when the page cannot be read (PageWindowIndices -> {}).
+            set indices [::ModelLoader::Adapter::PageWindowIndices]
+        }
+        set winSet [::ModelLoader::Logic::CaptureWindowSet $scope $varTargetWin \
+            $indices]
         set jobs [::ModelLoader::Logic::CapturePlan $scope $varTargetWin \
             $entries $indices $dir]
-        lappend lines "  files         : [llength $jobs] PNG file(s) would be written"
-        foreach job [lrange $jobs 0 2] {
-            lappend lines "      [::ModelLoader::Logic::DescribeJob $job]"
-        }
-        if {[llength $jobs] > 3} {
-            lappend lines "      ... ([expr {[llength $jobs] - 3}] more)"
+        if {$scope eq "all" && ![dict get $winSet resolvable]} {
+            # the page could not be read, so the count of 'all' is decided when
+            # the capture starts - the pane must not promise a number (P6)
+            lappend lines "  files         : not known here - the page could not be read, so the file count of 'all' is decided when the capture starts"
+        } else {
+            lappend lines "  files         : [llength $jobs] PNG file(s) would be written"
+            foreach job [lrange $jobs 0 2] {
+                lappend lines "      [::ModelLoader::Logic::DescribeJob $job]"
+            }
+            if {[llength $jobs] > 3} {
+                lappend lines "      ... ([expr {[llength $jobs] - 3}] more)"
+            }
         }
     }
     ::ModelLoader::UI::AppendInfo $lines

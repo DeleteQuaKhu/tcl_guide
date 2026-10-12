@@ -924,6 +924,29 @@ ok "the missing folder is refused" \
 ok "and a message box was offered" \
     [expr {[llength $::stub::notes] > $notesBefore ? 1 : 0}]
 
+# P6: with 'all' the pane must not invent a file count it cannot know
+set ::ModelLoader::UI::varOutputDir $outDir
+::ModelLoader::UI::SetOutputDirValue $outDir
+::ModelLoader::State::PruneTo 0
+set ::ModelLoader::UI::varCaptureScope all
+# the pane keeps every plan it ever printed (AppendInfo), so clear it first -
+# the check has to look at the fresh plan and not at the one from :879
+::ModelLoader::UI::SetInfo {}
+runs "RefreshStep3 with scope 'all' on a page that cannot be read" \
+    {::ModelLoader::UI::RefreshStep3}
+ok "P6: the pane claims no file count for the unresolvable 'all'" \
+    [expr {[infohas {PNG file\(s\) would be written}] ? 0 : 1}]
+ok "P6: the pane says that the count is not known here" \
+    [infohas {files +: not known here}]
+# ... and 'target' still counts, it never needed the page (R3)
+set ::ModelLoader::UI::varCaptureScope target
+::ModelLoader::UI::SetInfo {}
+runs "RefreshStep3 with scope 'target' and no window in the State" \
+    {::ModelLoader::UI::RefreshStep3}
+ok "P6: 'target' still counts its four views" \
+    [infohas {files +: 4 PNG file\(s\) would be written}]
+ok "P6: 'target' still names the planned files" [infohas {w1_iso.png}]
+
 # --- back to step 2, ready for the last section ------------------------------
 runs "StepBack returns to step 2" {::ModelLoader::UI::StepBack}
 eq "the step counter is 2 again" 2 $::ModelLoader::UI::step

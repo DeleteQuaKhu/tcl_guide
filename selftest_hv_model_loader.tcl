@@ -122,6 +122,7 @@ set expectedProcs {
     ::ModelLoader::Logic::ViewListExtensions ::ModelLoader::Logic::CaptureScopes
     ::ModelLoader::Logic::CaptureQuality ::ModelLoader::Logic::CheckOutputDir
     ::ModelLoader::Logic::CaptureFileName ::ModelLoader::Logic::CapturePlan
+    ::ModelLoader::Logic::CaptureWindowSet
     ::ModelLoader::Logic::DescribeJob ::ModelLoader::Logic::ValidateStep3
     ::ModelLoader::State::SetViewList ::ModelLoader::State::GetViewList
     ::ModelLoader::State::SetViewListFile ::ModelLoader::State::GetViewListFile
@@ -129,6 +130,7 @@ set expectedProcs {
     ::ModelLoader::State::SetCaptureMode ::ModelLoader::State::GetCaptureMode
     ::ModelLoader::Adapter::CaptureWindow ::ModelLoader::Adapter::CaptureGraphicArea
     ::ModelLoader::Adapter::ApplyViewEntry ::ModelLoader::Adapter::CapturePng
+    ::ModelLoader::Adapter::PageWindowIndices
     ::ModelLoader::UI::BuildStep3 ::ModelLoader::UI::BindStep3
     ::ModelLoader::UI::RefreshStep3 ::ModelLoader::UI::OnImportViewList
     ::ModelLoader::UI::SetOutputDirValue ::ModelLoader::UI::OnBrowseOutputDir
@@ -653,6 +655,30 @@ checkEqual "without a view list one job is made" 1 [llength $planBare]
 checkEqual "and it is called 'view'" view [dict get [lindex $planBare 0] name]
 checkEqual "no window means no job" {} \
     [::ModelLoader::Logic::CapturePlan all 1 {} {} {C:/out}]
+# P6: the one rule the step-3 preview and the capture share
+checkEqual "CaptureWindowSet: 'target' always resolves to the target window" \
+    {windows 2 resolvable 1} \
+    [::ModelLoader::Logic::CaptureWindowSet target 2 {1 2 3}]
+checkEqual "CaptureWindowSet: 'all' resolves to the loaded windows" \
+    {windows {1 3} resolvable 1} \
+    [::ModelLoader::Logic::CaptureWindowSet all 1 {1 3}]
+checkEqual "CaptureWindowSet: 'all' without a window is not resolvable" \
+    {windows {} resolvable 0} \
+    [::ModelLoader::Logic::CaptureWindowSet all 1 {}]
+checkEqual "CaptureWindowSet: 'target' needs no window list" \
+    {windows 2 resolvable 1} \
+    [::ModelLoader::Logic::CaptureWindowSet target 2 {}]
+checkEqual "CaptureWindowSet: an unknown scope counts as 'target'" \
+    {windows 2 resolvable 1} \
+    [::ModelLoader::Logic::CaptureWindowSet everything 2 {1 3}]
+set winSetAll [::ModelLoader::Logic::CaptureWindowSet all 1 {1 3}]
+checkEqual "P6: CapturePlan captures every window of that set" 10 \
+    [llength [::ModelLoader::Logic::CapturePlan all 1 $vEntries \
+        [dict get $winSetAll windows] {C:/out}]]
+checkEqual "P6: and no job at all when the set is not resolvable" 0 \
+    [llength [::ModelLoader::Logic::CapturePlan all 1 $vEntries \
+        [dict get [::ModelLoader::Logic::CaptureWindowSet all 1 {}] windows] \
+        {C:/out}]]
 checkEqual "DescribeJob names window, view and file" \
     "window 2, view 'iso' (iso) -> w2_iso.png" \
     [::ModelLoader::Logic::DescribeJob [lindex $planTarget 0]]
@@ -953,6 +979,22 @@ checkEqual "P2: a page that answers 0 windows is unreadable" {} \
 set ::fake::win 4
 checkEqual "P2: a readable page still answers with its window count" 4 \
     [dict get [::ModelLoader::Adapter::QueryPage] windows]
+
+# --- P6: the one page query of the wizard ------------------------------------
+# Adapter::PageWindowIndices owns the '1..N of the active page' loop for the two
+# callers that really need the page (the step-3 preview and 'Capture all').
+set ::fake::listWindows 0
+set ::fake::win 4
+checkEqual "P6: PageWindowIndices lists the windows of the page" {1 2 3 4} \
+    [::ModelLoader::Adapter::PageWindowIndices]
+set ::fake::listWindows 1
+checkEqual "P6: the list form of GetNumberOfWindows is read as well" {1 2 3 4} \
+    [::ModelLoader::Adapter::PageWindowIndices]
+set ::fake::listWindows 0
+set ::fake::win 0
+checkEqual "P6: an unreadable page has no window list" {} \
+    [::ModelLoader::Adapter::PageWindowIndices]
+set ::fake::win 4
 
 # --- scenario 1: model only -------------------------------------------------
 ::ModelLoader::State::ResetAll
@@ -1302,6 +1344,22 @@ checkEqual "fix 5: a view without orientation and matrix is skipped" {} \
 checkEqual "fix 5: a skipped view calls nothing" {0 0} \
     [list [llength [::fake::Find SetOrientation]] \
           [llength [::fake::Find SetViewMatrix]]]
+
+# P6/R3: 'target' must not start reading the page info (the window count / list).
+# CapturePng used to call QueryPage for every capture, so an unreadable page could
+# affect a target capture that never needed it - now the page is asked only for
+# 'all'.  (The page HANDLE is still fetched per job, that is a different call.)
+::ModelLoader::State::ResetAll
+set ::fake::calls {}
+set ::fake::win 0
+set capR3 [::ModelLoader::Adapter::CapturePng target 1 $views $outPng]
+checkEqual "R3: a target capture still works on an unreadable page" 1 \
+    [dict get $capR3 ok]
+checkEqual "R3: both views of the target window were written" 2 \
+    [dict get $capR3 captured]
+checkEqual "R3: the page info was never read for a target capture" 0 \
+    [llength [::fake::Find GetNumberOfWindows]]
+set ::fake::win 4
 
 foreach f [list $legendOk $legendStack $legendOdd $legendBad] {
     catch { file delete $f }

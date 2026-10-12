@@ -103,7 +103,7 @@ on step 2 **and** step 3 (the contour settings of step 2 stay valid).
 | **Import views** | Reads the file with `Logic::ViewListFromFile` / `Logic::ParseViewList`, reports every syntax error in the status line, in the pane and in a warning box (then **nothing** is imported), and stores the entries in the State layer, where the capture picks them up. The pane lists each entry and how it will be interpreted (`orientation <x>`, `matrix (<16 numbers>)` or `name only - no orientation`). |
 | *Output folder* | Target folder of the PNG files. It is **created when it does not exist** (`file mkdir`), and the folder is checked *before* the first `hwi` call. |
 | **Choose folder...** | `tk_chooseDirectory` (plain Tk - hwtk has no folder entry) and writes the folder back into the field. |
-| *Scope* | `target` (the window of step 2, default) or `all` (every window of the active page). |
+| *Scope* | `target` (the window of step 2, default) or `all` (every window of the active page) - both are resolved by the same rule, `Logic::CaptureWindowSet` (P6). |
 | **Capture target** / **Capture all** | Capture right away with the scope the button names - both use the scope field above and the imported view list (a view list file that is typed into the field but never imported is imported on the fly). The files are named `w<window>_<view>.png`, so the capture of a whole page can never overwrite the file of another window. |
 | *Information pane* | One `PNG CAPTURE (step 3)` section per run: `N file(s) written to <folder>`, one `OK <file>` line per written PNG (or `FAILED - <reason>`), a `warning:` for every window / view that did not work and the capture form that worked (`CaptureImage`, `CaptureActiveWindow png`, ... - remembered for the next run). |
 
@@ -119,6 +119,16 @@ Views are set with `<window> GetViewControlHandle` -> `<view> SetOrientation`
 with `<page> SetActiveWindow` (V13).  Everything the file system can decide
 (folder exists, list parses, file names) is decided **before** the first `hwi`
 call - a typo therefore costs no HyperView round trip.
+
+The window set of a capture comes from **one** rule, `Logic::CaptureWindowSet`
+(P6): `target` is always the window of step 2 and needs neither the State nor the
+page, while `all` is the window list of the State and only falls back to the
+active page when that list is still empty.  That fallback itself lives in
+`Adapter::PageWindowIndices` (the `1..N` loop over `<page> GetNumberOfWindows`),
+so the step-3 preview `UI::RefreshStep3` and the capture cannot disagree about
+how many windows - and how many files - a run covers.  When the page of an `all`
+run cannot be read, the preview prints `files : not known here ...` instead of a
+made-up count, and a `target` capture never asks for the page info at all (R3).
 
 ---
 
@@ -232,7 +242,7 @@ written so that a wrong guess degrades instead of failing:
 | **V9** | `<<ComboboxSelected>>` on hwtk comboboxes | Bound so that changing the subcase refills the result type list and changing the result type refills the component list. If a build does not generate the virtual event, the **Reload lists** button in step 2 does exactly the same job. The same event - plus `<Return>` / `<FocusOut>` - guarantees that the window count and the target window reach their variables (fix 1). |
 | **V10** | Attaching a **result** file to a model that is already in the window | `Adapter::AttachResult` tries `<model> SetResult <resultFile>` first (the documented, reader-free way - `AddModel <result>` alone only reports the file and never attaches it, which was bug 2), falls back to `<model> AddResultFile <resultFile>` and then to `<client> AddModel <resultFile>`. **A refusal is never fatal**: the model stays loaded and the reason is printed as a `warning:` line with the hint to use *File > Load > Results*. If only a result file is given, it is loaded with a single `AddModel` and HyperView builds the model from it. |
 | **V11** | `<client> SetDisplayOptions legend true` after a legend file was sourced | 'Load legend' (F4) sources the chosen `*.tcl` / `*.hvl` file - there is no `hwi` command that reads a legend file, and a saved legend *is* a Tcl script of `hwi` calls. Only the switch-on and the `<client> Draw` afterwards are `hwi` calls; a legend whose script raised an error is **not** drawn and the Tcl error is printed. A refused switch-on is a warning, the file stays remembered. |
-| **V12** | PNG capture | 'Capture target' / 'Capture all' (F5) try four forms in this order: `<client> CaptureImage <file>` (one window, graphic area only), `<session> CaptureActiveWindow png <file>`, `<session> CaptureScreen png <file>` (the spelling of the shipped `hvTest.tcl`) and `<session> CaptureScreen png <file> <quality>` (`training.tcl`; the quality is `Logic::CaptureQuality`). The form that worked is cached in `State::captureMode` and tried **first** from then on; only when all four are refused is the window reported as `FAILED`. Views of an imported view list are set with `<window> GetViewControlHandle` -> `<view> SetOrientation <name>` (followed by `<view> Fit`, exactly like `display_service.tcl`) or `<view> SetViewMatrix <16 values>` (one argument, no `Fit` - that would throw the stored zoom away). Both are non-fatal: the PNG is written anyway and the refusal appears as a `warning:`. |
+| **V12** | PNG capture | 'Capture target' / 'Capture all' (F5) try four forms in this order: `<client> CaptureImage <file>` (one window, graphic area only), `<session> CaptureActiveWindow png <file>`, `<session> CaptureScreen png <file>` (the spelling of the shipped `hvTest.tcl`) and `<session> CaptureScreen png <file> <quality>` (`training.tcl`; the quality is `Logic::CaptureQuality`). The form that worked is cached in `State::captureMode` and tried **first** from then on; only when all four are refused is the window reported as `FAILED`. Views of an imported view list are set with `<window> GetViewControlHandle` -> `<view> SetOrientation <name>` (followed by `<view> Fit`, exactly like `display_service.tcl`) or `<view> SetViewMatrix <16 values>` (one argument, no `Fit` - that would throw the stored zoom away). Both are non-fatal: the PNG is written anyway and the refusal appears as a `warning:`. Since **P6** the window set of a capture comes from `Logic::CaptureWindowSet`: only `all` needs a readable page - the preview then prints no count (`not known here`) and the capture resolves the list itself - while `target` never asks for the page. |
 | **V13** | `<page> SetActiveWindow <idx>` | Called before every single-window capture (also for each window of *Capture all*), because a form that grabs the active window or the whole screen needs it. The call is **best effort**: its answer is not checked, so a build that does not know it still captures - it may then just grab the window that was active already. Only a *really* failed capture is reported (`FAILED` plus a `warning:` per window / view) and a refusal of the call itself is visible in the Tcl console with `set ::ModelLoader::debug 1`. |
 | **V14** | The layout token **spellings** and the `rows <= cols` convention | Only `<page> SetLayout <token>` itself is confirmed (V1). The four spellings (`2x3`, `2 X 3`, `2 x 3`, `2 - 3`), the legacy words (`single`, `1x1`, `2H`/`2V`, `3H`/`3V`, `4H`/`4V`) and "prefer the wide arrangement" (`rows <= cols`, `Logic::LayoutPreference`) come from an installed HyperView. A wrong spelling is harmless - the candidate is refused and the next one is tried. A legacy word is only offered for **its own** window count (`Logic::LegacyLayoutTokens`, P1: `2H` on a four-window page would close two windows). Confirm with **Learn layouts** on a live page, then read the cache. |
 
@@ -280,7 +290,9 @@ offers the legacy words of **its own** count, `Logic::LegacyLayoutTokens` -
 `LayoutProbeOrder` - fix 3), the legend file (extension checks, empty file, a
 file that raises - fix 4) and the view list plus the PNG capture plan (the parser
 with comments / orientations / matrices / malformed lines, the output folder
-rules, the file naming `w<window>_<view>.png` - fix 5).
+rules, the file naming `w<window>_<view>.png` - fix 5) and the window set that the
+preview and the capture share (`Logic::CaptureWindowSet`, with the page query
+`Adapter::PageWindowIndices` behind it - P6: the page is asked for `all` only).
 
 Section **4b** additionally installs a small **fake `hwi`** (skipped if a real
 `hwi` is present, so the file is safe to source inside HyperView) and walks the
@@ -290,8 +302,8 @@ whole reader-free load sequence of fix 2 with it: model only, model + result via
 result only, and `LoadAllAndRefresh` carrying `mode` + `warnings` into the result
 tree.  `GetNumberOfWindows` answers with the scalar `4` in one scenario and with
 the list `1 2 3 4` in the other, so both shapes of fix 1 are covered.  Its last
-line is `ALL CHECKS PASSED` (401 checks; the line above it prints
-` source test   : 401 passed, 0 failed`).
+line is `ALL CHECKS PASSED` (444 checks; the line above it prints
+` source test   : 444 passed, 0 failed`).
 
 ### `selftest_ui_hv_model_loader.tcl` (GUI)
 
@@ -342,7 +354,7 @@ test proves that all of those failures are reported to the user instead of
 aborting the GUI.  Expected summary:
 
 ```
- UI smoke test : 302 passed, 0 failed
+ UI smoke test : 322 passed, 0 failed
  stub notes    : 10 (unmodelled options,
                  pop-up windows and the missing hwi - expected)
 ```
