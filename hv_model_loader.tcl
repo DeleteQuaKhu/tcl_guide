@@ -661,7 +661,8 @@ proc ::ModelLoader::Logic::ReaderHint {path} {
 # is used in the warning.  <kind> is the field the file was chosen in: model,
 # result, legend (step 2) or viewlist (step 3).  A kind that is not in the list
 # returns no extensions at all - and 'CheckChosenFile' then keeps quiet, an
-# unknown kind is never second-guessed.
+# unknown kind is never second-guessed.  P5b: the browser of a field warns with
+# exactly the extensions the loader of that field accepts.
 proc ::ModelLoader::Logic::ExtensionsForKind {kind} {
     switch -exact -- $kind {
         model    { return [::ModelLoader::Logic::ModelExtensions] }
@@ -671,7 +672,8 @@ proc ::ModelLoader::Logic::ExtensionsForKind {kind} {
     }
     return {}
 }
-# Human wording of <kind> for the messages ('viewlist' -> 'view list').
+# Human wording of <kind> for the messages ('viewlist' -> 'view list').  P5b: the
+# warning of a view-list browser has to name the field the user sees.
 proc ::ModelLoader::Logic::KindLabel {kind} {
     if {$kind eq "viewlist"} { return "view list" }
     return $kind

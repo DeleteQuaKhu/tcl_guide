@@ -466,7 +466,7 @@ estimate; what the tests really contain):
 
 **Deliverable:** every string that the six defects changed is described in `README.md` once; both runners are green on the final commit; the spec's *Provable test* list is checked item by item against the executed tests; nothing was weakened.
 
-- [ ] **8.1** README sweep — for each defect make sure the README agrees with the code in the place a reader would look:
+- [x] **8.1** README sweep — for each defect make sure the README agrees with the code in the place a reader would look:
   - P1: the layout-token paragraph (`Logic::LegacyLayoutTokens`, "legacy tokens *of that count*") and the source registry :92-96 / the **V1** row :224,
   - P2: the `Logic::InterpretWindowCount` paragraph :304-306 ("reads both the scalar and the list answer" → add the clamp: a negative answer is `0`, garbage is `0`) and the **V5**/**V13** rows,
   - P3: the `V`-marker table gets the **V14** row (:236) and :219 says `V1 - V14`,
@@ -474,21 +474,139 @@ estimate; what the tests really contain):
   - P5a/P5b: `*Legend file*` row (Task 4) + the section-5c sentence :307-311 (four kinds) + the step-2 hint text,
   - P6: the step-3 description :312-316 + the **V12** row,
   - **the two hard-coded totals**: :277-278 (`401 checks` / `source test   : 401 passed, 0 failed`) and :326 (`UI smoke test : 302 passed, 0 failed`) must carry the numbers the final runs print. Nothing checks them, so they are the one documentation item that *will* go stale silently — this sweep is why the counts live in their own commit.
-- [ ] **8.2** Inventory check: every new `proc` is in `expectedProcs` **and** named in the README (the paragraph that describes what the file's test covers, :254-267, or the section of the feature).
+- [x] **8.2** Inventory check: every new `proc` is in `expectedProcs` **and** named in the README (the paragraph that describes what the file's test covers, :254-267, or the section of the feature).
 ```powershell
 Select-String -Path README.md -Pattern 'LegacyLayoutTokens|ExtensionsForKind|KindLabel|CaptureWindowSet|PageWindowIndices' | ForEach-Object { $_.LineNumber }
 ```
 Expect at least one hit per name (the L1 procedure-inventory check enforces the other half).
-- [ ] **8.3** Final runs on the last commit:
+- [x] **8.3** Final runs on the last commit:
 ```powershell
 python run_selftest.py ; "L1 rc=$LASTEXITCODE"
 python run_ui_selftest.py ; "L2 rc=$LASTEXITCODE"
 ```
 Both must print `0 failed` and exit `0`. The failed-counter must never have been edited to make a run green — check with `git --no-pager log -p -- selftest_hv_model_loader.tcl selftest_ui_hv_model_loader.tcl` that each `FAIL` disappeared together with a source change in the same commit.
-- [ ] **8.4** Marker count: `(Select-String -Path hv_model_loader.tcl -Pattern ' - VERIFY').Count` → one more than before this branch (V14 added, none removed).
-- [ ] **8.5** `git --no-pager log --oneline hardening/step1-3` → one commit per task in this order: runners, P2, V14/P3, P5a, P5b, P4, P6, docs; `git status --short` empty.
-- [ ] **8.6** Run the **`verification-before-completion`** skill and walk the spec :§5 P1-P6 *Provable test* table row by row, quoting the test label that proves each row, then the :§8 R1-R4 risks (R1: no write without a real change — Task 6; R2: `.txt` legend still loads with a warning — Task 4; R3: `target` needs no page — Task 7; R4: no new UI dependency, both helpers pure). Report any row without a test as a gap and fix it before the last commit.
-- [ ] **8.7** Commit the plan + the documentation sweep: `docs: document the hardened STEP 1/2/3 behaviour` (include the plan file `docs/superpowers/plans/2026-10-12-hv-model-loader-step123-hardening.md`, which was still uncommitted when the branch started).
+- [x] **8.4** Marker count: `(Select-String -Path hv_model_loader.tcl -Pattern ' - VERIFY').Count` → one more than before this branch (V14 added, none removed).
+- [x] **8.5** `git --no-pager log --oneline hardening/step1-3` → one commit per task in this order: runners, P2, V14/P3, P5a, P5b, P4, P6, docs; `git status --short` empty.
+- [x] **8.6** Run the **`verification-before-completion`** skill and walk the spec :§5 P1-P6 *Provable test* table row by row, quoting the test label that proves each row, then the :§8 R1-R4 risks (R1: no write without a real change — Task 6; R2: `.txt` legend still loads with a warning — Task 4; R3: `target` needs no page — Task 7; R4: no new UI dependency, both helpers pure). Report any row without a test as a gap and fix it before the last commit.
+- [x] **8.7** Commit the plan + the documentation sweep: `docs: document the hardened STEP 1/2/3 behaviour` (include the plan file `docs/superpowers/plans/2026-10-12-hv-model-loader-step123-hardening.md`, which was still uncommitted when the branch started).
+### Task 8 verification record (run on the branch tip)
+
+All commands below were run from `tcl_guide/` on the branch tip
+(`71c2c2b` + the two comment-only `P5b` doc lines added by this commit).
+
+**8.1 README sweep** - every defect has the place a reader looks:
+
+| Defect | Where it is documented now |
+| --- | --- |
+| P1 | the `Logic::LegacyLayoutTokens` paragraph (`README.md` :288-290: the legacy words of **its own** window count, nothing above 4) and the **V1** row :234 + the **V14** row :247 |
+| P2 | the `InterpretWindowCount` paragraph :332-337 (both answer shapes, a negative answer is `0` like a one-window page, an answer whose tokens are not all integers - `abc`, `1 x` - is `0` too) and the fix-1 paragraph :475 |
+| P3 | the **V14** row :247 and the sentence :229 ("every guess is marked in the code with a `# VERIFY:` comment, V1 - V14") |
+| P4 | the `*Legend file*` row :88 (path read back from `State::legendFileByWindow`, `State::PruneTo` drops the path of a vanished window, the `UI::varLegendWin` guard) |
+| P5a | the `*Legend file*` row :88 (`.tcl` + `.hvl` in browser **and** loader, another extension only through `All Files` and then a `warning:`) |
+| P5b | the fix-2 entry :457-460 ("judged by the extensions of **its own** field, `Logic::ExtensionsForKind` / `Logic::KindLabel`; an unknown kind is never second-guessed") and the source-test paragraph :282 |
+| P6 | the paragraph after the `CapturePng` description :123-131 (one window-set rule, `Adapter::PageWindowIndices`, `not known here`) + the **Scope** row :106 + the **V12** row :245 |
+| totals | :305-306 (`444 checks`, ` source test   : 444 passed, 0 failed`) and :357 (`UI smoke test : 322 passed, 0 failed`) - exactly what 8.3 prints |
+
+*Deviations:* the plan's *pre-branch* line numbers (:88, :224, :304-306, :312-316,
+...) shifted while the README grew; the places above are the current ones.
+P2 has **no** `V5`/`V13` row to update - the V-table only lists *guessed API*
+calls, and reading `<page> GetNumberOfWindows` is not a guess (V1 covers
+`SetLayout`), so P2's documentation is the `InterpretWindowCount` paragraph
+alone.  The two hard-coded totals were already corrected inside the P6 commit
+(Task 7 edited the same README places), not in this docs commit; the numbers on
+`HEAD` are the ones 8.3 prints.
+
+**8.2 Inventory check** - `Select-String -Path README.md -Pattern
+'LegacyLayoutTokens|ExtensionsForKind|KindLabel|CaptureWindowSet|PageWindowIndices'`
+hits `LegacyLayoutTokens` :289, `ExtensionsForKind`/`KindLabel` :281 + :459,
+`CaptureWindowSet` :123 + :294, `PageWindowIndices` :127 + :295.  The other half
+is enforced by the L1 procedure inventory ("no procedure of the file is missing
+from the inventory"), which lists all five (`selftest_hv_model_loader.tcl` :78,
+:97, :125, :133).
+
+**8.3 Final runs** -
+`python run_selftest.py` → ` source test   : 444 passed, 0 failed`, rc 0;
+`python run_ui_selftest.py` → `UI smoke test : 322 passed, 0 failed`, rc 0.
+No failed-counter was ever edited: the scan for *removed* check lines on the
+whole branch (`git log -p f0f9b7a..HEAD -- selftest_*.tcl`, lines starting with
+`-`) returns exactly **five** lines, all of them the ones spec §6.3 names as
+deliberately replaced by stronger checks:
+
+1. `check "InterpretWindowCount never returns a negative count"` (P2) →
+   `InterpretWindowCount clamps a negative answer to 0` plus `clamps a larger
+   negative answer to 0`, `on a non-numeric answer`, `on a mixed list` and
+   `on the scalar 0`, and `P2: a page that answers -1 is not a page with one
+   window`,
+2. `check "the legacy tokens survived"` (L1, P1/P3) →
+   `the legacy tokens of this count are still tried`,
+3. `ok "the legacy tokens are still tried"` (L2, P1/P3) →
+   `the legacy tokens of this count are still tried`,
+4. `checkEqual "the legend extensions" {.tcl .hvl .txt}` (L1, P5a) →
+   `the legend extensions` `{.tcl .hvl}` + `the legend browser offers exactly
+   the legend extensions`,
+5. `eq "the legend extensions are declared" ".tcl .hvl .txt"` (L2, P5a) →
+   `the legend extensions are declared` `".tcl .hvl"`.
+
+Every other commit touches `hv_model_loader.tcl` together with the test file
+that covers it, so no `FAIL` could have been silenced without a source change.
+
+**8.4 Markers** - 27 ` - VERIFY` lines on `HEAD` against 25 on `f0f9b7a`, i.e.
+**two** more (the plan expected one):
+
+* `#     V14 - VERIFY: the layout token SPELLINGS and the 'rows <= cols' convention.`
+* `# P1 - VERIFY (see V1/V14): the legacy layout spellings of each window count.`
+
+`Compare-Object` of the two marker sets shows **no** line that exists only in the
+old file - nothing was removed, the second new line is the same guess marked from
+the defect side in `Logic::LayoutCandidates`.
+
+**8.5 History** - `git log --oneline --reverse f0f9b7a..HEAD` prints, in plan
+order: `e1f6c31` runners, `a4dd71f` P2, `df9128d` P1, `53a8ee4` P3/V14,
+`0ef9100` P5a, `329e92f` P5b, `5b63dc7` P4, `71c2c2b` P6.  `git status --short`
+is empty after this commit.
+
+**8.6 `verification-before-completion` walk** - every row of the spec's
+:§5 *Provable test* table has an executed label:
+
+| Spec row (defect) | Check that proves it (all currently PASSING) |
+| --- | --- |
+| P1 | L1 `a legacy word of another count is not offered`, `a 2-window page is not offered the 4-window word`, `a 3-window page is not offered 'single'`, `a 1-window page IS offered 'single'`, `4 still gets the legacy words of its own count`, `the legacy words of 1/2/4`, `5 has no legacy word`, `0 has no legacy word`; L2 `the legacy tokens of this count are still tried`, `a legacy token of another count is not offered` |
+| P2 | L1 `InterpretWindowCount clamps a negative answer to 0`, `InterpretWindowCount clamps a larger negative answer to 0`, `InterpretWindowCount on a non-numeric answer`, `InterpretWindowCount on a mixed list`, `InterpretWindowCount on the scalar 0`, the unchanged `InterpretWindowCount on the scalar 4` / `'4'` / `'1 2 3 4'` / `1` / `ignores surrounding blanks` / `on an empty answer` / `is NOT llength`, `P2: a page that answers -1 is not a page with one window`, `P2: a -1 page is not 'already showing 1 window'`, `P2: the refusal names the unreadable page`, `P2: a page that answers 0 windows is unreadable`, `P2: a readable page still answers with its window count` |
+| P3 | L1 `a learned token is the first candidate`, `the learned token is not duplicated`, `the plain count is still tried` (L2), `garbage produces no candidate`, `a zero count produces no candidate`; L2 `the preferred token of a 4 window page comes first`, `the candidate list has no duplicates`, `the learned token moved to the front`, `the learned token is offered only once` |
+| P4 | L1 `PruneTo returns the drop list`, `P4: the legend of a pruned window is gone`, `P4: the legend of a surviving window stays`; L2 `P4: the remembered legend of window 2 is in the variable`, `P4: and in the field`, `P4: a window without a legend clears the field`, `P4: the legend of window 2 is shown again` |
+| P5a | L1 `the legend extensions` (`{.tcl .hvl}`), `the legend browser offers exactly the legend extensions`, `the view list browser offers exactly the view list extensions`, `the view list extensions`, `the legend browser offers *.tcl first`; L2 `the legend filter starts with the Tcl entry`, `the legend filter knows *.hvl`, `the legend extensions are declared` (`.tcl .hvl`) |
+| P5b | L1 `CheckChosenFile warns about an odd extension`, `the odd-extension warning is filled in`, `a *.tcl legend is a normal legend file`, `a *.tcl view list is a normal view list`, `an unknown kind is never second-guessed`, `a *.hvl legend is not warned about`, `a *.txt view list is not warned about`, `a *.txt legend IS warned about (it is no longer a legend extension)`, `a *.hvl view list IS warned about, with the user's wording`; L2 `5c` `CheckChosenFile` model/result checks |
+| P6 | L1 `CaptureWindowSet: 'target' always resolves to the target window`, `... 'all' resolves to the loaded windows`, `... 'all' without a window is not resolvable`, `... 'target' needs no window list`, `... an unknown scope counts as 'target'`, `P6: CapturePlan captures every window of that set`, `P6: and no job at all when the set is not resolvable`, `P6: PageWindowIndices lists the windows of the page` + the two degraded-build checks, the unchanged `fix 5: two windows x two views = four files`, `no window means no job`; L2 `P6: the pane claims no file count for the unresolvable 'all'`, `P6: the pane says that the count is not known here`, `P6: 'target' still counts its four views`, `P6: 'target' still names the planned files` |
+
+The plan's *risk* list paraphrased the spec loosely; the spec's own :§9 list is
+R1 - R6, and all six are covered:
+
+| Spec risk | Check that covers it |
+| --- | --- |
+| R1 - step 2 must not wipe a typed path when the shown window is refreshed | L2 `P4: a path typed for the shown window is not wiped` (the `UI::varLegendWin` guard) |
+| R2 - the preview reads the page for `all` only when the set is unresolvable, `target` never needs it | L2 the `5g` block (`P6: ... claims no file count ...` with an unreadable page) and L1 `R3: the page info was never read for a target capture` |
+| R3 - a `target` capture does not query `GetNumberOfWindows` | L1 `R3: ...` (three checks; proven RED against the pre-Task-7 code, see Task 7 deviations) |
+| R4 - a `.txt` / unusual legend still loads, now with a warning | L1 `an unusual legend extension is only a warning`, `the extension is reported` (`*unusual for a legend file*`), `the legend script was really sourced and ran` |
+| R5 - `PruneTo` only drops windows above the new maximum, a surviving legend stays | L1 `P4: the legend of a pruned window is gone` **and** `P4: the legend of a surviving window stays` |
+| R6 - the five strengthened checks of §6.3, the total only grows | the 8.3 scan (exactly those five lines) + 444/322 passed |
+
+No row was left without a test, so no gap had to be fixed here.
+`Definition of done` mapped onto this record: **1** = 8.3 (both runners `0 failed`,
+rc 0), **2** = the per-commit file coverage of 8.3 plus the live RED→GREEN proofs
+of Task 6 (`P4: the legend of a pruned window is gone`) and Task 7
+(`R3: the page info was never read for a target capture`), **3** = the same scan
+(five replaced checks, nothing else removed), **4**, **5** and **7** as below,
+**6** = 8.4 (27 vs 25 markers, none removed).  DoD **4**, **5** and **7** were
+checked on the same run: all five new procs
+are in `expectedProcs` **and** in the README, **V14** is in the README table, each
+new proc carries its `# Pn:` doc comment (`LegacyLayoutTokens` P1,
+`ExtensionsForKind`/`KindLabel` P5b - added by this commit, `CaptureWindowSet`
+P6, `PageWindowIndices` P6), and
+`git diff --stat f0f9b7a..HEAD -- docs/superpowers/specs/` is **empty**: the
+approved design was never edited to match the code.
+
+**8.7** committed as `docs: document the hardened STEP 1/2/3 behaviour`, together
+with this plan file.
 
 ---
 
