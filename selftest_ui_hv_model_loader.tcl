@@ -559,8 +559,10 @@ eq "the preferred token of a 4 window page comes first" 2x2 [lindex $cand4 0]
 eq "the candidate list has no duplicates" \
     [llength [lsort -unique $cand4]] [llength $cand4]
 ok "the plain count is still tried" [expr {[lsearch -exact $cand4 4] >= 0}]
-ok "the legacy tokens are still tried" \
-    [expr {[lsearch -exact $cand4 2H] >= 0 && [lsearch -exact $cand4 single] >= 0}]
+ok "the legacy tokens of this count are still tried" \
+    [expr {[lsearch -exact $cand4 4H] >= 0}]
+ok "a legacy token of another count is not offered" \
+    [expr {[lsearch -exact $cand4 2H] < 0 && [lsearch -exact $cand4 single] < 0}]
 eq "no candidate for a nonsense count" {} [::ModelLoader::Logic::LayoutCandidates 0]
 
 runs "a learned token is remembered" \

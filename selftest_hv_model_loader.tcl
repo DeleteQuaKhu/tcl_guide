@@ -63,7 +63,8 @@ set expectedProcs {
     ::ModelLoader::State::SetLayoutToken ::ModelLoader::State::GetLayoutToken
     ::ModelLoader::State::SetLastError ::ModelLoader::State::GetLastError
     ::ModelLoader::State::ResetAll
-    ::ModelLoader::Logic::LayoutCandidates ::ModelLoader::Logic::InterpretWindowCount
+    ::ModelLoader::Logic::LayoutCandidates ::ModelLoader::Logic::LegacyLayoutTokens
+::ModelLoader::Logic::InterpretWindowCount
     ::ModelLoader::Logic::MakeSpec
     ::ModelLoader::Logic::FanOutSpec ::ModelLoader::Logic::ResultSummary
     ::ModelLoader::Logic::WindowSummary ::ModelLoader::Logic::Subcases
@@ -370,8 +371,30 @@ checkEqual "the first candidate of 2 is 1x2" 1x2 \
 check "4x1 is tried before the plain count '4'" [expr {
     [lsearch -exact [::ModelLoader::Logic::LayoutCandidates 4] 4x1] < \
     [lsearch -exact [::ModelLoader::Logic::LayoutCandidates 4] 4] ? 1 : 0}]
-check "the legacy tokens survived" [expr {
-    [lsearch -exact [::ModelLoader::Logic::LayoutCandidates 4] 2H] >= 0 ? 1 : 0}]
+# P1: a legacy word belongs to ONE window count.  Before the fix every count got
+# every word - and this check ('the legacy tokens survived', it asserted that
+# '2H' is in the candidates of 4) locked that behaviour in.  A build that accepts
+# '2H' on a four-window page would CLOSE two windows instead of arranging four.
+checkEqual "a legacy word of another count is not offered" -1 \
+    [lsearch -exact [::ModelLoader::Logic::LayoutCandidates 4] 2H]
+checkEqual "a 2-window page is not offered the 4-window word" -1 \
+    [lsearch -exact [::ModelLoader::Logic::LayoutCandidates 2] 4H]
+checkEqual "a 3-window page is not offered 'single'" -1 \
+    [lsearch -exact [::ModelLoader::Logic::LayoutCandidates 3] single]
+check "a 1-window page IS offered 'single'" \
+    [expr {[lsearch -exact [::ModelLoader::Logic::LayoutCandidates 1] single] >= 0}]
+check "4 still gets the legacy words of its own count" \
+    [expr {[lsearch -exact [::ModelLoader::Logic::LayoutCandidates 4] 4H] >= 0}]
+# P1: the table behind those words.  It is the single source of truth for the
+# 'legacy words of that count' rule (Logic::LayoutCandidates step 5).
+checkEqual "the legacy words of 1" {single 1x1} \
+    [::ModelLoader::Logic::LegacyLayoutTokens 1]
+checkEqual "the legacy words of 2" {2H 2V} \
+    [::ModelLoader::Logic::LegacyLayoutTokens 2]
+checkEqual "the legacy words of 4" {4H 4V} \
+    [::ModelLoader::Logic::LegacyLayoutTokens 4]
+checkEqual "5 has no legacy word" {} [::ModelLoader::Logic::LegacyLayoutTokens 5]
+checkEqual "0 has no legacy word" {} [::ModelLoader::Logic::LegacyLayoutTokens 0]
 # a token HyperView itself accepted wins over every guess (V1)
 ::ModelLoader::State::SetLayoutToken 4 "4 - 1"
 checkEqual "a learned token is the first candidate" {4 - 1} \

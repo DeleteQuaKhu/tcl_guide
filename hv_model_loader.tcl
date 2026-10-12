@@ -92,7 +92,9 @@
 #     V1  <page> SetLayout <token>          token spelling is installation
 #                                          specific -> auto discovery is used
 #                                          (fix 3: ordered candidates, the
-#                                          learned token first, plus the new
+#                                          learned token first, the legacy words
+#                                          OF THAT COUNT last - never a word of
+#                                          another count, P1 -, plus the new
 #                                          'Learn layouts' probe)
 #     V2  <contour> SetAverageMode <mode>   exact mode strings
 #     V3  <contour> SetLayer <layer>        command presence in 2022
@@ -402,6 +404,10 @@ namespace eval ::ModelLoader::Logic {
     # V12 - VERIFY: orientation names accepted by <view> SetOrientation.  They are
     #      the view names the shipped scripts use (display_service.tcl).
     variable viewPresets {iso front back left right top bottom}
+    # P1 - VERIFY (see V1/V14): the legacy layout spellings of each window count.
+    #      Only the count they belong to ever gets them, because a wrong one is
+    #      not harmless here: '2H' on a four-window page would CLOSE two windows.
+    variable legacyLayoutTokens {1 {single 1x1} 2 {2H 2V} 3 {3H 3V} 4 {4H 4V}}
     # Fix 5: the two capture scopes of step 3.
     variable captureScopes {target all}
     # Fix 5: file filters of step 3 (view list) and step 2 (legend).
@@ -450,7 +456,9 @@ proc ::ModelLoader::Logic::LayerChoices {} {
 #      squarest one, rows first - 2 -> 1x2, 6 -> 2x3, 8 -> 2x4, 12 -> 3x4
 #   3. the transposed arrangement (2 -> 2x1, 6 -> 3x2, ...)
 #   4. every remaining divisor arrangement, squarest first
-#   5. the plain count and the legacy tokens (single, 2H, 2V, ...)
+#   5. the plain count and the legacy tokens OF THIS COUNT
+#      (Logic::LegacyLayoutTokens: 'single'/'1x1' for 1, '2H'/'2V' for 2, ... -
+#      a word of another count is never offered, it would shrink the page)
 # so 'Apply layout' always applies THE same layout for a given count, and once
 # HyperView reported a token for that count it is the very first candidate.
 #
@@ -499,6 +507,16 @@ proc ::ModelLoader::Logic::PreferredLayoutToken {count} {
     lassign [::ModelLoader::Logic::LayoutPreference $count] r c
     return "${r}x${c}"
 }
+# P1: the legacy layout words of ONE window count ('single'/'1x1' for 1,
+# '2H'/'2V' for 2, ...) - the table is 'Logic::legacyLayoutTokens'.  They are a
+# guess (V1/V14), and unlike the 'RxC' spellings a wrong one is NOT harmless: a
+# build that accepts '2H' on a four-window page shows two windows afterwards.
+# A count without legacy words (5 and up) therefore gets none.
+proc ::ModelLoader::Logic::LegacyLayoutTokens {count} {
+    variable legacyLayoutTokens
+    if {![dict exists $legacyLayoutTokens $count]} { return {} }
+    return [dict get $legacyLayoutTokens $count]
+}
 proc ::ModelLoader::Logic::LayoutCandidates {count} {
     if {![string is integer -strict $count] || $count < 1} { return {} }
     set cand {}
@@ -513,9 +531,10 @@ proc ::ModelLoader::Logic::LayoutCandidates {count} {
             lappend cand $t
         }
     }
-    # 5. the plain count and the legacy words
+    # 5. the plain count and the legacy words OF THIS COUNT (P1: a word of
+    #    another count would shrink the page)
     lappend cand $count
-    foreach t [list single 1x1 2H 2V 3H 3V 4H 4V] { lappend cand $t }
+    foreach t [::ModelLoader::Logic::LegacyLayoutTokens $count] { lappend cand $t }
     # Remove duplicates but KEEP THE ORDER (this is the actual fix - the old
     # code ended with 'lsort -unique', which threw the preference away).
     set out {}

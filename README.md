@@ -272,7 +272,8 @@ the adapter paths that fail before an `hwi` call is reached.
 
 Sections **3b**, **3c**, **3d** and **3e** cover the three new features without
 HyperView: the layout mapping of a window count (`LayoutPreference`,
-`LayoutArrangements`, `PreferredLayoutToken`, `LayoutCandidates`,
+`LayoutArrangements`, `PreferredLayoutToken`, `LayoutCandidates` - which only
+offers the legacy words of **its own** count, `Logic::LegacyLayoutTokens` -
 `LayoutProbeOrder` - fix 3), the legend file (extension checks, empty file, a
 file that raises - fix 4) and the view list plus the PNG capture plan (the parser
 with comments / orientations / matrices / malformed lines, the output folder
