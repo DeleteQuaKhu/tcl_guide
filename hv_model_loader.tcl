@@ -420,7 +420,10 @@ namespace eval ::ModelLoader::Logic {
     variable captureScopes {target all}
     # Fix 5: file filters of step 3 (view list) and step 2 (legend).
     variable viewListExtensions {.txt .lst .csv .tcl}
-    variable legendExtensions {.tcl .hvl .txt}
+    variable legendExtensions {.tcl .hvl}
+    # P5a: exactly the two entries of Logic::LegendFileTypes.  A .txt legend is
+    # not refused - the 'All Files' entry of the browser still reaches it, it
+    # only gets the 'unusual extension' warning of Adapter::LoadLegendFromFile.
     # PNG quality passed to CaptureScreen as the third argument (0..100).  It is
     # only used by the CaptureScreen fallback of V12.
     variable captureQuality 100
@@ -3030,8 +3033,9 @@ the selected result type.  Should this build not deliver the automatic update, p
     hwtk::label $lfl.hint -anchor w -justify left -wraplength 740 \
         -text "A legend that was saved to a file is a Tcl script - it is sourced into the\
 running HyperView session, then the legend of the selected window is switched on and the \
-window is redrawn.  *.tcl (an exported legend), *.hvl and *.txt are offered; the legend \
-belongs to the window that is selected above."
+window is redrawn.  *.tcl (an exported legend) and *.hvl are offered; a file with another \
+extension (e.g. *.txt) can still be chosen through 'All Files' - it is sourced with a \
+warning.  The legend belongs to the window that is selected above."
     grid $lfl.hint -row 1 -column 0 -columnspan 4 -sticky w -padx 2 -pady 2
     return
 }

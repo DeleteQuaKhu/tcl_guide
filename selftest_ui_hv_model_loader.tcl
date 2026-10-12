@@ -623,7 +623,7 @@ eq "the legend filter starts with the Tcl entry" 1 \
         [lindex [::ModelLoader::Logic::LegendFileTypes] 0]]
 ok "the legend filter knows *.hvl" \
     [string match "*.hvl*" [::ModelLoader::Logic::LegendFileTypes]]
-eq "the legend extensions are declared" ".tcl .hvl .txt" \
+eq "the legend extensions are declared" ".tcl .hvl" \
     [::ModelLoader::Logic::LegendExtensions]
 
 set legOK    [file join $::here _selftest_legend_ok.tcl]

@@ -33,6 +33,18 @@ proc checkEqual {label expected actual} {
     }
 }
 
+# P5a: the flat extension list of the entries of a file browser, i.e. of a
+# '{{name} {ext ...}} ...' list.  '*' (the 'All Files' entry) is not an
+# extension and is skipped; the result is sorted and free of duplicates, so it
+# can be compared with a sorted Logic::*Extensions list.
+proc extsOfTypes {types} {
+    set out {}
+    foreach entry $types {
+        foreach e [lindex $entry 1] { if {$e ne "*"} { lappend out $e } }
+    }
+    return [lsort -unique $out]
+}
+
 set here   [file dirname [file normalize [info script]]]
 set wizard [file join $here hv_model_loader.tcl]
 
@@ -424,8 +436,18 @@ check "the legend browser offers *.tcl first" \
 check "the legend browser offers *.hvl and 'All Files'" [expr {
     [string match "*.hvl*" [::ModelLoader::Logic::LegendFileTypes]] && \
     [string match "*All Files*" [::ModelLoader::Logic::LegendFileTypes]] ? 1 : 0}]
-checkEqual "the legend extensions" {.tcl .hvl .txt} \
+checkEqual "the legend extensions" {.tcl .hvl} \
     [::ModelLoader::Logic::LegendExtensions]
+# P5a: the browser filter and the extension list the loader judges a file with
+# must not drift apart - a *known* extension is one the user can actually pick
+# from the filter, and vice versa.  A *.txt legend stays reachable through
+# 'All Files' (and is then only warned about, see 3c below).
+checkEqual "the legend browser offers exactly the legend extensions" \
+    [lsort [::ModelLoader::Logic::LegendExtensions]] \
+    [extsOfTypes [::ModelLoader::Logic::LegendFileTypes]]
+checkEqual "the view list browser offers exactly the view list extensions" \
+    [lsort [::ModelLoader::Logic::ViewListExtensions]] \
+    [extsOfTypes [::ModelLoader::Logic::ViewListFileTypes]]
 set noLeg [::ModelLoader::Adapter::LoadLegendFromFile 1 ""]
 checkEqual "an empty legend path is refused" 0 [dict get $noLeg ok]
 check "the refusal says that no file was chosen" \
