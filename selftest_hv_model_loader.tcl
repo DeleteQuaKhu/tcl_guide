@@ -265,8 +265,22 @@ checkEqual "InterpretWindowCount on an empty answer" 0 \
     [::ModelLoader::Logic::InterpretWindowCount ""]
 checkEqual "InterpretWindowCount is NOT llength" 4 \
     [expr {[::ModelLoader::Logic::InterpretWindowCount 4] != [llength 4] ? 4 : 0}]
-check "InterpretWindowCount never returns a negative count" \
-    [expr {[::ModelLoader::Logic::InterpretWindowCount -1] >= 0}]
+# P2: a negative answer is not a page with one window.  Before the fix the
+# negative scalar fell through to 'llength', which is 1 for every scalar, so the
+# wizard reported a healthy page - and 'Apply layout' even answered 'unchanged 1'
+# for a request of one window although nothing had been read.  (This replaces the
+# old check 'InterpretWindowCount never returns a negative count', which the
+# clamp below covers for every negative value.)
+checkEqual "InterpretWindowCount clamps a negative answer to 0" 0 \
+    [::ModelLoader::Logic::InterpretWindowCount -1]
+checkEqual "InterpretWindowCount clamps a larger negative answer to 0" 0 \
+    [::ModelLoader::Logic::InterpretWindowCount -5]
+checkEqual "InterpretWindowCount on a non-numeric answer" 0 \
+    [::ModelLoader::Logic::InterpretWindowCount abc]
+checkEqual "InterpretWindowCount on a mixed list" 0 \
+    [::ModelLoader::Logic::InterpretWindowCount {1 x}]
+checkEqual "InterpretWindowCount on the scalar 0" 0 \
+    [::ModelLoader::Logic::InterpretWindowCount 0]
 
 checkEqual "ModelName"       model.h3d [::ModelLoader::Logic::ModelName 1]
 checkEqual "Subcases"        {{1 {Subcase 1}} {2 {Subcase 2}}} \
@@ -840,6 +854,24 @@ set lInfo [::ModelLoader::Adapter::SetWindowCount 4]
 checkEqual "fix 1: SetWindowCount 4 leaves the layout untouched" 1 \
     [dict get $lInfo unchanged]
 checkEqual "fix 1: SetWindowCount 4 reports 4 windows" 4 [dict get $lInfo windows]
+
+# --- P2: a page that answers -1 or 0 is NOT a page with one window -----------
+# A negative / zero answer means the page was not read.  'QueryPage' has to fail
+# (an empty dict) instead of reporting a healthy one-window page, and
+# 'SetWindowCount 1' must not answer 'unchanged 1' any more.
+set ::fake::win -1
+checkEqual "P2: a page that answers -1 is not a page with one window" {} \
+    [::ModelLoader::Adapter::QueryPage]
+set badInfo [::ModelLoader::Adapter::SetWindowCount 1]
+checkEqual "P2: a -1 page is not 'already showing 1 window'" 0 [dict get $badInfo ok]
+checkEqual "P2: the refusal names the unreadable page" 1 \
+    [expr {[string first "Cannot read the active page" [dict get $badInfo message]] == 0}]
+set ::fake::win 0
+checkEqual "P2: a page that answers 0 windows is unreadable" {} \
+    [::ModelLoader::Adapter::QueryPage]
+set ::fake::win 4
+checkEqual "P2: a readable page still answers with its window count" 4 \
+    [dict get [::ModelLoader::Adapter::QueryPage] windows]
 
 # --- scenario 1: model only -------------------------------------------------
 ::ModelLoader::State::ResetAll

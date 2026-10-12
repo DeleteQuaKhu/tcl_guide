@@ -534,12 +534,25 @@ proc ::ModelLoader::Logic::LayoutCandidates {count} {
 #   "1 2 3 4" -> 4          (the list form)
 #   "1"       -> 1
 #   ""        -> 0
-# Before this helper the value was passed through 'llength' - that turned any
-# scalar '4' into 1, so the wizard believed the page had a single window after
-# every layout change (that is why the window count jumped back to 1).
+#   "-1"      -> 0          (P2: a page without windows was NOT read)
+#   "abc"     -> 0          (the answer is neither a number nor a window list)
+#   "1 x"     -> 0          (one token is not a window index - not a list either)
+# The number form is clamped at 0 (a negative answer is not a page with -1
+# windows), and the list form is only counted when EVERY token is an integer,
+# because 'llength' is happy with any string.  Before this helper the value was
+# passed through 'llength' - that turned any scalar '4' into 1, so the wizard
+# believed the page had a single window after every layout change (that is why
+# the window count jumped back to 1); the same 'llength' also turned a negative
+# answer into the "healthy" one-window page of P2.
 proc ::ModelLoader::Logic::InterpretWindowCount {raw} {
     set raw [string trim $raw]
-    if {[string is integer -strict $raw] && $raw >= 0} { return $raw }
+    if {$raw eq ""} { return 0 }
+    if {[string is integer -strict $raw]} {
+        return [expr {$raw < 0 ? 0 : $raw}]
+    }
+    foreach tok $raw {
+        if {![string is integer -strict $tok]} { return 0 }
+    }
     return [llength $raw]
 }
 #--------------------------------- file type filters (GUI data) --------------
@@ -1128,7 +1141,9 @@ proc ::ModelLoader::Adapter::QueryPage {} {
     ::ModelLoader::Adapter::ReleaseHandles {mlPage mlProj mlSess}
     ::ModelLoader::Adapter::HvRun "hwi CloseStack" {hwi CloseStack}
 
-    if {$pageIdx eq "" || $winCount < 0} { return {} }
+    # P2: a page always has at least one window, so a non-positive answer means
+    # the page was not read - it must not be reported as a one-window page.
+    if {$pageIdx eq "" || $winCount <= 0} { return {} }
     set out [dict create page $pageIdx windows $winCount layout $layout]
 
     # V1 - remember the token the GUI is currently using, this is exactly the

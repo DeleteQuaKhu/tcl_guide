@@ -315,7 +315,10 @@ number the user picked - in the variable *and* in the widget - also when the
 layout request is refused, the target window is no longer reset to 1, and
 `Logic::InterpretWindowCount` reads both the scalar and the list answer of
 `GetNumberOfWindows` as the real count, while plain `llength` would answer 1 for
-the scalar).
+the scalar).  Since **P2** the helper also *clamps*: a negative answer is `0`
+(a page without windows was not read, `Adapter::QueryPage` then fails instead of
+reporting a one-window page) and an answer whose tokens are not all integers
+(`abc`, `1 x`) is `0` as well - `llength` is happy with any string.
 Section **5c** is the regression test of **fix 2** (`*.inp` in the model filter,
 `*.res` in the result filter, `CheckChosenFile` accepting/rejecting paths,
 `ApplyChosenFile` writing the normalised path back, both paths reaching the

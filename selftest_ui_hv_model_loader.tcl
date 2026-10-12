@@ -456,6 +456,8 @@ eq "InterpretWindowCount on '1 2 3 4'" 4 \
     [::ModelLoader::Logic::InterpretWindowCount {1 2 3 4}]
 ok "llength alone answers 1 for the scalar 4 (the old bug)" \
     [expr {[llength 4] == 1 ? 1 : 0}]
+eq "InterpretWindowCount clamps -1 to 0" 0 \
+    [::ModelLoader::Logic::InterpretWindowCount -1]
 
 # the 'Target window' field must not be reset to 1 either
 set ::ModelLoader::UI::varTargetWin 3
