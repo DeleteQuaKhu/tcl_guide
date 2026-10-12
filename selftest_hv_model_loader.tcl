@@ -180,8 +180,17 @@ checkEqual "WindowIndices"               {1 2 3}   [::ModelLoader::State::Window
 checkEqual "AnyModelLoaded"              1         [::ModelLoader::State::AnyModelLoaded]
 checkEqual "WindowSet writes"            X         [::ModelLoader::State::WindowSet 3 note X]
 checkEqual "WindowSet is readable"       X         [::ModelLoader::State::WindowGet 3 note]
+::ModelLoader::State::SetLegendFile 2 [file normalize $wizard]
+::ModelLoader::State::SetLegendFile 3 [file normalize $wizard]
 checkEqual "PruneTo returns the drop list" {3}     [::ModelLoader::State::PruneTo 2]
 checkEqual "pruned window is gone"       0         [::ModelLoader::State::WindowExists 3]
+# P4: a window that a layout change dropped must not leave a stale legend path
+# behind - the window index can come back later and would then offer the wrong
+# file; the legend of a surviving window has to stay.
+checkEqual "P4: the legend of a pruned window is gone" "" \
+    [::ModelLoader::State::GetLegendFile 3]
+checkEqual "P4: the legend of a surviving window stays" [file normalize $wizard] \
+    [::ModelLoader::State::GetLegendFile 2]
 checkEqual "last error round trip"       hello     [::ModelLoader::State::SetLastError hello]
 checkEqual "ClearLastError"              {}        [::ModelLoader::State::ClearLastError]
 checkEqual "Status round trip"           busy      [::ModelLoader::State::SetStatus busy]

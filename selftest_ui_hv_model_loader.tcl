@@ -696,6 +696,47 @@ eq "a *.hvl legend is not warned about" \
     "Chosen legend file: _selftest_legend_field.hvl" $::ModelLoader::UI::statusText
 file delete $legField
 
+sec "5e2 - P4: the legend field follows the target window"
+set leg2 [file join $::here _selftest_legend_win2.tcl]
+set fh [open $leg2 w] ; puts $fh "# legend of window 2" ; close $fh
+::ModelLoader::State::SetLegendFile 2 [file normalize $leg2]
+# start from window 1 in BOTH the widget and the variable, so that the switch to
+# window 2 below is a REAL change - the widget is what the handler reads, and
+# the handler must only overwrite the field when the window really differs.
+::ModelLoader::UI::SetWidgetValue $::ModelLoader::UI::wTargetWin 1
+set ::ModelLoader::UI::varTargetWin 1
+::ModelLoader::UI::SetWidgetValue $::ModelLoader::UI::wTargetWin 2
+eq "the handler accepts window 2" 2 [::ModelLoader::UI::OnTargetWindowChanged]
+eq "P4: the remembered legend of window 2 is in the variable" \
+    [file normalize $leg2] $::ModelLoader::UI::varLegendFile
+eq "P4: and in the field" [file normalize $leg2] \
+    [::ModelLoader::UI::WidgetText $::ModelLoader::UI::wLegendFile \
+        $::ModelLoader::UI::varLegendFile]
+::ModelLoader::UI::SetWidgetValue $::ModelLoader::UI::wTargetWin 3
+runs "switch to window 3, which has no legend" \
+    {::ModelLoader::UI::OnTargetWindowChanged}
+eq "P4: a window without a legend clears the field" "" \
+    $::ModelLoader::UI::varLegendFile
+::ModelLoader::UI::SetWidgetValue $::ModelLoader::UI::wTargetWin 2
+runs "switch back to window 2" {::ModelLoader::UI::OnTargetWindowChanged}
+eq "P4: the legend of window 2 is shown again" [file normalize $leg2] \
+    $::ModelLoader::UI::varLegendFile
+::ModelLoader::UI::SetWidgetValue $::ModelLoader::UI::wTargetWin 1
+runs "back to window 1 for the next section" \
+    {::ModelLoader::UI::OnTargetWindowChanged}
+# R1: a path the user is typing for the window that is already shown must
+# survive a refresh of the step-2 page.
+set ::ModelLoader::UI::varLegendFile \
+    [file join $::here _selftest_legend_typed.hvl]
+::ModelLoader::UI::SetWidgetValue $::ModelLoader::UI::wTargetWin 1
+runs "refresh the same window 1 again" \
+    {::ModelLoader::UI::OnTargetWindowChanged}
+eq "P4: a path typed for the shown window is not wiped" \
+    [file join $::here _selftest_legend_typed.hvl] \
+    $::ModelLoader::UI::varLegendFile
+set ::ModelLoader::UI::varLegendFile ""   ;# as section 5e left it
+file delete $leg2
+
 sec "5f - fix 5: the step navigation and the view list of step 3"
 runs "StepNext from step 2 reaches step 3" {::ModelLoader::UI::StepNext}
 eq "the step counter is 3" 3 $::ModelLoader::UI::step

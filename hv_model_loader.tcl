@@ -284,13 +284,19 @@ proc ::ModelLoader::State::AnyModelLoaded {} {
     return [expr {[llength [::ModelLoader::State::LoadedWindows]] > 0}]
 }
 # Called after the layout changed / the window count shrank:
-# drop state of windows that no longer exist, keep the surviving ones.
+# drop state of windows that no longer exist, keep the surviving ones.  The
+# remembered legend file of a dropped window goes with it (P4) - the index can
+# come back with a later layout change and must not come back with a stale path.
 proc ::ModelLoader::State::PruneTo {maxIdx} {
     variable windows
+    variable legendFileByWindow
     set dropped {}
     foreach idx [lsort -integer [dict keys $windows]] {
         if {$idx > $maxIdx} {
             dict unset windows $idx
+            if {[dict exists $legendFileByWindow $idx]} {
+                dict unset legendFileByWindow $idx
+            }
             lappend dropped $idx
         }
     }
@@ -2281,6 +2287,11 @@ namespace eval ::ModelLoader::UI {
     variable varLayer       {<default>}
     variable varApplyAll    1
     variable varLegendFile  ""      ;# FIX 4: legend file of the target window
+    # P4: the window whose legend file the legend FIELD currently shows.  It is
+    # not the target window itself: with a conforming combobox the widget writes
+    # the target variable before the event handler runs, so comparing against it
+    # would never detect a switch.
+    variable varLegendWin   0
     # FIX 5: step 3 values
     variable varViewListFile ""     ;# view list file
     variable varViewListInfo "no view list imported - one PNG per window"
@@ -2420,7 +2431,9 @@ proc ::ModelLoader::UI::OnWindowCountChanged {} {
 proc ::ModelLoader::UI::OnTargetWindowChanged {} {
     variable wTargetWin
     variable wTargetWin2
+    variable wLegendFile
     variable varTargetWin
+    variable varLegendWin
     set raw [string trim [::ModelLoader::UI::WidgetText $wTargetWin $varTargetWin]]
     if {$raw eq ""} {
         set raw [string trim [::ModelLoader::UI::WidgetText $wTargetWin2 $varTargetWin]]
@@ -2428,6 +2441,18 @@ proc ::ModelLoader::UI::OnTargetWindowChanged {} {
     if {[string is integer -strict $raw] && $raw >= 1} {
         set varTargetWin $raw
         ::ModelLoader::UI::SetWidgetValue $wTargetWin2 $raw
+        # P4: the legend file is remembered PER window, so the field has to show
+        # the one of the newly selected window.  varLegendWin is the window the
+        # field already reflects: a refresh of the same window (and a rebuild of
+        # the step-2 page) must never wipe a path the user is typing, a real
+        # switch to another window always shows that window's legend (empty if
+        # it has none).
+        if {$raw ne $varLegendWin} {
+            ::ModelLoader::UI::SetFileWidget $wLegendFile \
+                ::ModelLoader::UI::varLegendFile \
+                [::ModelLoader::State::GetLegendFile $raw]
+            set varLegendWin $raw
+        }
     }
     return $varTargetWin
 }
@@ -2953,6 +2978,16 @@ proc ::ModelLoader::UI::BuildStep2 {} {
     variable wApplyAll
     variable wTargetWin2
     variable wLegendFile
+    variable varTargetWin
+    variable varLegendWin
+    variable varLegendFile
+
+    # P4: the field is created showing the legend of the current target window,
+    # so a refresh (or a step-1 action) for that same window never wipes a path
+    # the user has typed into the field.
+    if {[string is integer -strict $varTargetWin] && $varTargetWin >= 1} {
+        set varLegendWin $varTargetWin
+    }
 
     set lf [hwtk::labelframe $wStep2.contour -text " Contour settings " -padding 4]
     grid $lf -row 0 -column 0 -sticky ew -pady 2 -padx 2
@@ -3532,6 +3567,7 @@ proc ::ModelLoader::UI::OnBrowseOutputDir {} {
 proc ::ModelLoader::UI::OnLoadLegend {} {
     variable varTargetWin
     variable varLegendFile
+    variable varLegendWin
     variable wLegendFile
 
     set path [string trim [::ModelLoader::UI::WidgetText $wLegendFile $varLegendFile]]
@@ -3557,6 +3593,8 @@ proc ::ModelLoader::UI::OnLoadLegend {} {
     ::ModelLoader::State::SetLegendFile $varTargetWin $file
     ::ModelLoader::UI::SetFileWidget $wLegendFile \
         ::ModelLoader::UI::varLegendFile $file
+    # P4: the field now shows the legend of exactly this window
+    set varLegendWin $varTargetWin
     ::ModelLoader::UI::AppendInfo [list \
         "  window $varTargetWin : OK - [dict get $res message]"]
     foreach warning [dict get $res warnings] {

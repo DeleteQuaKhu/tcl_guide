@@ -313,7 +313,7 @@ file delete $legField
 
 **Defect (spec §5 P4):** `UI::OnLoadLegend` :3484 stores the loaded path per window (`State::SetLegendFile`), but `UI::OnTargetWindowChanged` :2348-2361 only updates `varTargetWin` — switch the target window and the field still shows the *previous* window's legend, so the per-window state is write-only. Second half: `State::PruneTo` :278-288 drops `windows` entries above the new maximum but leaves `legendFileByWindow` :193 untouched, so a window recreated by a later layout change offers a stale path.
 
-**Deliverable:** `OnTargetWindowChanged` restores the field from `State::GetLegendFile` — **only when the accepted window differs from the previous one** (spec R1: never wipe a path the user is typing) — through the existing `UI::SetFileWidget` (which already tolerates a missing widget); `State::PruneTo` prunes `legendFileByWindow` for the indices it drops.
+**Deliverable:** `OnTargetWindowChanged` restores the field from `State::GetLegendFile` — **only when the accepted window differs from the window the field shows** (`UI::varLegendWin`, spec R1: never wipe a path the user is typing; see 6.4 for why the draft's `$last`-against-`varTargetWin` cannot work) — through the existing `UI::SetFileWidget` (which already tolerates a missing widget); `State::PruneTo` prunes `legendFileByWindow` for the indices it drops.
 
 **Tests:**
 
@@ -321,16 +321,18 @@ file delete $legField
 | --- | --- |
 | L1 State section, around the existing `PruneTo` check (:169) | `SetLegendFile 2`/`3` before `PruneTo 2`: `GetLegendFile 3` is `""`, `GetLegendFile 2` **survives** — RED (`GetLegendFile 3` returns the path today) |
 | L1 :169 | the `PruneTo` result `{3}` stays exactly as it is |
-| L2, new section 5e2 after the legend block | window 2 selected → handler returns `2` and the remembered path lands in `varLegendFile` **and** in the widget; window 3 (no legend) clears both; back to window 2 shows it again — RED (today the field is never written) |
+| L2, new section 5e2 after the legend block | window 2 selected → handler returns `2` and the remembered path lands in `varLegendFile` **and** in the widget; window 3 (no legend) clears both; back to window 2 shows it again; a path typed while a window is already shown survives a refresh of that same window (R1) — RED (today the field is never written) |
 | L2 :666-667 | **unchanged** — the write side (`GetLegendFile 1` after `OnLoadLegend`) |
 
-- [ ] **6.1** Add the L1 block. Keep the existing line `checkEqual "PruneTo returns the drop list" {3} [::ModelLoader::State::PruneTo 2]`, add the two `SetLegendFile` calls just above it and the two new checks just below it, with the labels `P4: the legend of a pruned window is gone` and `P4: the legend of a surviving window stays`. Use `[file normalize $wizard]` as the path (it always exists). `python run_selftest.py` → exactly one FAIL (`…pruned window is gone`). RED.
-- [ ] **6.2** L2: add section 5e2 directly before the "5f" banner (:684), i.e. right after the legend cleanup (:679-682):
+- [x] **6.1** Add the L1 block. Keep the existing line `checkEqual "PruneTo returns the drop list" {3} [::ModelLoader::State::PruneTo 2]`, add the two `SetLegendFile` calls just above it and the two new checks just below it, with the labels `P4: the legend of a pruned window is gone` and `P4: the legend of a surviving window stays`. Use `[file normalize $wizard]` as the path (it always exists). `python run_selftest.py` → exactly one FAIL (`…pruned window is gone`). RED.
+- [x] **6.2** L2: add section 5e2 directly before the "5f" banner (:684), i.e. right after the legend cleanup (:679-682). Shipped with two changes against the draft: the section first puts window **1** into *both* the widget and `varTargetWin` (:706-707) so that the following switch to window 2 is a real change, and after the last handler call it checks R1 — `varLegendFile` set to a typed path, one more handler call for window 1, the path must survive (:727-736):
 ```tcl
 sec "5e2 - P4: the legend field follows the target window"
 set leg2 [file join $::here _selftest_legend_win2.tcl]
 set fh [open $leg2 w] ; puts $fh "# legend of window 2" ; close $fh
 ::ModelLoader::State::SetLegendFile 2 [file normalize $leg2]
+::ModelLoader::UI::SetWidgetValue $::ModelLoader::UI::wTargetWin 1
+set ::ModelLoader::UI::varTargetWin 1
 ::ModelLoader::UI::SetWidgetValue $::ModelLoader::UI::wTargetWin 2
 eq "the handler accepts window 2" 2 [::ModelLoader::UI::OnTargetWindowChanged]
 eq "P4: the remembered legend of window 2 is in the variable" \
@@ -350,14 +352,24 @@ eq "P4: the legend of window 2 is shown again" [file normalize $leg2] \
 ::ModelLoader::UI::SetWidgetValue $::ModelLoader::UI::wTargetWin 1
 runs "back to window 1 for the next section" \
     {::ModelLoader::UI::OnTargetWindowChanged}
+# R1: a path the user is typing for the window that is already shown must
+# survive a refresh of the step-2 page.
+set ::ModelLoader::UI::varLegendFile \
+    [file join $::here _selftest_legend_typed.hvl]
+::ModelLoader::UI::SetWidgetValue $::ModelLoader::UI::wTargetWin 1
+runs "refresh the same window 1 again" \
+    {::ModelLoader::UI::OnTargetWindowChanged}
+eq "P4: a path typed for the shown window is not wiped" \
+    [file join $::here _selftest_legend_typed.hvl] \
+    $::ModelLoader::UI::varLegendFile
 set ::ModelLoader::UI::varLegendFile ""   ;# as section 5e left it
 file delete $leg2
 ```
-Run `python run_ui_selftest.py` → the three `P4:` checks FAIL. RED. Note that window 1 *has* a remembered legend by then (`$legOK` from :664-667), which is why the last handler call is followed by the explicit reset.
-- [ ] **6.3** `State::PruneTo` :278-288: add `variable legendFileByWindow` and, after the loop over `$dropped`, drop the remembered paths of exactly those indices (`if {[dict exists $legendFileByWindow $idx]} { dict unset legendFileByWindow $idx }`). Extend the comment :276-277 to say that the remembered legend files of the dropped windows go with them.
-- [ ] **6.4** `OnTargetWindowChanged` :2348-2361: keep `set last $varTargetWin` before reading the widgets, add `variable wLegendFile`, and inside the accepted branch add — guarded by `if {$raw ne $last}` — `::ModelLoader::UI::SetFileWidget $wLegendFile [list ::ModelLoader::UI::varLegendFile] [::ModelLoader::State::GetLegendFile $raw]` (pass the fully qualified varname, the same way :3485 does). One comment line stating the two reasons: the legend belongs to the window, and only a real change may overwrite what the user is typing.
-- [ ] **6.5** README: extend the `*Legend file*` row :88 with "the field follows the target window — the path is read back from `State::legendFileByWindow` (and a window that disappears in a layout change loses its remembered path)".
-- [ ] **6.6** `python run_selftest.py` → green, `0 failed`; `python run_ui_selftest.py` → green, `0 failed` (+7 checks). Commit `fix: restore the remembered legend file when the target window changes`.
+Run `python run_ui_selftest.py` → the three `P4:` checks FAIL. RED. Note that window 1 *has* a remembered legend by then (`$legOK` from :664-667), which is why the last handler call is followed by the explicit reset. The R1 check was proven RED on its own by temporarily replacing the guard with `if {1}` (`1 failed` — exactly `P4: a path typed for the shown window is not wiped`), see 6.4.
+- [x] **6.3** `State::PruneTo` :290-314: added `variable legendFileByWindow` and, after the loop over `$dropped`, dropped the remembered paths of exactly those indices (`if {[dict exists $legendFileByWindow $idx]} { dict unset legendFileByWindow $idx }`). The comment above says that the remembered legend files of the dropped windows go with them.
+- [x] **6.4** `OnTargetWindowChanged` :2431-2456: add `variable wLegendFile` and `variable varLegendWin`, and inside the accepted branch, guarded by `if {$raw ne $varLegendWin}`, call `::ModelLoader::UI::SetFileWidget $wLegendFile [list ::ModelLoader::UI::varLegendFile] [::ModelLoader::State::GetLegendFile $raw]`. **Deviation from the draft above:** the guard compares against `varLegendWin` — the window whose legend the *field* currently shows, `variable varLegendWin 0` :2294 — and not against `set last $varTargetWin`, because both target-window comboboxes are created with `-textvariable ::ModelLoader::UI::varTargetWin` (:2901, :2984): a conforming ttk/hwtk combobox writes the variable **before** the event fires, so `raw` and `last` are always equal and `if {$raw ne $last}` would never fire — the fix would be dead code in every conforming build (the L2 section proved exactly that: the RED run kept failing with the `$last` guard). `varLegendWin` is set where the field is written: `BuildStep2` :2985-2990 (field created → shows the initial target window) and `OnLoadLegend` :3585-3586 (a loaded legend belongs to `$varTargetWin`). It keeps R1 intact: a refresh (or a step-1 action) for the window that is already shown never touches the field, so a typed path survives; only a real switch reads the state.
+- [x] **6.5** README: the `*Legend file*` row :88 now says that the field follows the **target window** — the path is read back from `State::legendFileByWindow` whenever another window is selected (P4; a refresh of the same window never overwrites what the user is typing) — that a window which disappears in a layout change loses its remembered path (`State::PruneTo`), and why the guard compares against `UI::varLegendWin` instead of the target variable.
+- [x] **6.6** `python run_selftest.py` → green, `431 passed, 0 failed`; `python run_ui_selftest.py` → green, `316 passed, 0 failed` (+10 checks). Commit `fix: drop the remembered legend of a pruned window, follow the target window`.
 
 ---
 
