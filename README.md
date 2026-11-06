@@ -21,7 +21,14 @@ pis_workflow/
 
 ## How to run
 
+Get the files once (and `git pull` for updates):
+
+```
+git clone https://github.com/DeleteQuaKhu/tcl_guide.git pis_workflow
+```
+
 In a HyperView session with the Tcl/Tk command window:
+
 
 ```tcl
 source C:/path/to/pis_workflow/01_scripts/_tcl_pis_99_workflow_gui.tcl
