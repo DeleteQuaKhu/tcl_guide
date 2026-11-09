@@ -1,545 +1,435 @@
-#============================================================================
-# _tcl_pis_99_workflow_gui.tcl
-#
-# Minimal PIS workflow GUI: one button, one step (apply the Contact Pressure
-# legend to the active HyperView contour).
-#
-# Tcl/Tk 8.5 compatible. Needs Tk (no other package). No tcllib, no
-# try/finally. All state lives in namespace ::pis099::gui, nothing is shared
-# with older workflow GUIs.
-#
-# Layout of the window
-#   working folder entry + Browse + Reload Config
-#   legend file entry    + Browse Legend
-#   Load Legend button
-#   read-only log text with scroll bar
-#
-# Public API (namespace ::pis099::gui), one definition per procedure:
-#   launch          ?rootDir?
-#   build_ui
-#   browse_root
-#   browse_legend
-#   reload_config
-#   load_legend
-#   step_settings   cfg
-#   ui_log          msg
-#   show_error      msg
-#   show_info       msg
-#
-# Notes
-#   - The step id, script file, proc name and title are all read from the
-#     configuration (workflow run_order + the matching script section), no step
-#     table is hard coded here.
-#   - Browse Legend only changes the in memory configuration dictionary; the
-#     .ini file is never written by this GUI.
-#   - Set ::pis099_no_autolaunch (plain global name) before sourcing to load
-#     the procedures without opening the window.
-#============================================================================
-
-namespace eval ::pis099::gui {
-    variable version 1.0
-
-    # folder of this script, captured while it is being sourced
-    variable scriptDir [file dirname [file normalize [info script]]]
-    variable commonFile ""
-
-    # window / widget handles
-    variable win .pis099_workflow
-    variable logWidget ""
-    variable statusWidget ""
-
-    # state: root folder text, legend file text, configuration, flags
-    variable rootVar ""
-    variable legendVar ""
-    variable cfg ""
-    variable configLoaded 0
-    variable busy 0
+# src/01_scripts/_tcl_pis_99_workflow_gui.tcl
+# ::pis::gui — the single "PIS Workflow" window. Task T-003 builds the FRAME: window,
+# block 0, the five module blocks (one shared module-list helper), log pane, status bar,
+# busy lock. Layout per docs/refs/SPEC_gui.txt s.3, s.5, s.13.
+# An action owned by a later task logs one explicit ERROR ("not wired yet"): no silent
+# no-op, no fake run. Tcl 8.5 only: no tcllib, no try/finally, package require = Tk only.
+namespace eval ::pis::gui {
+    variable S [dict create busy 0]
+    variable LOCK [list]
+    variable BASE [dict create]
+    variable EDIT [dict create]
 }
 
-#----------------------------------------------------------------------------
-# Load the shared library from the folder that contains this script.
-#----------------------------------------------------------------------------
-set ::pis099::gui::commonFile [file join $::pis099::gui::scriptDir _tcl_pis_00_common.tcl]
-if {[llength [info commands ::pis::common::load_config]] == 0} {
-    if {![file isfile $::pis099::gui::commonFile]} {
-        return -code error "Cannot load the shared library, file not found: $::pis099::gui::commonFile"
+proc ::pis::gui::log_line {level msg} {
+    variable S
+    if {![dict exists $S log]} {
+        return ""
     }
-    uplevel #0 [list source $::pis099::gui::commonFile]
+    set w [dict get $S log]
+    set line "[clock format [clock seconds] -format %H:%M:%S] [format %-5s $level] $msg"
+    $w configure -state normal
+    $w insert end "$line\n" [string tolower $level]
+    $w see end
+    $w configure -state disabled
+    return $line
 }
 
-#----------------------------------------------------------------------------
-# launch ?rootDir?
-#   Creates (or raises) the toplevel .pis099_workflow. When rootDir is empty
-#   the parent folder of this script folder is used, i.e. the folder that
-#   contains 00_config and 01_scripts.
-#----------------------------------------------------------------------------
-proc ::pis099::gui::launch {{rootDir ""}} {
-    variable win
-    variable rootVar
-    variable scriptDir
-
-    if {[llength [info commands toplevel]] == 0} {
-        return -code error "Tk is not available in this session, the workflow GUI cannot be created."
+proc ::pis::gui::set_status {msg {color ""}} {
+    variable S
+    if {![dict exists $S status]} {
+        return ""
     }
-
-    if {$rootDir eq ""} {
-        set rootDir [file dirname $scriptDir]
+    if {$color eq ""} {
+        set color black
     }
-
-    if {[winfo exists $win]} {
-        wm deiconify $win
-        raise $win
-        return $win
-    }
-
-    set rootVar [file normalize $rootDir]
-    build_ui
-
-    wm deiconify $win
-    raise $win
-    catch {focus $win}
-
-    ui_log "Workflow GUI started. Script folder: $scriptDir"
-    reload_config
-    return $win
+    set w [dict get $S status]
+    $w configure -text "Status: $msg" -foreground $color
+    return $msg
 }
 
-#----------------------------------------------------------------------------
-# build_ui
-#   Creates every widget of the window (no -command uses string substitution,
-#   each callback is a fully qualified procedure name).
-#----------------------------------------------------------------------------
-proc ::pis099::gui::build_ui {} {
-    variable win
-    variable logWidget
-    variable statusWidget
-
-    if {[winfo exists $win]} {
-        destroy $win
+# Busy lock (SPEC_gui s.7): each lockable widget keeps its baseline state, so releasing
+# the lock restores exactly the pre-lock state.
+proc ::pis::gui::lock {path} {
+    variable LOCK
+    variable BASE
+    if {[lsearch -exact $LOCK $path] < 0} {
+        lappend LOCK $path
+        dict set BASE $path [$path cget -state]
     }
-    toplevel $win
-    wm title $win "PIS Workflow - Apply Contact Pressure Legend"
-    catch {wm minsize $win 660 420}
-
-    # ---- working folder row ------------------------------------------------
-    set rowRoot [frame $win.rowRoot]
-    pack $rowRoot -side top -fill x -padx 8 -pady 6
-    label $rowRoot.lbl -text "Working folder:" -width 15 -anchor w
-    entry $rowRoot.ent -textvariable ::pis099::gui::rootVar -width 54
-    button $rowRoot.browse -text "Browse..." -command ::pis099::gui::browse_root
-    button $rowRoot.reload -text "Reload Config" -command ::pis099::gui::reload_config
-    pack $rowRoot.lbl -side left
-    pack $rowRoot.ent -side left -fill x -expand 1 -padx 4
-    pack $rowRoot.browse -side left
-    pack $rowRoot.reload -side left -padx 4
-
-    # ---- legend file row ---------------------------------------------------
-    set rowLegend [frame $win.rowLegend]
-    pack $rowLegend -side top -fill x -padx 8 -pady 6
-    label $rowLegend.lbl -text "Legend file:" -width 15 -anchor w
-    entry $rowLegend.ent -textvariable ::pis099::gui::legendVar -width 54
-    button $rowLegend.browse -text "Browse Legend..." -command ::pis099::gui::browse_legend
-    pack $rowLegend.lbl -side left
-    pack $rowLegend.ent -side left -fill x -expand 1 -padx 4
-    pack $rowLegend.browse -side left
-
-    # ---- action row --------------------------------------------------------
-    set rowAction [frame $win.rowAction]
-    pack $rowAction -side top -fill x -padx 8 -pady 6
-    button $rowAction.run -text "Load Legend" -width 18 -command ::pis099::gui::load_legend
-    label $rowAction.status -text "Configuration not loaded." -anchor w
-    pack $rowAction.run -side left
-    pack $rowAction.status -side left -padx 8
-    set statusWidget $rowAction.status
-
-    # ---- log area ----------------------------------------------------------
-    set logFrame [frame $win.logFrame -borderwidth 1 -relief sunken]
-    pack $logFrame -side top -fill both -expand 1 -padx 8 -pady 6
-    set txt [text $logFrame.txt -height 14 -wrap none -state disabled -font TkFixedFont]
-    set sb [scrollbar $logFrame.sb -orient vertical -command [list $txt yview]]
-    $txt configure -yscrollcommand [list $sb set]
-    pack $sb -side right -fill y
-    pack $txt -side left -fill both -expand 1
-    set logWidget $txt
-
-    return $win
+    return $path
 }
 
-#----------------------------------------------------------------------------
-# browse_root
-#   Pick the workflow root folder, then reload the configuration from it.
-#----------------------------------------------------------------------------
-proc ::pis099::gui::browse_root {} {
-    variable rootVar
-
-    if {[llength [info commands tk_chooseDirectory]] == 0} {
-        show_error "Folder selection is not available in this Tcl/Tk build (tk_chooseDirectory is missing)."
-        return 0
+proc ::pis::gui::set_busy {flag} {
+    variable S
+    variable LOCK
+    variable BASE
+    set flag [expr {$flag ? 1 : 0}]
+    dict set S busy $flag
+    if {![dict exists $S top] || ![winfo exists [dict get $S top]]} {
+        return $flag
     }
-
-    set current [string trim $rootVar]
-    if {![file isdirectory $current]} {
-        set current [pwd]
-    }
-
-    set chosen ""
-    if {[catch {tk_chooseDirectory -title "Select the workflow root folder" -initialdir $current -mustexist 1} chosen]} {
-        show_error "Folder selection failed:\n$chosen"
-        return 0
-    }
-    if {$chosen eq ""} {
-        return 0
-    }
-
-    set rootVar [file normalize $chosen]
-    ui_log "Working folder set to: $rootVar"
-    return [reload_config]
-}
-
-#----------------------------------------------------------------------------
-# browse_legend
-#   Pick a legend Tcl file. The choice is stored in the in memory configuration
-#   dictionary only; the .ini file is never modified.
-#----------------------------------------------------------------------------
-proc ::pis099::gui::browse_legend {} {
-    variable cfg
-    variable configLoaded
-    variable legendVar
-
-    if {[llength [info commands tk_getOpenFile]] == 0} {
-        show_error "File selection is not available in this Tcl/Tk build (tk_getOpenFile is missing)."
-        return 0
-    }
-    if {!$configLoaded} {
-        show_error "No configuration is loaded yet. Press Reload Config first, then pick the legend file."
-        return 0
-    }
-
-    set startDir [string trim $legendVar]
-    if {$startDir ne ""} {
-        set startDir [file dirname $startDir]
-    }
-    if {$startDir eq "" || ![file isdirectory $startDir]} {
-        set projectRoot [dict get $cfg root]
-        set startDir [file join $projectRoot 00_config]
-        if {![file isdirectory $startDir]} {
-            set startDir $projectRoot
+    foreach p $LOCK {
+        if {![winfo exists $p]} {
+            continue
         }
-    }
-
-    set chosen ""
-    if {[catch {tk_getOpenFile -title "Select the Contact Pressure legend file" -initialdir $startDir -filetypes [list [list "Tcl legend files" .tcl] [list "All files" *]]} chosen]} {
-        show_error "File selection failed:\n$chosen"
-        return 0
-    }
-    if {$chosen eq ""} {
-        return 0
-    }
-
-    set absLegend [file normalize $chosen]
-    set legendVar $absLegend
-    dict set cfg format legend_file $absLegend
-    ui_log "Legend file override (session only, the .ini file is untouched): $absLegend"
-    return 1
-}
-
-#----------------------------------------------------------------------------
-# reload_config
-#   Reads the configuration file from the folder shown in the working folder
-#   entry, creates the working folders and prefills the legend entry.
-#----------------------------------------------------------------------------
-proc ::pis099::gui::reload_config {} {
-    variable rootVar
-    variable legendVar
-    variable cfg
-    variable configLoaded
-    variable statusWidget
-
-    set rootDir [string trim $rootVar]
-    if {$rootDir eq ""} {
-        show_error "The working folder is empty. Enter the workflow root folder (the folder that contains 00_config and 01_scripts)."
-        return 0
-    }
-    if {![file isdirectory $rootDir]} {
-        show_error "The working folder does not exist or is not a folder:\n$rootDir"
-        return 0
-    }
-
-    set loaded ""
-    if {[catch {::pis::common::load_config $rootDir} loaded]} {
-        ui_log "ERROR configuration not loaded: $loaded"
-        show_error "Cannot load the workflow configuration:\n$loaded"
-        return 0
-    }
-
-    set created ""
-    if {[catch {::pis::common::ensure_directories $loaded} created]} {
-        ui_log "ERROR working folders not created: $created"
-        show_error "Cannot create the workflow folders:\n$created"
-        return 0
-    }
-
-    set cfg $loaded
-    set configLoaded 1
-    set rootDir [dict get $cfg root]
-    set rootVar $rootDir
-
-    set legendPath ""
-    set rc [catch {::pis::common::cfg_path $cfg format legend_file} legendPath]
-    if {$rc} {
-        ui_log "WARNING legend file path cannot be resolved: $legendPath"
-        set legendPath ""
-    }
-    set legendVar $legendPath
-
-    set cfgFile [dict get $cfg config_file]
-    set loadedMsg "Configuration loaded from: $cfgFile"
-    ui_log $loadedMsg
-    if {[llength $created] > 0} {
-        ui_log "Created folders: [join $created {, }]"
-    }
-    catch {::pis::common::log $cfg INFO $loadedMsg} errLog1
-    catch {::pis::common::log $cfg INFO "Legend file from configuration: $legendPath"} errLog2
-
-    if {$statusWidget ne ""} {
-        if {[winfo exists $statusWidget]} {
-            set shortName [file tail $cfgFile]
-            $statusWidget configure -text "Config loaded: $shortName"
-        }
-    }
-    return 1
-}
-
-#----------------------------------------------------------------------------
-# step_settings cfg
-#   Reads workflow run_order and the matching script section and returns a
-#   dict with id, file (absolute), proc and title. Nothing is hard coded.
-#----------------------------------------------------------------------------
-proc ::pis099::gui::step_settings {cfg} {
-    set runOrder [::pis::common::get $cfg workflow run_order]
-    set stepID [string trim [lindex $runOrder 0]]
-    if {$stepID eq ""} {
-        return -code error "The workflow run_order value is empty in the configuration."
-    }
-
-    set section "script_$stepID"
-    if {![dict exists $cfg $section]} {
-        return -code error "The configuration has no step section for step $stepID (expected a section named $section in the .ini file)."
-    }
-
-    set stepEnabled [::pis::common::get $cfg $section enabled]
-    if {![::pis::common::is_true $stepEnabled]} {
-        return -code error "Step $stepID is disabled in the configuration (enabled = $stepEnabled)."
-    }
-
-    set stepFile [::pis::common::get $cfg $section file]
-    set stepProc [::pis::common::get $cfg $section proc]
-    set stepTitle [::pis::common::get $cfg $section title]
-
-    if {[file pathtype $stepFile] eq "absolute"} {
-        set absFile [file normalize $stepFile]
-    } else {
-        set scriptDir [::pis::common::cfg_path $cfg folders script_dir]
-        set absFile [file normalize [file join $scriptDir $stepFile]]
-    }
-
-    return [dict create id $stepID file $absFile proc $stepProc title $stepTitle]
-}
-
-#----------------------------------------------------------------------------
-# load_legend
-#   The single workflow action: source the step script named in the
-#   configuration, then run its procedure through ::pis::common::run_step.
-#----------------------------------------------------------------------------
-proc ::pis099::gui::load_legend {} {
-    variable cfg
-    variable configLoaded
-    variable legendVar
-    variable busy
-    variable statusWidget
-
-    if {$busy} {
-        show_error "A step is already running. Wait until it has finished."
-        return 0
-    }
-    if {!$configLoaded} {
-        show_error "No configuration is loaded. Press Reload Config first."
-        return 0
-    }
-
-    set rawLegend [string trim $legendVar]
-    if {$rawLegend eq ""} {
-        show_error "The legend file path is empty. Use Browse Legend to select a legend Tcl file."
-        ui_log "ERROR Load Legend aborted: the legend file path is empty."
-        return 0
-    }
-
-    set rootDir [dict get $cfg root]
-    set legendPath ""
-    if {[catch {::pis::common::resolve_path $rootDir $rawLegend} legendPath]} {
-        show_error "Cannot resolve the legend file path:\n$legendPath"
-        ui_log "ERROR $legendPath"
-        return 0
-    }
-
-    set stepInfo ""
-    if {[catch {step_settings $cfg} stepInfo]} {
-        show_error "Cannot read the step configuration:\n$stepInfo"
-        ui_log "ERROR step configuration: $stepInfo"
-        return 0
-    }
-    set stepID [dict get $stepInfo id]
-    set stepProc [dict get $stepInfo proc]
-    set stepTitle [dict get $stepInfo title]
-    set stepFile ""
-
-    if {[catch {::pis::common::require_file "Step $stepID script" [dict get $stepInfo file]} stepFile]} {
-        show_error $stepFile
-        ui_log "ERROR $stepFile"
-        return 0
-    }
-    if {[catch {::pis::common::require_file "Legend file" $legendPath} checkedLegend]} {
-        show_error $checkedLegend
-        ui_log "ERROR $checkedLegend"
-        return 0
-    }
-    set legendPath $checkedLegend
-    # session override only - the .ini file is never written
-    dict set cfg format legend_file $legendPath
-    set legendVar $legendPath
-
-    set busy 1
-    if {$statusWidget ne ""} {
-        if {[winfo exists $statusWidget]} {
-            $statusWidget configure -text "Running step $stepID ..."
-        }
-    }
-
-    set startMsg "Starting step $stepID ($stepTitle) with legend file $legendPath"
-    ui_log $startMsg
-    catch {::pis::common::log $cfg INFO $startMsg} errLogStart
-
-    # GUI mode: the step script must not open its own file dialog
-    set ::pis::run_from_gui 1
-    set body [list $stepProc $rootDir $cfg]
-
-    set rc [catch {
-        uplevel #0 [list source $stepFile]
-        if {[llength [info commands $stepProc]] == 0} {
-            error "The procedure $stepProc was not defined after sourcing $stepFile"
-        }
-        set stepResult [::pis::common::run_step $cfg $stepID $stepTitle $body]
-    } stepResult]
-
-    # cleanup in the style of finally: catch plus explicit unset
-    catch {unset -nocomplain ::pis::run_from_gui}
-    set busy 0
-
-    if {$rc} {
-        set failMsg "Step $stepID failed: $stepResult"
-        ui_log "ERROR $failMsg"
-        if {$statusWidget ne ""} {
-            if {[winfo exists $statusWidget]} {
-                $statusWidget configure -text "Step $stepID failed."
+        set state disabled
+        if {!$flag} {
+            set state normal
+            if {[dict exists $BASE $p]} {
+                set state [dict get $BASE $p]
             }
         }
-        show_error $failMsg
-        return 0
+        $p configure -state $state
     }
+    return $flag
+}
 
-    set doneMsg "Step $stepID finished: $stepResult"
-    ui_log $doneMsg
-    catch {::pis::common::log $cfg INFO $doneMsg} errLogDone
-    if {$statusWidget ne ""} {
-        if {[winfo exists $statusWidget]} {
-            $statusWidget configure -text "Step $stepID finished."
+# key | title | mode (radio = exactly one, check = multiple) | extra ("on" = legend switch)
+proc ::pis::gui::module_specs {} {
+    return [list \
+        [dict create key result title "Load result" mode radio extra ""] \
+        [dict create key legend title "Load Legend" mode radio extra on] \
+        [dict create key measures title "Measures" mode check extra ""] \
+        [dict create key section title "Section Cut" mode check extra ""] \
+        [dict create key capture title "Capture" mode check extra ""]]
+}
+
+# Row indexes a module would run: the radio row, or every ticked checkbox row.
+proc ::pis::gui::chosen {key} {
+    variable S
+    if {[dict get $S mode $key] eq "radio"} {
+        set sel [dict get $S sel $key]
+        if {$sel < 0} {
+            return [list]
         }
+        return [list $sel]
     }
-    show_info "Step $stepID\n\n$stepResult"
-    return 1
+    set out [list]
+    set i 0
+    foreach flag [dict get $S checked $key] {
+        if {$flag} {
+            lappend out $i
+        }
+        incr i
+    }
+    return $out
 }
 
-#----------------------------------------------------------------------------
-# ui_log msg
-#   Appends a timestamped line to the read only log widget (last 2000 lines
-#   are kept). Does nothing when the widget is not created yet.
-#----------------------------------------------------------------------------
-proc ::pis099::gui::ui_log {msg} {
-    variable logWidget
-
-    if {$logWidget eq ""} {
-        return 0
-    }
-    if {![winfo exists $logWidget]} {
-        return 0
-    }
-
-    set stamp [::pis::common::timestamp]
-    $logWidget configure -state normal
-    $logWidget insert end "$stamp $msg\n"
-
-    set lineCount [lindex [split [$logWidget index end] .] 0]
-    if {$lineCount > 2000} {
-        $logWidget delete 1.0 500.0
-    }
-    $logWidget see end
-    $logWidget configure -state disabled
-    return 1
-}
-
-#----------------------------------------------------------------------------
-# show_error msg
-#   Error dialog (falls back to the console when Tk is missing).
-#----------------------------------------------------------------------------
-proc ::pis099::gui::show_error {msg} {
-    variable win
-
-    if {[llength [info commands tk_messageBox]] == 0} {
-        catch {puts "ERROR: $msg"}
-        return 0
-    }
-    if {[winfo exists $win]} {
-        catch {tk_messageBox -icon error -title "PIS Workflow" -message $msg -parent $win}
-    } else {
-        catch {tk_messageBox -icon error -title "PIS Workflow" -message $msg}
-    }
-    return 0
-}
-
-#----------------------------------------------------------------------------
-# show_info msg
-#   Information dialog (falls back to the console when Tk is missing).
-#----------------------------------------------------------------------------
-proc ::pis099::gui::show_info {msg} {
-    variable win
-
-    if {[llength [info commands tk_messageBox]] == 0} {
-        catch {puts "INFO: $msg"}
-        return 0
-    }
-    if {[winfo exists $win]} {
-        catch {tk_messageBox -icon info -title "PIS Workflow" -message $msg -parent $win}
-    } else {
-        catch {tk_messageBox -icon info -title "PIS Workflow" -message $msg}
-    }
-    return 0
-}
-
-#----------------------------------------------------------------------------
-# Footer: open the window when Tk is available.
-#   To load the procedures only (no window), set one of these before sourcing:
-#       set ::pis099_no_autolaunch 1            (plain global, always works)
-#       set ::pis099::gui_no_autolaunch 1       (after namespace eval ::pis099 {})
-#----------------------------------------------------------------------------
-if {![info exists ::pis099_no_autolaunch]} {
-    if {![info exists ::pis099::gui_no_autolaunch]} {
-        if {[llength [info commands tk_messageBox]] == 0} {
-            puts "pis099::gui: Tk is not available in this session, source this script from a GUI enabled HyperView session."
+proc ::pis::gui::render {key} {
+    variable S
+    set lb [dict get $S mods $key lb]
+    set check [expr {[dict get $S mode $key] eq "check"}]
+    set flags [dict get $S checked $key]
+    $lb delete 0 end
+    set i 0
+    foreach text [dict get $S items $key] {
+        if {$check && [lindex $flags $i]} {
+            $lb insert end "\[v\] $text"
+        } elseif {$check} {
+            $lb insert end "\[ \] $text"
         } else {
-            if {[catch {::pis099::gui::launch} launchErr]} {
-                catch {puts "ERROR: cannot start the workflow GUI: $launchErr"}
-                catch {tk_messageBox -icon error -title "PIS Workflow" -message "Cannot start the workflow GUI:\n$launchErr"}
-            }
+            $lb insert end $text
         }
+        incr i
     }
+    set sel [dict get $S sel $key]
+    $lb selection clear 0 end
+    if {$sel >= 0 && $sel < [$lb size]} {
+        $lb selection set $sel
+    }
+    return [$lb size]
+}
+
+# Click: radio = select the row; check = toggle its box (row order never changes).
+proc ::pis::gui::click {key x y} {
+    variable S
+    set lb [dict get $S mods $key lb]
+    set idx [$lb nearest $y]
+    if {$idx < 0 || $idx >= [$lb size]} {
+        return 0
+    }
+    if {[dict get $S mode $key] eq "check"} {
+        set flags [dict get $S checked $key]
+        dict set S checked $key [lreplace $flags $idx $idx [expr {![lindex $flags $idx]}]]
+    }
+    dict set S sel $key $idx
+    ::pis::gui::render $key
+    return $idx
+}
+
+proc ::pis::gui::edit_at {key y} {
+    variable S
+    set lb [dict get $S mods $key lb]
+    return [::pis::gui::edit_row $key [$lb nearest $y]]
+}
+
+# [+] inserts below the selected row (or at the end) and edits it immediately (s.5).
+proc ::pis::gui::add_row {key} {
+    variable S
+    set sel [dict get $S sel $key]
+    if {$sel < 0} {
+        set sel [llength [dict get $S items $key]]
+    } else {
+        incr sel
+    }
+    dict set S items $key [linsert [dict get $S items $key] $sel ""]
+    dict set S checked $key [linsert [dict get $S checked $key] $sel 1]
+    dict set S sel $key $sel
+    ::pis::gui::render $key
+    ::pis::gui::edit_row $key $sel
+    return $sel
+}
+
+proc ::pis::gui::del_row {key} {
+    variable S
+    set sel [dict get $S sel $key]
+    if {$sel < 0 || $sel >= [llength [dict get $S items $key]]} {
+        ::pis::gui::log_line WARN "module [dict get $S title $key]: no row selected, nothing removed"
+        return 0
+    }
+    dict set S items $key [lreplace [dict get $S items $key] $sel $sel]
+    dict set S checked $key [lreplace [dict get $S checked $key] $sel $sel]
+    dict set S sel $key -1
+    ::pis::gui::render $key
+    return 1
+}
+
+# Inline edit: one entry placed over the row; Return/FocusOut commit, Escape drops it.
+proc ::pis::gui::edit_row {key index} {
+    variable S
+    variable EDIT
+    set lb [dict get $S mods $key lb]
+    set bb ""
+    if {$index >= 0 && $index < [$lb size]} {
+        set bb [$lb bbox $index]
+    }
+    if {[llength $bb] == 0} {
+        return 0
+    }
+    ::pis::gui::commit $key
+    set e "$lb.edit"
+    if {![winfo exists $e]} {
+        set e [entry $e]
+        bind $e <Return> [list ::pis::gui::commit $key]
+        bind $e <Escape> [list ::pis::gui::edit_cancel $key]
+        bind $e <FocusOut> [list ::pis::gui::commit $key]
+    }
+    $e delete 0 end
+    $e insert 0 [lindex [dict get $S items $key] $index]
+    place $e -in $lb -x [lindex $bb 0] -y [lindex $bb 1] -width [expr {[winfo width $lb] - 6}] -height [lindex $bb 3]
+    focus $e
+    $lb see $index
+    dict set EDIT $key $index
+    return 1
+}
+
+proc ::pis::gui::commit {key} {
+    variable S
+    variable EDIT
+    if {![dict exists $EDIT $key]} {
+        return ""
+    }
+    set idx [dict get $EDIT $key]
+    dict unset EDIT $key
+    set e "[dict get $S mods $key lb].edit"
+    set text [$e get]
+    place forget $e
+    if {$idx >= 0 && $idx < [llength [dict get $S items $key]]} {
+        dict set S items $key [lreplace [dict get $S items $key] $idx $idx $text]
+    }
+    ::pis::gui::render $key
+    return $text
+}
+
+proc ::pis::gui::edit_cancel {key} {
+    variable S
+    variable EDIT
+    place forget "[dict get $S mods $key lb].edit"
+    dict unset EDIT $key
+    ::pis::gui::render $key
+    return 0
+}
+
+# Run seam. T-003 has no execution layer, so a real request is reported as an ERROR naming
+# the module; an empty module is the WARN required by the SPEC error/empty states.
+proc ::pis::gui::run_module {key scope} {
+    variable S
+    ::pis::gui::commit $key
+    set title [dict get $S title $key]
+    if {[llength [::pis::gui::chosen $key]] == 0} {
+        ::pis::gui::log_line WARN "module $title: no item selected, nothing run"
+        return 0
+    }
+    ::pis::gui::log_line ERROR "module $title: execution is not wired yet (frame task T-003, scope $scope)"
+    ::pis::gui::set_status "Error: $title not available yet" red
+    return 0
+}
+
+proc ::pis::gui::not_wired {what} {
+    ::pis::gui::log_line ERROR "$what: not wired yet (frame task T-003)"
+    ::pis::gui::set_status "Error: $what not available yet" red
+    return 0
+}
+
+proc ::pis::gui::clear_log {} {
+    variable S
+    set w [dict get $S log]
+    $w configure -state normal
+    $w delete 1.0 end
+    $w configure -state disabled
+    return 1
+}
+
+# Shared module-list helper (SPEC_gui s.5): the module name IS the run-for-active-window
+# button; then the user-typed list, [+] [-], and one [Apply all layout]. No global Run button.
+proc ::pis::gui::module_block {parent spec} {
+    variable S
+    set key [dict get $spec key]
+    set f [ttk::frame $parent.mod_$key -borderwidth 1 -relief groove -padding 4]
+    set head [ttk::frame $f.head]
+    pack $head -side top -fill x
+    set name [ttk::button $head.run -text [dict get $spec title] -command [list ::pis::gui::run_module $key active]]
+    pack $name -side left -fill x -expand 1
+    if {[dict get $spec extra] eq "on"} {
+        set ::pis::gui::on_$key 1
+        set on [ttk::checkbutton $head.on -text "on" -variable ::pis::gui::on_$key]
+        pack $on -side right -padx {6 0}
+        dict set S on $key $on
+    }
+    set box [ttk::frame $f.box]
+    pack $box -side top -fill both -expand 1 -pady {4 0}
+    set lb [listbox $box.list -height 5 -exportselection 0 -activestyle none -yscrollcommand [list $box.yscroll set] -selectmode [expr {[dict get $spec mode] eq "radio" ? "browse" : "extended"}]]
+    set sb [ttk::scrollbar $box.yscroll -orient vertical -command [list $lb yview]]
+    pack $sb -side right -fill y
+    pack $lb -side left -fill both -expand 1
+    bind $lb <Button-1> [list ::pis::gui::click $key %x %y]
+    bind $lb <Double-Button-1> [list ::pis::gui::edit_at $key %y]
+    set bar [ttk::frame $f.bar]
+    pack $bar -side top -fill x -pady {4 0}
+    set plus [ttk::button $bar.plus -text "+" -width 3 -command [list ::pis::gui::add_row $key]]
+    set minus [ttk::button $bar.minus -text "-" -width 3 -command [list ::pis::gui::del_row $key]]
+    set apply [ttk::button $bar.apply -text "Apply all layout" -command [list ::pis::gui::run_module $key layout]]
+    pack $plus -side left
+    pack $minus -side left -padx {4 0}
+    pack $apply -side right
+    dict set S mods $key [dict create frame $f name $name lb $lb apply $apply]
+    dict set S items $key [list]
+    dict set S checked $key [list]
+    dict set S sel $key -1
+    dict set S mode $key [dict get $spec mode]
+    dict set S title $key [dict get $spec title]
+    ::pis::gui::lock $name
+    ::pis::gui::lock $apply
+    return $f
+}
+
+# Block 0 (SPEC_gui s.4): one model file, one result file per line/window, cols x rows,
+# [Reset (New)], [Load All]. Behaviour arrives with T-006; the buttons say so when clicked.
+proc ::pis::gui::block0 {parent} {
+    variable S
+    set f [ttk::labelframe $parent.block0 -text "0. Load model & results" -padding 4]
+    grid columnconfigure $f 1 -weight 1
+    grid rowconfigure $f 2 -weight 1
+    ttk::label $f.modelLabel -text "Model file"
+    set model [ttk::entry $f.model]
+    set browse [ttk::button $f.modelBrowse -text "..." -width 3 -command [list ::pis::gui::not_wired "Browse model (T-006)"]]
+    grid $f.modelLabel -row 0 -column 0 -sticky w
+    grid $model -row 0 -column 1 -sticky we -padx 4
+    grid $browse -row 0 -column 2 -sticky e
+    ttk::label $f.resLabel -text "Result files (one per line = one window)"
+    grid $f.resLabel -row 1 -column 0 -columnspan 3 -sticky w -pady {6 2}
+    set lb [listbox $f.results -height 5 -exportselection 0 -yscrollcommand [list $f.resScroll set]]
+    set sb [ttk::scrollbar $f.resScroll -orient vertical -command [list $lb yview]]
+    grid $lb -row 2 -column 0 -columnspan 2 -sticky nsew -padx {0 4}
+    grid $sb -row 2 -column 2 -sticky ns
+    set bar [ttk::frame $f.bar]
+    grid $bar -row 3 -column 0 -columnspan 3 -sticky we -pady {6 0}
+    set add [ttk::button $bar.add -text "Add.." -command [list ::pis::gui::not_wired "Add result files (T-006)"]]
+    set cols [ttk::entry $bar.cols -width 3]
+    set rows [ttk::entry $bar.rows -width 3]
+    pack $add -side left
+    pack [ttk::label $bar.layoutLabel -text "Layout"] -side left -padx {12 4}
+    pack $cols -side left
+    pack [ttk::label $bar.x -text "x"] -side left -padx 2
+    pack $rows -side left
+    pack [ttk::label $bar.hint -text "(cols x rows)"] -side left -padx 4
+    set buttons [ttk::frame $f.buttons]
+    grid $buttons -row 4 -column 0 -columnspan 3 -sticky we -pady {6 0}
+    set reset [ttk::button $buttons.reset -text "Reset (New)" -command [list ::pis::gui::not_wired "Reset (New) (T-006)"]]
+    set loadAll [ttk::button $buttons.loadAll -text "Load All" -command [list ::pis::gui::not_wired "Load All (T-006)"]]
+    pack $reset -side left
+    pack $loadAll -side right
+    dict set S block0 [dict create frame $f model $model cols $cols rows $rows results $lb add $add reset $reset loadAll $loadAll]
+    ::pis::gui::lock $loadAll
+    return $f
+}
+
+# The window (SPEC_gui s.3): LEFT = block 0 + five module blocks, RIGHT = log toolbar,
+# log pane, status bar. Resizable: the left column keeps a sane width, the log stretches.
+proc ::pis::gui::build {} {
+    variable S
+    if {[catch {package require Tk} err]} {
+        error "::pis::gui::build needs Tk: $err"
+    }
+    set top .pis_workflow
+    if {[winfo exists $top]} {
+        wm deiconify $top
+        raise $top
+        return $top
+    }
+    set w [toplevel $top]
+    wm title $w "PIS Workflow"
+    wm minsize $w 960 600
+    grid columnconfigure $w 0 -weight 0 -minsize 660
+    grid columnconfigure $w 1 -weight 1
+    grid rowconfigure $w 0 -weight 1
+    set left [ttk::frame $w.left -padding 4]
+    set right [ttk::frame $w.right -padding 4]
+    grid $left -row 0 -column 0 -sticky nsew
+    grid $right -row 0 -column 1 -sticky nsew
+    grid columnconfigure $left 0 -weight 1
+    grid rowconfigure $left 1 -weight 1
+    grid [::pis::gui::block0 $left] -row 0 -column 0 -sticky nsew
+    set mods [ttk::frame $left.mods]
+    grid $mods -row 1 -column 0 -sticky nsew -pady {8 0}
+    grid columnconfigure $mods 0 -weight 1
+    grid columnconfigure $mods 1 -weight 1
+    set i 0
+    foreach spec [::pis::gui::module_specs] {
+        grid [::pis::gui::module_block $mods $spec] -row [expr {$i / 2}] -column [expr {$i % 2}] -sticky nsew -padx {0 6} -pady {0 6}
+        grid rowconfigure $mods [expr {$i / 2}] -weight 1
+        incr i
+    }
+    grid columnconfigure $right 0 -weight 1
+    grid rowconfigure $right 1 -weight 1
+    set bar [ttk::frame $right.bar]
+    grid $bar -row 0 -column 0 -sticky we
+    pack [ttk::button $bar.clear -text "Clear" -command [list ::pis::gui::clear_log]] -side left
+    pack [ttk::button $bar.save -text "Save" -command [list ::pis::gui::not_wired "Save journal (T-012)"]] -side left -padx {4 0}
+    pack [ttk::button $bar.load -text "Load..." -command [list ::pis::gui::not_wired "Load log (T-012)"]] -side left -padx {4 0}
+    set run [ttk::button $bar.run -text "Run log >" -command [list ::pis::gui::not_wired "Run log (T-012)"]]
+    pack $run -side left -padx {4 0}
+    set ::pis::gui::continue_on_error 0
+    pack [ttk::checkbutton $bar.coe -text "continue on error" -variable ::pis::gui::continue_on_error] -side left -padx {12 0}
+    set lf [ttk::frame $right.logframe]
+    grid $lf -row 1 -column 0 -sticky nsew -pady {4 0}
+    grid rowconfigure $lf 0 -weight 1
+    grid columnconfigure $lf 0 -weight 1
+    set log [text $lf.text -wrap none -height 20 -state disabled -font TkFixedFont -background white]
+    set ysb [ttk::scrollbar $lf.yscroll -orient vertical -command [list $log yview]]
+    set xsb [ttk::scrollbar $lf.xscroll -orient horizontal -command [list $log xview]]
+    $log configure -yscrollcommand [list $ysb set] -xscrollcommand [list $xsb set]
+    grid $log -row 0 -column 0 -sticky nsew
+    grid $ysb -row 0 -column 1 -sticky ns
+    grid $xsb -row 1 -column 0 -sticky we
+    foreach pair {info #1f4e79 ok #1e6b28 warn #9a6400 error #a11c1c} {
+        lassign $pair tag color
+        $log tag configure $tag -foreground $color
+    }
+    set status [label $right.status -text "Status: Idle" -anchor w -relief sunken -borderwidth 1 -padx 4]
+    grid $status -row 2 -column 0 -sticky we -pady {4 0}
+    dict set S top $top
+    dict set S log $log
+    dict set S status $status
+    ::pis::gui::lock $run
+    ::pis::gui::log_line INFO "Workflow GUI started (frame only, task T-003)"
+    ::pis::gui::set_status "Idle"
+    return $top
+}
+
+# Sourcing this file opens the window. Set ::pis_gui_autobuild 0 first to load the procs
+# without a display (tests/tcl/test_gui_frame.tcl does exactly that).
+if {![info exists ::pis_gui_autobuild] || $::pis_gui_autobuild} {
+    ::pis::gui::build
 }
