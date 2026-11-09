@@ -1,7 +1,0 @@
-# Normalise line endings in the repository (LF), keep the checkout native.
-* text=auto
-
-*.tcl   text
-*.ini   text
-*.md    text
-*.csv   text
