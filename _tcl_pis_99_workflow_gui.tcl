@@ -590,7 +590,10 @@ proc ::pis::gui::run_block0 {mode} {
         return 1
     }
     set n [llength [dict get $fields result_files]]
-    set msg "Loaded $n result(s) into $res window(s)."
+    # The step order is part of the result line: a Load All that needed order 2 must be
+    # visible in the status bar, not only in the log (SPEC ENV: no silent mode).
+    set msg [format "Loaded %d result(s) into %d window(s), order %d." \
+        $n $res [::pis::hw::order]]
     ::pis::gui::log_line OK "$label: $msg"
     ::pis::gui::set_status $msg darkgreen
     return $res

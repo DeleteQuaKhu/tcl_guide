@@ -21,20 +21,49 @@
 # Sourcing this file defines procs only: it never calls HyperView.
 #
 # One proc per operation, each running an ordered variant list:
-#   ::pis::hw::reset_session {}                    clear the session
-#   ::pis::hw::load_model {path}                   load ONE model into window 1
+#   ::pis::hw::reset_session {}                    clear the session (strict)
+#   ::pis::hw::reset_session_soft {}               same, but an already-empty session passes
+#   ::pis::hw::load_model {path}                   load ONE model into window 1 (k = 1)
+#   ::pis::hw::load_model_in_window {index path}   load ONE model into window <index>
 #   ::pis::hw::make_grid {cols rows}               build the cols x rows window grid
 #   ::pis::hw::load_result_in_window {index path}  result file into window <index>
+#   ::pis::hw::verify_window {index}               read-back: window <index> holds 1 model + 1 result
 #   ::pis::hw::select_window {index}               make window <index> the active one
 #   ::pis::hw::import_legend {path}                import a legend into the active window
 # Console helpers, no file edit needed:
-#   ::pis::hw::use {op n}       try variant n from now on (e.g. ::pis::hw::use make_grid 2)
+#   ::pis::hw::use {op n}       try variant n from now on (e.g. ::pis::hw::use make_grid 2);
+#                               "::pis::hw::use order 2" picks the Load All step ORDER
+#   ::pis::hw::order {}         which Load All sequence is in use (1 or 2)
 #   ::pis::hw::variant {op}     current variant number (1..N)
 #   ::pis::hw::variants {op}    that op's list: n, via, cmd, check, want, src, note
 #   ::pis::hw::table {}         every op -> its variant list
 #   ::pis::hw::help {}          print the table + the use syntax
-#   ::pis::hw::reset_state {}   variants back to 1 (tests)
+#   ::pis::hw::diag {}          ONE line under 80 chars: the variant each step really used
+#   ::pis::hw::reset_state {}   variants + order back to 1 (tests)
 #   ::pis::hw::run {op values}  run an op (the six operations call this)
+#
+# PER-WINDOW LOADING (fix, 2026-11-10): every window is its own client with its OWN model
+# list, so loading the model once into window 1 leaves windows 2..N empty and the result of
+# those windows has no model to attach to. The reference loader this file follows takes the
+# window index as its FIRST argument (conrod/tcl_guide/hv_model_loader.tcl:1428
+# "LoadInputs {winIdx modelPath resultPath ...}", :1483-1486 GetWindowHandle $winIdx ->
+# GetClientHandle, :1497-1498 AddModel, :1526 Draw, :1527-1528 GetModelList) and the batch
+# importer walks windows 1..N the same way (conrod/_tmp_hv/batchImportOdb.tcl:83-87), which
+# is why ::pis::hw::load_model_in_window exists and load_model is only its k = 1 case.
+#
+# TWO STEP ORDERS (variant lists never change for this; the order does):
+#   order 1 (default): reset -> grid -> for k = 1..N: model k, result k
+#   order 2:           reset -> model 1, result 1 -> grid -> for k = 2..N: model k, result k
+# Order 2 exists because some builds drop the models of an existing window when SetLayout
+# rebuilds the page; the read-back after every window decides, the human's ok/fail is the
+# evidence (SPEC.md ENV).
+#
+# RESET, HONESTLY: the delete verb IS sourced for the ACTIVE window - client RemoveAllModels,
+# read out of a working script on this machine (conrod/_tmp_hv/ppt2.tcl:179-190, line 187).
+# No script here proves it on a NON-active window, and the DeleteModel fallback is a guess
+# ("UNVERIFIED-GUESS" in its src). A reset that runs on an ALREADY EMPTY session therefore
+# passes its check without proving anything: that is why ::pis::hw::reset_session_soft
+# (used by Load All) does not stop a run just because the page was empty already.
 # A variant's source is one of: docs/refs/<file section>, the local reference script it was
 # copied from (conrod/..., test/test_out/...), an Altair documentation URL, or the label UNVERIFIED-GUESS (last
 # in its list). No help.altair.com page could be reached on 2026-11-10 (404 / search
@@ -44,6 +73,11 @@
 namespace eval ::pis::hw {
     # Chosen start variant per op, kept across a re-source like the journal buffer.
     if {![info exists adapt_at]} { set adapt_at [dict create] }
+    # What each step REALLY used last time: "op" or "op#<window>" -> variant number, 0 = no
+    # variant worked. ::pis::hw::diag prints this; nothing else reads it.
+    if {![info exists adapt_used]} { set adapt_used [dict create] }
+    # Load All step order (1 or 2), also kept across a re-source.
+    if {![info exists adapt_order]} { set adapt_order 1 }
 }
 
 # --- script builders: the hwi handle API is spelled once, here ------------------------
@@ -115,6 +149,25 @@ catch {@p@R ReleaseHandle}
 set @p@N [llength [@p@C GetModelList]]}
     return "[::pis::hw::window_open psi $win]\n[string map [list @p@ psi] $s]\n[::pis::hw::window_close psi]\nset psiN"
 }
+# One window, read back in ONE probe: "<models>:<resultCtrl>". "1:1" is the only ready
+# answer - exactly one model AND a result controller that really exists (GetResultCtrlHandle
+# raises on a model without a result, and that error is caught here so the answer stays a
+# value). This is the per-window gate Load All uses after loading window k.
+proc ::pis::hw::check_window_ready {win} {
+    set s {set @p@N [llength [@p@C GetModelList]]
+set @p@Ctrl 0
+if {$@p@N == 1} {
+    set @p@Mid [@p@C GetActiveModel]
+    @p@C GetModelHandle @p@M $@p@Mid
+    if {![catch {@p@M GetResultCtrlHandle @p@R}]} {
+        catch {@p@R ReleaseHandle}
+        set @p@Ctrl 1
+    }
+    catch {@p@M ReleaseHandle}
+}
+set @p@Ready "$@p@N:$@p@Ctrl"}
+    return "[::pis::hw::window_open psi $win]\n[string map [list @p@ psi] $s]\n[::pis::hw::window_close psi]\nset psiReady"
+}
 # --- the variant table ----------------------------------------------------------------
 # op -> ordered list of variant dicts, fields:
 #   n     1..N in trial order (start variant = 1 unless ::pis::hw::use moved it)
@@ -125,6 +178,18 @@ set @p@N [llength [@p@C GetModelList]]}
 #   src   where the form comes from; note = what a working variant proves
 proc ::pis::hw::table {} {
     # Body pieces kept as braced literals: no backslash escaping, one command per line.
+    # --- reset bodies ------------------------------------------------------------------
+    # reset_remove: the SOURCED verb. conrod/_tmp_hv/ppt2.tcl:179-190 does exactly this on
+    # the active window (OpenStack -> project -> page [GetActivePage] -> window
+    # [GetActiveWindow] -> client -> client RemoveAllModels -> AddModel -> Draw), so
+    # RemoveAllModels is a real client method on this build; walking every window of the
+    # active page is this adapter's extension and the read-back is what judges it.
+    set reset_remove {
+set pisNW [pisPage GetNumberOfWindows]
+for {set pisWi 1} {$pisWi <= $pisNW} {incr pisWi} {pisPage GetWindowHandle pisWin $pisWi; pisWin GetClientHandle pisC; pisC RemoveAllModels; catch {pisC ReleaseHandle}; catch {pisWin ReleaseHandle}}
+}
+    # reset_page / reset_all: the fallback walk. The walk is sourced
+    # (conrod/_tmp_hv/batchImportOdb.tcl:79-88); the DeleteModel verb is NOT.
     set reset_page {
 set pisNW [pisPage GetNumberOfWindows]
 for {set pisWi 1} {$pisWi <= $pisNW} {incr pisWi} {pisPage GetWindowHandle pisWin $pisWi; pisWin GetClientHandle pisC; foreach pisMi [pisC GetModelList] {if {[string is integer -strict $pisMi] && $pisMi > 0} {pisC DeleteModel $pisMi}}; catch {pisC ReleaseHandle}; catch {pisWin ReleaseHandle}}
@@ -148,20 +213,27 @@ catch {pisM ReleaseHandle}}
     set t [dict create]
     dict set t reset_session [list \
         [dict create n 1 via hwi \
+            cmd "[::pis::hw::stack_open pis]\n$reset_remove\n[::pis::hw::page_close pis]" \
+            check [::pis::hw::check_models_on_page] want 0 \
+            src {conrod/_tmp_hv/ppt2.tcl:179-190 (client RemoveAllModels) + conrod/_tmp_hv/batchImportOdb.tcl:83-87 (windows 1..N walk)} \
+            note {every window of the active page holds 0 models - read back, not assumed. The verb is proven on the ACTIVE window only}] \
+        [dict create n 2 via hwi \
             cmd "[::pis::hw::stack_open pis]\n$reset_page\n[::pis::hw::page_close pis]" \
             check [::pis::hw::check_models_on_page] want 0 \
-            src {conrod/_tmp_hv/batchImportOdb.tcl (page/window walk) + guess: DeleteModel verb} \
-            note {every window of the active page holds 0 models - read back, not assumed}] \
-        [dict create n 2 via hwi \
+            src {conrod/_tmp_hv/batchImportOdb.tcl:83-87 (page/window walk) + UNVERIFIED-GUESS: client DeleteModel <id>} \
+            note {one DeleteModel per model id - the WALK is sourced, the DeleteModel verb is UNVERIFIED-GUESS}] \
+        [dict create n 3 via hwi \
             cmd "[::pis::hw::stack_open pis]\n$reset_all\n[::pis::hw::page_close pis]" \
             check [::pis::hw::check_models_on_page] want 0 \
-            src {conrod/_tmp_hv/batchImportOdb.tcl (pages 1..N walk) + guess: DeleteModel verb} \
-            note {variant 1 applied to every page, not just the active one}] \
-        [dict create n 3 via hwi \
+            src {UNVERIFIED-GUESS: client DeleteModel <id> on pages 1..N (walk from conrod/_tmp_hv/batchImportOdb.tcl:79-88)} \
+            note {variant 2 applied to every page, not just the active one}] \
+        [dict create n 4 via hwi \
             cmd "[::pis::hw::stack_open pis]\nset pisR \[pisS New\]\n[::pis::hw::page_close pis]" \
             check [::pis::hw::check_models_on_page] want 0 \
-            src {UNVERIFIED-GUESS} \
+            src {UNVERIFIED-GUESS: <session> New = File > New} \
             note {the File > New equivalent: no model on the active page left}]]
+    # -- load_model: ONE model into ONE window. Every variant opens window %win, so k > 1
+    # (::pis::hw::load_model_in_window) uses the same list as k = 1.
     dict set t load_model [list \
         [dict create n 1 via hwi \
             cmd "[::pis::hw::window_open pis %win]\npisC AddModel %path\npisC Draw\n[::pis::hw::window_close pis]" \
@@ -340,17 +412,79 @@ proc ::pis::hw::at {op} {
 proc ::pis::hw::variant {op} {
     return [::pis::hw::at $op]
 }
+
+# Which Load All sequence the module must follow: 1 (default) or 2. "order" is not a
+# HyperView operation - it is the ORDER of the six operations - so it is not in the variant
+# table and ::pis::hw::ops never lists it; ::pis::hw::use order <n> picks it.
+proc ::pis::hw::order {} {
+    variable adapt_order
+    return $adapt_order
+}
+
+proc ::pis::hw::orders {} {
+    return 2
+}
+
+proc ::pis::hw::set_order {n} {
+    variable adapt_order
+    if {![string is integer -strict $n] || $n < 1 || $n > [::pis::hw::orders]} {
+        error [format "::pis::hw::use: order has 1..%d values, got: '%s'" \
+            [::pis::hw::orders] $n]
+    }
+    set adapt_order $n
+    if {$n == 2} {
+        set what "window 1 first, then the grid, then windows 2..N"
+    } else {
+        set what "the grid first, then every window 1..N"
+    }
+    ::pis::hw::note INFO [format "adapter order: %d/%d <%s>" $n [::pis::hw::orders] $what]
+    ::pis::hw::status [format "HV order: %d/%d" $n [::pis::hw::orders]]
+    return $n
+}
+
 # Pick the variant to start with, from one short console line: ::pis::hw::use make_grid 2
 # Only this changes the order (SPEC ENV: the human's ok/fail is the evidence), and the line
 # is logged + shown in the status bar, so the choice is never silent.
+# "::pis::hw::use order 2" picks the Load All step order instead (see ::pis::hw::order).
 proc ::pis::hw::use {op n} {
     variable adapt_at
+    if {$op eq "order"} {
+        return [::pis::hw::set_order $n]
+    }
     set v [::pis::hw::variant_of $op $n]
     set total [llength [::pis::hw::variants $op]]
     dict set adapt_at $op $n
     ::pis::hw::note INFO [format "adapter %s: variant %d/%d <%s> (%s)" \
         $op $n $total [::pis::hw::one_line [dict get $v cmd]] [dict get $v src]]
     ::pis::hw::status [format "HV %s: variant %d/%d" $op $n $total]
+    return $n
+}
+
+# " window 2" when the values carry a window number, "" otherwise. The log, the status bar
+# and the error of a per-window step all name the window, so a failure of window k can never
+# be misread as a failure of window 1.
+proc ::pis::hw::window_scope {values} {
+    foreach tok {%win %index} {
+        if {[dict exists $values $tok]} {
+            return [format " window %s" [dict get $values $tok]]
+        }
+    }
+    return ""
+}
+
+# The key ::pis::hw::diag reads a step back with: "load_model#2" for window 2, "make_grid"
+# for the whole-session steps. Two windows of the same op must never overwrite each other.
+proc ::pis::hw::used_key {op values} {
+    foreach tok {%win %index} {
+        if {[dict exists $values $tok]} { return "$op#[dict get $values $tok]" }
+    }
+    return $op
+}
+
+# Remember the variant a step really used (0 = none worked), for ::pis::hw::diag.
+proc ::pis::hw::record {key n} {
+    variable adapt_used
+    dict set adapt_used $key $n
     return $n
 }
 
@@ -367,6 +501,8 @@ proc ::pis::hw::run {op values} {
     set list [::pis::hw::variants $op]
     set total [llength $list]
     set start [::pis::hw::at $op]
+    set key [::pis::hw::used_key $op $values]
+    set scope [::pis::hw::window_scope $values]
     set tried {}
     set lasterr ""
     set n $start
@@ -376,9 +512,9 @@ proc ::pis::hw::run {op values} {
         set src [dict get $v src]
         set via hwi
         if {[dict exists $v via]} { set via [dict get $v via] }
-        ::pis::hw::note INFO [format "%s: variant %d/%d <%s> (%s)" \
-            $op $n $total [::pis::hw::one_line $cmd] $src]
-        ::pis::hw::status [format "HV %s: variant %d/%d" $op $n $total]
+        ::pis::hw::note INFO [format "%s%s: variant %d/%d <%s> (%s)" \
+            $op $scope $n $total [::pis::hw::one_line $cmd] $src]
+        ::pis::hw::status [format "HV %s%s: variant %d/%d" $op $scope $n $total]
         set check ""
         if {[dict exists $v check]} { set check [dict get $v check] }
         # Nothing is journaled before the proof: a command that changed nothing must never
@@ -419,13 +555,15 @@ proc ::pis::hw::run {op values} {
             if {$deferred} {
                 catch {::pis::hw::journal_run $cmd}
             }
+            ::pis::hw::record $key $n
             set tail [expr {$confirmed ? " and confirmed by the read-back" : " (no read-back exists)"}]
             if {$n == $start} {
-                ::pis::hw::note OK [format "%s: variant %d/%d used%s (%s)" $op $n $total $tail $src]
+                ::pis::hw::note OK [format "%s%s: variant %d/%d used%s (%s)" \
+                    $op $scope $n $total $tail $src]
             } else {
                 ::pis::hw::note OK [format \
-                    "%s: variant %d/%d used%s (%s); keep it with: ::pis::hw::use %s %d" \
-                    $op $n $total $tail $src $op $n]
+                    "%s%s: variant %d/%d used%s (%s); keep it with: ::pis::hw::use %s %d" \
+                    $op $scope $n $total $tail $src $op $n]
             }
             return $res
         }
@@ -435,13 +573,21 @@ proc ::pis::hw::run {op values} {
         } else {
             set lasterr [string trim $res]
         }
-        ::pis::hw::note WARN [format "%s: variant %d/%d failed (%s); trying the next one" \
-            $op $n $total $lasterr]
+        ::pis::hw::note WARN [format "%s%s: variant %d/%d failed (%s); trying the next one" \
+            $op $scope $n $total $lasterr]
         incr n
     }
+    # No variant worked. The message names the step, the window (when there is one), the
+    # variant it stopped at and every variant that was tried, so the human can move the start
+    # variant with one console line - and ::pis::hw::diag shows the 0 this step recorded.
+    ::pis::hw::record $key 0
+    set detail $lasterr
+    if {[llength $tried] > 1} {
+        append detail [format " (tried %s)" [join $tried {, }]]
+    }
     error [format \
-        "%s: no variant worked (tried %s). Last error: %s | pick another variant with: ::pis::hw::use %s <n>" \
-        $op [join $tried {, }] $lasterr $op]
+        "%s%s variant %d/%d failed: %s | pick another variant with: ::pis::hw::use %s <n>" \
+        $op $scope $total $total $detail $op]
 }
 # --- the six operations (the only names the modules may call) --------------------------
 # Each one validates its arguments first (one clear message naming the offending value),
@@ -452,11 +598,114 @@ proc ::pis::hw::reset_session {} {
     return [::pis::hw::run reset_session [dict create]]
 }
 
+# Reset for Load All: the same variants, but an ALREADY EMPTY page is not a failure. On an
+# empty session the check ("0 models on the page") passes without proving the delete verb -
+# that is exactly the hole SPEC.md A6/ENV warns about - so this proc asks the read-back once
+# more before it refuses: 0 models left means there was nothing to clear, and stopping a
+# whole Load All over that would be wrong. A page that still holds models keeps the real
+# error, so a build where the delete really fails is still reported.
+proc ::pis::hw::reset_session_soft {} {
+    if {![catch {::pis::hw::run reset_session [dict create]} res]} { return $res }
+    set why [string trim $res]
+    set failed [catch {::pis::hw::probe [::pis::hw::check_models_on_page]} got]
+    if {!$failed && [string trim $got] eq "0"} {
+        ::pis::hw::note WARN \
+            "reset_session: no variant proved the delete, but the page already holds 0 models; Load All continues (the delete verb is UNVERIFIED for a window that is not active)"
+        return 0
+    }
+    error $why
+}
+
+# ONE model into window k. k = 1 is ::pis::hw::load_model and nothing else: every window is
+# its own client with its own model list (conrod/_tmp_hv/batchImportOdb.tcl:83-87 walks the
+# windows this way, conrod/tcl_guide/hv_model_loader.tcl:1428 takes the window index as its
+# first argument), so a model loaded once into window 1 never reaches window 2.
+proc ::pis::hw::load_model_in_window {index path} {
+    if {![string is integer -strict $index] || $index < 1} {
+        error "::pis::hw::load_model_in_window: window index must be a positive integer, got: '$index'"
+    }
+    set p [string trim $path]
+    if {$p eq ""} { error "::pis::hw::load_model_in_window: empty model path" }
+    if {![file isfile $p]} {
+        error "::pis::hw::load_model_in_window: model not found: $p"
+    }
+    return [::pis::hw::run load_model [dict create %path $p %win $index %index $index]]
+}
+
+# k = 1: the one-window case of load_model_in_window, kept because the GUI and the legend
+# module call this name. Nothing else about it is special.
 proc ::pis::hw::load_model {path} {
     set p [string trim $path]
     if {$p eq ""} { error "::pis::hw::load_model: empty model path" }
     if {![file isfile $p]} { error "::pis::hw::load_model: model not found: $p" }
-    return [::pis::hw::run load_model [dict create %path $p %win 1]]
+    return [::pis::hw::load_model_in_window 1 $p]
+}
+
+# Read-back only: window k answers "1:1" (one model AND a result controller), or this proc
+# says what the window really answered. Never journaled - a check is not a step.
+proc ::pis::hw::verify_window {index} {
+    ::pis::hw::need_exec
+    if {![string is integer -strict $index] || $index < 1} {
+        error "::pis::hw::verify_window: window index must be a positive integer, got: '$index'"
+    }
+    set got [::pis::hw::probe [::pis::hw::check_window_ready $index]]
+    if {$got ne "1:1"} {
+        error [format \
+            "window %d is not ready: read-back answered '%s', expected '1:1' (one model and a result controller)" \
+            $index $got]
+    }
+    return 1
+}
+
+# One per-window record as a comma list, oldest window first: the variants load_model (or
+# load_result_in_window) used for windows 1..N, 0 where no variant worked.
+proc ::pis::hw::used_list {op} {
+    variable adapt_used
+    set pat [format {^%s#([0-9]+)$} $op]
+    set wins {}
+    foreach k [dict keys $adapt_used] {
+        if {[regexp $pat $k -> wi]} { lappend wins $wi }
+    }
+    if {[llength $wins] == 0} { return {0} }
+    set out {}
+    foreach wi [lsort -integer $wins] {
+        lappend out [dict get $adapt_used "$op#$wi"]
+    }
+    return $out
+}
+
+# ONE line under 80 characters: the order in use, the variant reset/make_grid used, and the
+# variant each window used for its model and its result (0 = no variant worked). This is the
+# line the human copies back when only ok/fail is possible (ENV).
+proc ::pis::hw::diag {} {
+    variable adapt_used
+    set reset 0
+    if {[dict exists $adapt_used reset_session]} { set reset [dict get $adapt_used reset_session] }
+    set grid 0
+    if {[dict exists $adapt_used make_grid]} { set grid [dict get $adapt_used make_grid] }
+    set head [format "DIAG: order=%d reset=%d grid=%d" [::pis::hw::order] $reset $grid]
+    set models [::pis::hw::used_list load_model]
+    set results [::pis::hw::used_list load_result_in_window]
+    # Both lists line up window by window: the shorter one is padded with 0 (nothing ran
+    # there), so "model=1,1 result=1,0" always means the same two windows.
+    set width [llength $models]
+    if {[llength $results] > $width} { set width [llength $results] }
+    while {[llength $models] < $width} { lappend models 0 }
+    while {[llength $results] < $width} { lappend results 0 }
+    # The line must stay under 80 characters. A layout with more windows than fits drops the
+    # OLDEST windows first (they are the ones already proven) and ".." says the list starts
+    # somewhere else.
+    set cut 0
+    while {$cut <= $width} {
+        set lead [expr {$cut > 0 ? "..," : ""}]
+        set line [format "%s model=%s%s result=%s%s" $head $lead \
+            [join [lrange $models $cut end] ,] $lead [join [lrange $results $cut end] ,]]
+        if {[string length $line] < 80} { break }
+        if {$cut >= $width} { break }
+        incr cut
+    }
+    puts $line
+    return $line
 }
 
 proc ::pis::hw::make_grid {cols rows} {
@@ -501,6 +750,8 @@ proc ::pis::hw::import_legend {path} {
 proc ::pis::hw::help {} {
     puts "PIS HyperView adapter (T-002c): variant 1 is the start, a failing one falls through."
     puts "  A variant only counts as OK when its read-back check proves the session changed."
+    puts [format "  Load All order %d/%d (change it: ::pis::hw::use order <n>)" \
+        [::pis::hw::order] [::pis::hw::orders]]
     foreach op [::pis::hw::ops] {
         set list [::pis::hw::variants $op]
         puts [format "  %-21s at %d/%d" $op [::pis::hw::at $op] [llength $list]]
@@ -514,12 +765,18 @@ proc ::pis::hw::help {} {
         }
     }
     puts "  change one: ::pis::hw::use <op> <n>   e.g. ::pis::hw::use make_grid 2"
+    puts "  what ran last: ::pis::hw::diag   (one line: order, reset, grid and every window)"
     return
 }
 
-# Every op back to its first variant (tests, and a fresh session).
+# Every op back to its first variant, the order back to 1, nothing recorded (tests, and a
+# fresh session).
 proc ::pis::hw::reset_state {} {
     variable adapt_at
+    variable adapt_used
+    variable adapt_order
     set adapt_at [dict create]
+    set adapt_used [dict create]
+    set adapt_order 1
     return
 }

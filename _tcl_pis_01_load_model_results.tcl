@@ -9,6 +9,8 @@
 #   ::pis::step01::need_common {}         | load_all
 #   ::pis::step01::need_adapter {}        | load_all, reset_session
 #   ::pis::step01::call {module item cmd} | load_all, reset_session
+#   ::pis::step01::window_call {k item cmd} | load_window
+#   ::pis::step01::load_window {k model file} | load_all
 #   ::pis::step01::validate {root cfg}    | load_all
 #   ::pis::step01::load_all {cfg}         | ::pis::gui::run_block0
 #   ::pis::step01::reset_session {}       | ::pis::gui::run_block0
@@ -16,6 +18,12 @@
 # Namespace variables later tasks read (the proc ::pis::step01::loaded returns the same
 # value as the variable, so the two can never disagree):
 #   last_result (windows created by the last Load All), loaded (0|1)
+#
+# EACH WINDOW GETS ITS OWN MODEL (fix, 2026-11-10): a window is a client with its own model
+# list, so "load the model once, then put a result in every window" leaves windows 2..N with
+# nothing to attach to. load_window therefore loads the model into window k AND its result
+# into window k, then asks the adapter to read the window back (1 model + 1 result) before
+# the next window starts.
 
 namespace eval ::pis::step01 {
     variable last_result 0
@@ -36,7 +44,8 @@ proc ::pis::step01::need_adapter {} {
     if {[llength [info commands ::pis::hw::exec]] == 0} {
         error "::pis::step01 needs ::pis::hw: source _tcl_pis_10_hw.tcl first (missing ::pis::hw::exec)"
     }
-    foreach name {reset_session load_model make_grid load_result_in_window} {
+    foreach name {reset_session reset_session_soft load_model_in_window \
+                      load_model make_grid load_result_in_window verify_window order} {
         if {[llength [info commands ::pis::hw::$name]] == 0} {
             error "::pis::step01 needs the HyperView adapter: source _tcl_pis_11_hw_adapter.tcl first (missing ::pis::hw::$name)"
         }
@@ -93,9 +102,42 @@ proc ::pis::step01::validate {root cfg} {
     return [dict create model_file $model result_files $files cols $cols rows $rows]
 }
 
+# One step of ONE window: the journal context first (so the comment names the window), then
+# the adapter call. A failure is re-raised with the adapter's own words - that message
+# already names the step, the window and the variants that were tried
+# ("load_model window 2 variant 1/2 failed: ...") - and the SAME text goes to the status bar,
+# so window k failing is visible both in the log and at the bottom of the GUI.
+proc ::pis::step01::window_call {k item cmd} {
+    ::pis::hw::context "Load All" [format "window %d: %s" $k $item]
+    if {[catch {{*}$cmd} res]} {
+        set msg [string trim $res]
+        ::pis::hw::status "Error: $msg"
+        error $msg
+    }
+    return $res
+}
+
+# Window k, in this order and no other: ONE model, then ITS result, then the read-back.
+# The read-back is the point (SPEC.md D2 REVISION): "the call returned" is not evidence on a
+# build that answers an unknown command with silence, so the window must prove it holds
+# exactly one model and one result controller before the next window is touched.
+proc ::pis::step01::load_window {k model file} {
+    window_call $k [file tail $model] [list ::pis::hw::load_model_in_window $k $model]
+    window_call $k [file tail $file] [list ::pis::hw::load_result_in_window $k $file]
+    if {[catch {::pis::hw::verify_window $k} why]} {
+        set msg [format "window %d read-back failed: %s" $k [string trim $why]]
+        ::pis::hw::status "Error: $msg"
+        error $msg
+    }
+    return $k
+}
+
 # Validate first (SPEC.md A6/A7: a rejected input sends nothing and journals nothing), then
-# the four adapter steps in the one order SPEC.md Q1/D2 names: reset the session, load the
-# ONE model, build the cols x rows grid, load result file k into window k.
+# the adapter steps in the order ::pis::hw::order names:
+#   order 1 (default): reset -> grid -> for k = 1..N: model k, result k
+#   order 2:           reset -> window 1 -> grid -> for k = 2..N: model k, result k
+# "Loaded" is only reported when EVERY window passed its own read-back; one failing window
+# stops the run with that window's number, its step name and the variants that were tried.
 # Returns the number of windows (one per result file). The state is opened and closed inside
 # this proc, so a failed run leaves last_result/loaded at 0 and every later module still
 # refuses to apply (SPEC.md error states).
@@ -116,17 +158,34 @@ proc ::pis::step01::load_all {cfg} {
     set base [file tail $model]
     set last_result 0
     set loaded 0
-    ::pis::common::log $cfg INFO [format "Load All: %s + %d result file(s) into %dx%d" \
-        $base $n $cols $rows]
-    call "Load All" "reset session" [list ::pis::hw::reset_session]
-    call "Load All" "model $base" [list ::pis::hw::load_model $model]
-    call "Load All" [format "window grid %dx%d" $cols $rows] \
-        [list ::pis::hw::make_grid $cols $rows]
-    set k 0
-    foreach f $files {
-        incr k
-        call "Load All" [format "window %d: %s" $k [file tail $f]] \
-            [list ::pis::hw::load_result_in_window $k $f]
+    set order [::pis::hw::order]
+    ::pis::common::log $cfg INFO [format "Load All: %s + %d result file(s) into %dx%d (order %d)" \
+        $base $n $cols $rows $order]
+    ::pis::hw::status [format "Load All: order %d, %d window(s)" $order $n]
+    # An ALREADY EMPTY session is not a failure: on an empty page the "0 models" check passes
+    # without proving the delete verb, so ::pis::hw::reset_session_soft keeps the run alive
+    # there and still reports a page that really keeps its models.
+    call "Load All" "reset session" [list ::pis::hw::reset_session_soft]
+    if {$order == 2} {
+        # Window 1 is filled while the page still has the window it starts with, then the
+        # grid is built, then the other windows. Order 2 exists for a build that drops the
+        # models of a rebuilt page; the per-window read-back decides, not the order.
+        load_window 1 $model [lindex $files 0]
+        call "Load All" [format "window grid %dx%d" $cols $rows] \
+            [list ::pis::hw::make_grid $cols $rows]
+        set k 1
+        foreach f [lrange $files 1 end] {
+            incr k
+            load_window $k $model $f
+        }
+    } else {
+        call "Load All" [format "window grid %dx%d" $cols $rows] \
+            [list ::pis::hw::make_grid $cols $rows]
+        set k 0
+        foreach f $files {
+            incr k
+            load_window $k $model $f
+        }
     }
     set last_result $n
     set loaded 1
