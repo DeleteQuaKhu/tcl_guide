@@ -736,7 +736,7 @@ proc ::pis::gui::build {} {
     dict set S log $log
     dict set S status $status
     ::pis::gui::lock $run
-    ::pis::gui::log_line INFO "Workflow GUI started (block 0 + Load Legend wired; tasks T-006, T-007)"
+    ::pis::gui::log_line INFO "BUILD $::pis::BUILD | Workflow GUI started (block 0 + Load Legend wired; tasks T-006, T-007)"
     ::pis::gui::set_status "Idle"
     ::pis::gui::fill_block0 [::pis::gui::fields_from_cfg [::pis::gui::workflow_cfg]]
     return $top

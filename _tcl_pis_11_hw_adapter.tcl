@@ -27,6 +27,8 @@
 #   ::pis::hw::load_model_in_window {index path}   load ONE model into window <index>
 #   ::pis::hw::make_grid {cols rows}               build the cols x rows window grid
 #   ::pis::hw::load_result_in_window {index path}  result file into window <index>
+#   ::pis::hw::verify_grid {cols rows}             read-back: the page has cols*rows windows and
+#                                                  EVERY one of them answers a client handle
 #   ::pis::hw::verify_window {index}               read-back: window <index> holds 1 model + 1 result
 #   ::pis::hw::select_window {index}               make window <index> the active one
 #   ::pis::hw::import_legend {path}                import a legend into the active window
@@ -38,9 +40,18 @@
 #   ::pis::hw::variants {op}    that op's list: n, via, cmd, check, want, src, note
 #   ::pis::hw::table {}         every op -> its variant list
 #   ::pis::hw::help {}          print the table + the use syntax
-#   ::pis::hw::diag {}          ONE line under 80 chars: the variant each step really used
+#   ::pis::hw::diag {}          ONE line under 80 chars: layout, grid, window count, per window
 #   ::pis::hw::reset_state {}   variants + order back to 1 (tests)
 #   ::pis::hw::run {op values}  run an op (the six operations call this)
+#   ::pis::hw::used {op {win}}  variant number that step really used (0 = none worked)
+#   ::pis::hw::build_line {}    the ONE BUILD line (stamp, grid variants, line count)
+#   ::pis::hw::announce {}      print that line to the console and to the GUI log
+#
+# BUILD STAMP (T-006 iteration, 2026-11-10): ::pis::BUILD is a short code written BY HAND
+# when this file changes, e.g. T6c-20261110-1618, so the HyperView machine can be matched to
+# a copy of this file without a guess. Sourcing this file prints ONE line,
+#   BUILD T6c-20261110-1618 | make_grid variants=10 | adapter lines=<n>
+# and every ::pis::hw::diag line starts with the same stamp.
 #
 # PER-WINDOW LOADING (fix, 2026-11-10): every window is its own client with its OWN model
 # list, so loading the model once into window 1 leaves windows 2..N empty and the result of
@@ -78,6 +89,23 @@ namespace eval ::pis::hw {
     if {![info exists adapt_used]} { set adapt_used [dict create] }
     # Load All step order (1 or 2), also kept across a re-source.
     if {![info exists adapt_order]} { set adapt_order 1 }
+    # What the last successful grid really was, for ::pis::hw::diag: the layout as the
+    # "<rows>x<cols>" token the page accepted ("-") and the window count read back from
+    # HyperView (0 = no grid yet). Both are written by ::pis::hw::make_grid ONLY after its
+    # read-back passed, so a failed grid can never look like a good one in diag.
+    if {![info exists adapt_grid]} { set adapt_grid "-" }
+    if {![info exists adapt_wins]} { set adapt_wins 0 }
+    # How many lines THIS copy of the file has (written when it is sourced, below); the BUILD
+    # line prints it so "adapter lines=NNN" is measured, never typed by hand.
+    if {![info exists build_lines]} { set build_lines 0 }
+}
+
+# The build stamp: short code + yyyymmdd-hhmm, written BY HAND when this file changes (the
+# adapter never derives it). The BUILD line and the GUI start line carry the FULL stamp;
+# ::pis::hw::diag carries only the code part (T6c), because the full stamp plus 8 windows of
+# model=/result= lists would not fit in the 80 characters a diag line is allowed to have.
+namespace eval ::pis {
+    variable BUILD "T6c-20261110-1618"
 }
 
 # --- script builders: the hwi handle API is spelled once, here ------------------------
@@ -129,12 +157,59 @@ for {set @p@Wi 1} {$@p@Wi <= $@p@NW} {incr @p@Wi} {@p@Page GetWindowHandle @p@Wi
     return "[::pis::hw::stack_open psi]\n[string map [list @p@ psi] $s]\n[::pis::hw::page_close psi]\nset psiSum"
 }
 
-# Window count of the active page - the grid check. GetNumberOfWindows answers either the
-# count ("8") or the list of window numbers ("1 2 3 4 5 6 7 8"), so it is normalised first.
-proc ::pis::hw::check_window_count {} {
+# The layout token this app asks for: "<rows>x<cols>" (cols 4 rows 2 -> "2x4"). That is the
+# spelling and the meaning the reference loader uses: conrod/tcl_guide/hv_model_loader.tcl:
+# 498-501 (PreferredLayoutToken answers "${r}x${c}") with 457-460 ("'1x2' means 1 row,
+# 2 columns = side by side"). The GUI's field is cols x rows, so the token is NOT the field
+# text: cols 4 rows 1 is "1x4", never "4x1".
+proc ::pis::hw::grid_token {cols rows} {
+    return [format %dx%d $rows $cols]
+}
+
+# The legacy word for this grid, when the reference loader's list has one for this count and
+# arrangement (conrod/tcl_guide/hv_model_loader.tcl:518: single 1x1 2H 2V 3H 3V 4H 4V);
+# "" otherwise, and the variant that needs it then fails with exactly that message.
+proc ::pis::hw::legacy_token {cols rows} {
+    set n [expr {$cols * $rows}]
+    if {$n == 1} { return "single" }
+    if {$n < 2 || $n > 4} { return "" }
+    if {$rows == 1} { return "${n}H" }
+    if {$cols == 1} { return "${n}V" }
+    return ""
+}
+
+# The grid read-back: (a) the page really has <count> windows, and (b) EVERY window k answers
+# a window handle AND a client handle. (a) alone was the hole in the first version of this
+# check: a layout that created the right NUMBER of windows but left the new ones without a
+# plot client passed, and the per-window model load then failed with no hint that the grid was
+# the cause. (b) is the reference way of making a new window usable:
+# conrod/_tmp_hv/batchImportOdb.tcl:130-134 gets a client handle for every window of the page
+# ("add the pane controls"), conrod/_tmp_hv/training.tcl:9,20 sets its client TYPE
+# ('<win> SetClientType Plot').
+# GetNumberOfWindows answers either the count ("8") or the list of window numbers
+# ("1 2 3 4 5 6 7 8"), so it is normalised first - conrod/tcl_guide/hv_model_loader.tcl:
+# 540-544 does the same. A window that cannot be opened RAISES with its own number, so the
+# failure names k instead of only a wrong total.
+proc ::pis::hw::check_grid {count} {
     set s {set @p@W [@p@Page GetNumberOfWindows]
-if {[string is integer -strict $@p@W]} {set @p@N $@p@W} else {set @p@N [llength $@p@W]}}
-    return "[::pis::hw::stack_open psi]\n[string map [list @p@ psi] $s]\n[::pis::hw::page_close psi]\nset psiN"
+if {![string is integer -strict $@p@W]} {set @p@W [llength $@p@W]}
+if {$@p@W != @p@Want} {
+    set @p@Got "wins=$@p@W"
+} else {
+    set @p@Got $@p@W
+    for {set @p@I 1} {$@p@I <= $@p@W} {incr @p@I} {
+        if {[catch {@p@Page GetWindowHandle @p@Win $@p@I}]} {
+            error "window $@p@I: no window handle (the page has $@p@W window(s))"
+        }
+        if {[catch {@p@Win GetClientHandle @p@C}]} {
+            error "window $@p@I: no client handle (the page has $@p@W window(s))"
+        }
+        catch {@p@C ReleaseHandle}
+        catch {@p@Win ReleaseHandle}
+    }
+}}
+    set s [string map [list @p@Want $count] $s]
+    return "[::pis::hw::stack_open psi]\n[string map [list @p@ psi] $s]\n[::pis::hw::page_close psi]\nset psiGot"
 }
 
 # Result attached in one window: a result controller exists for the window's model AND the
@@ -245,27 +320,86 @@ catch {pisM ReleaseHandle}}
             check [::pis::hw::check_models_in_window %win] want 1 \
             src {conrod/tcl_guide/hv_model_loader.tcl (alternate Draw owner) + guess: Draw on the window} \
             note {same model, drawn by the window instead of the client}]]
+    # --- grid bodies ------------------------------------------------------------------
+    # THE LAYOUT TOKEN, read out of the reference scripts (a "T-006 reopened" fix): the token
+    # is "<rows>x<cols>" - hv_model_loader.tcl:498-501 PreferredLayoutToken = "${r}x${c}" with
+    # :457-460 "'1x2' means 1 row, 2 columns = side by side" - and the old variant 1 here sent
+    # "%colsx%rows" instead, i.e. the grid transposed. For 2 windows both spellings happen to
+    # give 2 windows, which is why only the 4-window layouts failed.
+    # THE WALK is sourced: batchImportOdb.tcl:126-134 applies the token with
+    # '<page> SetLayout <token>' and then gets a window handle AND a client handle for every
+    # window ("add the pane controls"); training.tcl:9,20 sets a window's client TYPE
+    # ('<win> SetClientType Plot'), which is how a window created by a layout change becomes a
+    # plot window. Variant 1 does both, variant 2 drops the client type - so a build that
+    # needs it and a build that refuses it are told apart in the log instead of failing blind.
+    # Every call in the walk is caught on purpose: the walk must not be the judge. The
+    # read-back (check_grid) is, and its message carries the count it expected and the window
+    # it could not open - one place to read instead of a Tcl error from the middle of a loop.
+    set grid_walk {
+for {set pisWi 1} {$pisWi <= %count} {incr pisWi} {catch {pisPage GetWindowHandle pisWin $pisWi}; catch {pisWin GetClientHandle pisC}; catch {pisC ReleaseHandle}; catch {pisWin ReleaseHandle}}
+}
+    set grid_plot {
+for {set pisWi 1} {$pisWi <= %count} {incr pisWi} {catch {pisPage GetWindowHandle pisWin $pisWi}; catch {pisWin SetClientType Plot}; catch {pisWin GetClientHandle pisC}; catch {pisC ReleaseHandle}; catch {pisWin ReleaseHandle}}
+}
+    # The legacy word is only for the counts the reference list has (1..4); on any other grid
+    # it is empty and that variant fails with the message below instead of sending an empty
+    # token.
+    set grid_legacy {
+set pisTok %legacy
+if {$pisTok eq ""} {error "no legacy layout word for this grid (only 1..4 windows have one)"}
+pisPage SetLayout $pisTok
+}
     dict set t make_grid [list \
         [dict create n 1 via hwi \
-            cmd "[::pis::hw::stack_open pis]\npisPage SetLayout %colsx%rows\n[::pis::hw::page_close pis]" \
-            check [::pis::hw::check_window_count] want %count \
-            src {conrod/tcl_guide/hv_model_loader.tcl (SetLayout + GetNumberOfWindows)} \
-            note {the page has %count windows: %cols columns by %rows rows}] \
+            cmd "[::pis::hw::stack_open pis]\npisPage SetLayout %grid\n$grid_plot\n[::pis::hw::page_close pis]" \
+            check [::pis::hw::check_grid %count] want %count \
+            src {conrod/tcl_guide/hv_model_loader.tcl:498-501,512 (token "${r}x${c}", rows first) + conrod/_tmp_hv/batchImportOdb.tcl:126-134 (SetLayout + a client handle per window) + conrod/_tmp_hv/training.tcl:9,20 (SetClientType Plot)} \
+            note {%count windows, every one a plot client; token = rows x cols}] \
         [dict create n 2 via hwi \
-            cmd "[::pis::hw::stack_open pis]\npisPage SetLayout %rowsx%cols\n[::pis::hw::page_close pis]" \
-            check [::pis::hw::check_window_count] want %count \
-            src {conrod/tcl_guide/hv_model_loader.tcl (SetLayout, transposed spelling)} \
-            note {same %count windows, the token written rows x cols}] \
+            cmd "[::pis::hw::stack_open pis]\npisPage SetLayout %grid\n$grid_walk\n[::pis::hw::page_close pis]" \
+            check [::pis::hw::check_grid %count] want %count \
+            src {conrod/tcl_guide/hv_model_loader.tcl:512 + conrod/_tmp_hv/batchImportOdb.tcl:126-134} \
+            note {same token, WITHOUT SetClientType: tells "the client type is needed" apart}] \
         [dict create n 3 via hwi \
-            cmd "[::pis::hw::stack_open pis]\npisPage SetLayout {%cols X %rows}\n[::pis::hw::page_close pis]" \
-            check [::pis::hw::check_window_count] want %count \
-            src {conrod/tcl_guide/hv_model_loader.tcl (SetLayout, spaced token)} \
-            note {the token spelled "%cols X %rows"}] \
+            cmd "[::pis::hw::stack_open pis]\npisPage SetLayout %colsx%rows\n$grid_plot\n[::pis::hw::page_close pis]" \
+            check [::pis::hw::check_grid %count] want %count \
+            src {conrod/tcl_guide/hv_model_loader.tcl:512 (transposed spelling) + conrod/_tmp_hv/batchImportOdb.tcl:126-134 + conrod/_tmp_hv/training.tcl:9,20} \
+            note {the token written %cols x %rows instead of rows x cols}] \
         [dict create n 4 via hwi \
-            cmd "[::pis::hw::stack_open pis]\npisPage SetLayout %count\n[::pis::hw::page_close pis]" \
-            check [::pis::hw::check_window_count] want %count \
-            src {conrod/tcl_guide/hv_model_loader.tcl (SetLayout by window count)} \
-            note {the layout named by its window count only}]]
+            cmd "[::pis::hw::stack_open pis]\npisPage SetLayout %colsx%rows\n$grid_walk\n[::pis::hw::page_close pis]" \
+            check [::pis::hw::check_grid %count] want %count \
+            src {conrod/tcl_guide/hv_model_loader.tcl:512 (transposed spelling) + conrod/_tmp_hv/batchImportOdb.tcl:126-134} \
+            note {transposed token, no client type}] \
+        [dict create n 5 via hwi \
+            cmd "[::pis::hw::stack_open pis]\npisPage SetLayout {%rows X %cols}\n$grid_walk\n[::pis::hw::page_close pis]" \
+            check [::pis::hw::check_grid %count] want %count \
+            src {conrod/tcl_guide/hv_model_loader.tcl:512 (the "%rows X %cols" spelling)} \
+            note {the token with spaces around the X}] \
+        [dict create n 6 via hwi \
+            cmd "[::pis::hw::stack_open pis]\npisPage SetLayout {%cols X %rows}\n$grid_walk\n[::pis::hw::page_close pis]" \
+            check [::pis::hw::check_grid %count] want %count \
+            src {conrod/tcl_guide/hv_model_loader.tcl:512 (the "%cols X %rows" spelling)} \
+            note {the spaced token, transposed}] \
+        [dict create n 7 via hwi \
+            cmd "[::pis::hw::stack_open pis]\npisPage SetLayout {%rows x %cols}\n$grid_walk\n[::pis::hw::page_close pis]" \
+            check [::pis::hw::check_grid %count] want %count \
+            src {conrod/tcl_guide/hv_model_loader.tcl:512 (the "%rows x %cols" spelling)} \
+            note {the token with a lower-case x and spaces}] \
+        [dict create n 8 via hwi \
+            cmd "[::pis::hw::stack_open pis]\npisPage SetLayout {%rows - %cols}\n$grid_walk\n[::pis::hw::page_close pis]" \
+            check [::pis::hw::check_grid %count] want %count \
+            src {conrod/tcl_guide/hv_model_loader.tcl:512 (the "%rows - %cols" spelling)} \
+            note {the token with a dash}] \
+        [dict create n 9 via hwi \
+            cmd "[::pis::hw::stack_open pis]\npisPage SetLayout %count\n$grid_walk\n[::pis::hw::page_close pis]" \
+            check [::pis::hw::check_grid %count] want %count \
+            src {conrod/tcl_guide/hv_model_loader.tcl:517 (the plain window count)} \
+            note {the layout named by its window count only (arrangement is the build's)}] \
+        [dict create n 10 via hwi \
+            cmd "[::pis::hw::stack_open pis]\n$grid_legacy\n$grid_walk\n[::pis::hw::page_close pis]" \
+            check [::pis::hw::check_grid %count] want %count \
+            src {conrod/tcl_guide/hv_model_loader.tcl:518 (single 1x1 2H 2V 3H 3V 4H 4V)} \
+            note {the legacy word for 1..4 windows, e.g. %legacy}]]
     dict set t load_result_in_window [list \
         [dict create n 1 via hwi \
             cmd "[::pis::hw::window_open pis %index]\n$result_set\n[::pis::hw::window_close pis]" \
@@ -505,6 +639,7 @@ proc ::pis::hw::run {op values} {
     set scope [::pis::hw::window_scope $values]
     set tried {}
     set lasterr ""
+    set firsterr ""
     set n $start
     while {$n <= $total} {
         set v [lindex $list [expr {$n - 1}]]
@@ -573,6 +708,7 @@ proc ::pis::hw::run {op values} {
         } else {
             set lasterr [string trim $res]
         }
+        if {$firsterr eq ""} { set firsterr $lasterr }
         ::pis::hw::note WARN [format "%s%s: variant %d/%d failed (%s); trying the next one" \
             $op $scope $n $total $lasterr]
         incr n
@@ -581,7 +717,12 @@ proc ::pis::hw::run {op values} {
     # variant it stopped at and every variant that was tried, so the human can move the start
     # variant with one console line - and ::pis::hw::diag shows the 0 this step recorded.
     ::pis::hw::record $key 0
-    set detail $lasterr
+    # The status bar says the same in one short line: which step, which window, and that NO
+    # variant worked. The full message (with every variant tried and the read-back that
+    # refused it) stays in the log line above, so a failing window k is visible in both places.
+    ::pis::hw::status [format "Error: %s%s - no variant worked (%d/%d)" $op $scope $total $total]
+    set detail $firsterr
+    if {$detail eq ""} { set detail $lasterr }
     if {[llength $tried] > 1} {
         append detail [format " (tried %s)" [join $tried {, }]]
     }
@@ -657,6 +798,27 @@ proc ::pis::hw::verify_window {index} {
     return 1
 }
 
+# Read-back only: does the page really show cols x rows windows, and does EVERY one of them
+# answer a window AND a client handle? Returns the window count HyperView reported. Never
+# journaled. ::pis::hw::run already gates a grid on the same check; this proc is the answer
+# the app shows (diag "wins=") and it names the first window that cannot be opened, so a grid
+# that built 4 windows of which 2 have no client is reported as "window 3", not as a total.
+proc ::pis::hw::verify_grid {cols rows} {
+    ::pis::hw::need_exec
+    foreach {label value} [list cols $cols rows $rows] {
+        if {![string is integer -strict $value] || $value < 1} {
+            error "::pis::hw::verify_grid: $label must be a positive integer, got: '$value'"
+        }
+    }
+    set count [expr {$cols * $rows}]
+    set got [string trim [::pis::hw::probe [::pis::hw::check_grid $count]]]
+    if {$got ne $count} {
+        error [format "the page shows %s window(s) instead of %d (%dx%d)" [string trim $got] \
+            $count $cols $rows]
+    }
+    return $got
+}
+
 # One per-window record as a comma list, oldest window first: the variants load_model (or
 # load_result_in_window) used for windows 1..N, 0 where no variant worked.
 proc ::pis::hw::used_list {op} {
@@ -674,16 +836,34 @@ proc ::pis::hw::used_list {op} {
     return $out
 }
 
-# ONE line under 80 characters: the order in use, the variant reset/make_grid used, and the
-# variant each window used for its model and its result (0 = no variant worked). This is the
-# line the human copies back when only ok/fail is possible (ENV).
+# The variant number one step really used: ::pis::hw::used reset_session, or
+# ::pis::hw::used load_model 3 for window 3 (a step that ran in a window is recorded under
+# "<op>#<window>"). 0 means no variant worked - the same 0 ::pis::hw::diag prints, so a
+# helper script can report "variant 2/10" without parsing a log line.
+proc ::pis::hw::used {op {index ""}} {
+    variable adapt_used
+    set key $op
+    if {[string trim $index] ne ""} { set key "$op#[string trim $index]" }
+    if {![dict exists $adapt_used $key]} { return 0 }
+    return [dict get $adapt_used $key]
+}
+
+# ONE line under 80 characters: the layout, the variant the grid used, how many windows
+# HyperView really shows, and the variant each window used for its model and its result
+# (0 = no variant worked). This is the line the human copies back when only ok/fail is
+# possible (ENV), so the shape is fixed:
+#   DIAG T6c: layout=2x2 grid=1 wins=4 model=1,1,0,0 result=1,1,0,0
+# The short build code comes first (::pis::hw::build_code; the BUILD line has the full stamp),
+# so the human's copy-back names the copy of this file that produced the line.
+# "layout" is the "<rows>x<cols>" token of the last GOOD grid ("-" while none has succeeded);
+# "wins" is the window count read back from the page, never the count this app asked for.
 proc ::pis::hw::diag {} {
     variable adapt_used
-    set reset 0
-    if {[dict exists $adapt_used reset_session]} { set reset [dict get $adapt_used reset_session] }
+    variable adapt_grid
+    variable adapt_wins
     set grid 0
     if {[dict exists $adapt_used make_grid]} { set grid [dict get $adapt_used make_grid] }
-    set head [format "DIAG: order=%d reset=%d grid=%d" [::pis::hw::order] $reset $grid]
+    set head [format "DIAG %s: layout=%s grid=%d wins=%d" [::pis::hw::build_code] $adapt_grid $grid $adapt_wins]
     set models [::pis::hw::used_list load_model]
     set results [::pis::hw::used_list load_result_in_window]
     # Both lists line up window by window: the shorter one is padded with 0 (nothing ran
@@ -709,13 +889,28 @@ proc ::pis::hw::diag {} {
 }
 
 proc ::pis::hw::make_grid {cols rows} {
+    variable adapt_grid
+    variable adapt_wins
     foreach {label value} [list cols $cols rows $rows] {
         if {![string is integer -strict $value] || $value < 1} {
             error "::pis::hw::make_grid: $label must be a positive integer, got: '$value'"
         }
     }
-    return [::pis::hw::run make_grid \
-        [dict create %cols $cols %rows $rows %count [expr {$cols * $rows}]]]
+    set count [expr {$cols * $rows}]
+    # A grid that fails must never look like a good one in diag: the window count is cleared
+    # before the variants run and written again only after the read-back below passed.
+    set adapt_wins 0
+    ::pis::hw::run make_grid [dict create \
+        %cols $cols %rows $rows %count $count \
+        %grid [::pis::hw::grid_token $cols $rows] \
+        %legacy [::pis::hw::legacy_token $cols $rows]]
+    # The run proved the grid through check_grid already; this second read-back (never
+    # journaled - a check is not a step) is what the app REPORTS and what diag prints, so the
+    # number in "wins=" is HyperView's own answer, not the number this file asked for.
+    set wins [::pis::hw::verify_grid $cols $rows]
+    set adapt_grid [::pis::hw::grid_token $cols $rows]
+    set adapt_wins $wins
+    return $wins
 }
 
 proc ::pis::hw::load_result_in_window {index path} {
@@ -765,7 +960,7 @@ proc ::pis::hw::help {} {
         }
     }
     puts "  change one: ::pis::hw::use <op> <n>   e.g. ::pis::hw::use make_grid 2"
-    puts "  what ran last: ::pis::hw::diag   (one line: order, reset, grid and every window)"
+    puts "  what ran last: ::pis::hw::diag   (one line: layout, grid, wins and every window)"
     return
 }
 
@@ -775,8 +970,61 @@ proc ::pis::hw::reset_state {} {
     variable adapt_at
     variable adapt_used
     variable adapt_order
+    variable adapt_grid
+    variable adapt_wins
     set adapt_at [dict create]
     set adapt_used [dict create]
     set adapt_order 1
+    set adapt_grid "-"
+    set adapt_wins 0
     return
 }
+
+# --- build stamp: ONE line, printed when this file is sourced -------------------------
+# The line answers the first question on a HyperView machine ("which copy is this?"):
+#   BUILD T6c-20261110-1618 | make_grid variants=10 | adapter lines=NNN
+# The line count is measured from the file itself at source time (below), so it cannot go
+# stale the way a hand-written number would.
+proc ::pis::hw::build_line {} {
+    variable build_lines
+    set stamp "no-stamp"
+    if {[info exists ::pis::BUILD]} { set stamp $::pis::BUILD }
+    set n 0
+    catch { set n [llength [::pis::hw::variants make_grid]] }
+    return [format "BUILD %s | make_grid variants=%d | adapter lines=%d" $stamp $n $build_lines]
+}
+
+# The code part of the stamp (T6c in T6c-20261110-1618): what a DIAG line starts with. The
+# time part only fits in the BUILD line - see the note at ::pis::BUILD.
+proc ::pis::hw::build_code {} {
+    set stamp "no-stamp"
+    if {[info exists ::pis::BUILD]} { set stamp $::pis::BUILD }
+    set i [string first "-" $stamp]
+    if {$i > 0} { return [string range $stamp 0 [expr {$i - 1}]] }
+    return $stamp
+}
+
+# Console + GUI log, exactly one line each. The console always gets it (puts); the GUI pane
+# gets it through ::pis::gui::log_line when the GUI has already built its log widget - the
+# GUI's own start line carries the same stamp, so a GUI started before the adapter was
+# sourced still shows which build it runs.
+proc ::pis::hw::announce {} {
+    set line [::pis::hw::build_line]
+    puts $line
+    if {[llength [info commands ::pis::gui::log_line]] > 0} {
+        catch {::pis::gui::log_line INFO $line}
+    }
+    return $line
+}
+
+# Measure this copy, then print the BUILD line. info script is the file being sourced HERE,
+# so the count is of the adapter, not of whatever sourced it.
+if {[catch {
+    set _pis_bh [open [info script] r]
+    set _pis_bt [read $_pis_bh]
+    close $_pis_bh
+    set ::pis::hw::build_lines [llength [split [string trimright $_pis_bt "\n"] "\n"]]
+}]} {
+    set ::pis::hw::build_lines 0
+}
+::pis::hw::announce
