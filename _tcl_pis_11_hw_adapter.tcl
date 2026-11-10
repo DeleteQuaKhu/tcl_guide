@@ -27,8 +27,9 @@
 #   ::pis::hw::load_model_in_window {index path}   load ONE model into window <index>
 #   ::pis::hw::make_grid {cols rows}               build the cols x rows window grid
 #   ::pis::hw::load_result_in_window {index path}  result file into window <index>
-#   ::pis::hw::verify_grid {cols rows}             read-back: the page has cols*rows windows and
-#                                                  EVERY one of them answers a client handle
+#   ::pis::hw::verify_grid {cols rows}             read-back: the page has cols*rows windows, and
+#                                                  EVERY one answers a client handle AND is a
+#                                                  HyperView client (it answers GetModelList)
 #   ::pis::hw::verify_window {index}               read-back: window <index> holds 1 model + 1 result
 #   ::pis::hw::select_window {index}               make window <index> the active one
 #   ::pis::hw::import_legend {path}                import a legend into the active window
@@ -41,6 +42,9 @@
 #   ::pis::hw::table {}         every op -> its variant list
 #   ::pis::hw::help {}          print the table + the use syntax
 #   ::pis::hw::diag {}          ONE line under 80 chars: layout, grid, window count, per window
+#                               the variant used and the client letter (H|P|?)
+#   ::pis::hw::clients {}       per-window client letter: H = HyperView, P = chart (Plot), ? =
+#                               cannot tell (INFERRED from GetModelList - no GetClientType here)
 #   ::pis::hw::reset_state {}   variants + order back to 1 (tests)
 #   ::pis::hw::run {op values}  run an op (the six operations call this)
 #   ::pis::hw::used {op {win}}  variant number that step really used (0 = none worked)
@@ -48,10 +52,10 @@
 #   ::pis::hw::announce {}      print that line to the console and to the GUI log
 #
 # BUILD STAMP (T-006 iteration, 2026-11-10): ::pis::BUILD is a short code written BY HAND
-# when this file changes, e.g. T6c-20261110-1618, so the HyperView machine can be matched to
+# when this file changes, e.g. T6d-20261110-1642, so the HyperView machine can be matched to
 # a copy of this file without a guess. Sourcing this file prints ONE line,
-#   BUILD T6c-20261110-1618 | make_grid variants=10 | adapter lines=<n>
-# and every ::pis::hw::diag line starts with the same stamp.
+#   BUILD T6d-20261110-1642 | make_grid variants=8 | adapter lines=<n>
+# and every ::pis::hw::diag line starts with the same stamp (the time part only fits there).
 #
 # PER-WINDOW LOADING (fix, 2026-11-10): every window is its own client with its OWN model
 # list, so loading the model once into window 1 leaves windows 2..N empty and the result of
@@ -61,6 +65,22 @@
 # GetClientHandle, :1497-1498 AddModel, :1526 Draw, :1527-1528 GetModelList) and the batch
 # importer walks windows 1..N the same way (conrod/_tmp_hv/batchImportOdb.tcl:83-87), which
 # is why ::pis::hw::load_model_in_window exists and load_model is only its k = 1 case.
+#
+# CLIENT TYPE - THE ESCAPED T-006 DEFECT (owner report, 2026-11-10: "sau Load All, các window là
+# HyperGraph 2D, không phải HyperView"). This file used to set a client type on every new
+# window: '<win> SetClientType Plot', copied from conrod/_tmp_hv/training.tcl:9,20. Read that
+# script's own header (:1 and :13): "将第三页的第三个窗口客户端设置成曲线图" = "set the client of
+# the 3rd window of page 3 to a CURVE CHART". It is a chart exercise, so Plot is the
+# HyperGraph 2D client - the exact opposite of a window that must show a model and a contour.
+# Consequences, all applied here:
+#   1. NO variant sets a client type any more (the two that did are gone from make_grid).
+#   2. The grid read-back REFUSES a window that cannot hold a model - a chart window answers a
+#      client handle too, which is why the old check (client handle only) passed it.
+#   3. Nothing guesses a way back to a HyperView window: GetClientType appears in NO script on
+#      this machine and no script sets a window back, so reset only offers what is sourced
+#      (<session> New, marked UNVERIFIED-GUESS) and a grid that meets a chart window says so.
+# The working reference loader agrees: SetLayout, GetClientHandle, AddModel - no client type
+# call anywhere (conrod/tcl_guide/hv_model_loader.tcl:1179-1180, :1329-1337, :1485-1498).
 #
 # TWO STEP ORDERS (variant lists never change for this; the order does):
 #   order 1 (default): reset -> grid -> for k = 1..N: model k, result k
@@ -102,10 +122,10 @@ namespace eval ::pis::hw {
 
 # The build stamp: short code + yyyymmdd-hhmm, written BY HAND when this file changes (the
 # adapter never derives it). The BUILD line and the GUI start line carry the FULL stamp;
-# ::pis::hw::diag carries only the code part (T6c), because the full stamp plus 8 windows of
-# model=/result= lists would not fit in the 80 characters a diag line is allowed to have.
+# ::pis::hw::diag carries only the code part (T6d), because the full stamp plus 8 windows of
+# model=/result=/client= lists would not fit in the 80 characters a diag line is allowed.
 namespace eval ::pis {
-    variable BUILD "T6c-20261110-1618"
+    variable BUILD "T6d-20261110-1642"
 }
 
 # --- script builders: the hwi handle API is spelled once, here ------------------------
@@ -149,11 +169,16 @@ proc ::pis::hw::check_models_in_window {win} {
     return "[::pis::hw::window_open psi $win]\n[string map [list @p@ psi] $s]\n[::pis::hw::window_close psi]\nset psiN"
 }
 
-# Models in every window of the active page - the reset check.
+# Models in every window of the active page - the reset check. A window that answers NO model
+# list is a CHART window (client type Plot, conrod/_tmp_hv/training.tcl:9,20): it cannot hold a
+# model, so it counts as 0 models here and does not fail the delete step - the GRID read-back
+# is where such a window is an error, because that is the step that promises HyperView windows.
+# GetClientType is used by no script on this machine, so the type is never read by name.
 proc ::pis::hw::check_models_on_page {} {
     set s {set @p@NW [@p@Page GetNumberOfWindows]
+if {![string is integer -strict $@p@NW]} {set @p@NW [llength $@p@NW]}
 set @p@Sum 0
-for {set @p@Wi 1} {$@p@Wi <= $@p@NW} {incr @p@Wi} {@p@Page GetWindowHandle @p@Win $@p@Wi; @p@Win GetClientHandle @p@C; incr @p@Sum [llength [@p@C GetModelList]]; catch {@p@C ReleaseHandle}; catch {@p@Win ReleaseHandle}}}
+for {set @p@Wi 1} {$@p@Wi <= $@p@NW} {incr @p@Wi} {catch {@p@Page GetWindowHandle @p@Win $@p@Wi}; catch {@p@Win GetClientHandle @p@C}; if {![catch {@p@C GetModelList} @p@Ml]} {incr @p@Sum [llength $@p@Ml]}; catch {@p@C ReleaseHandle}; catch {@p@Win ReleaseHandle}}}
     return "[::pis::hw::stack_open psi]\n[string map [list @p@ psi] $s]\n[::pis::hw::page_close psi]\nset psiSum"
 }
 
@@ -178,14 +203,18 @@ proc ::pis::hw::legacy_token {cols rows} {
     return ""
 }
 
-# The grid read-back: (a) the page really has <count> windows, and (b) EVERY window k answers
-# a window handle AND a client handle. (a) alone was the hole in the first version of this
-# check: a layout that created the right NUMBER of windows but left the new ones without a
-# plot client passed, and the per-window model load then failed with no hint that the grid was
-# the cause. (b) is the reference way of making a new window usable:
-# conrod/_tmp_hv/batchImportOdb.tcl:130-134 gets a client handle for every window of the page
-# ("add the pane controls"), conrod/_tmp_hv/training.tcl:9,20 sets its client TYPE
-# ('<win> SetClientType Plot').
+# The grid read-back, three questions per window k, in this order:
+#   (a) does the page really have <count> windows,
+#   (b) does window k answer a window handle AND a client handle, and
+#   (c) is that client a HYPERVIEW client - can it hold a model at all?
+# (c) is the gate for the T-006 escaped defect. The old check stopped at (b), and a chart window
+# (client type Plot, conrod/_tmp_hv/training.tcl:9,20) answers a client handle too - so a whole
+# grid of HyperGraph 2D windows passed and the model then "loaded" nowhere. GetClientType is used
+# by no script on this machine, so the type is NOT read back by name: 'client GetModelList' is
+# what every HyperView window here answers (conrod/_tmp_hv/batchImportOdb.tcl:111,
+# conrod/tcl_guide/hv_model_loader.tcl:1497-1498 with :1527-1528) and a chart client raises
+# instead. The error names the window and the type it acts like:
+#   make_grid: window 3 is not a HyperView window (client type plot)
 # GetNumberOfWindows answers either the count ("8") or the list of window numbers
 # ("1 2 3 4 5 6 7 8"), so it is normalised first - conrod/tcl_guide/hv_model_loader.tcl:
 # 540-544 does the same. A window that cannot be opened RAISES with its own number, so the
@@ -202,7 +231,10 @@ if {$@p@W != @p@Want} {
             error "window $@p@I: no window handle (the page has $@p@W window(s))"
         }
         if {[catch {@p@Win GetClientHandle @p@C}]} {
-            error "window $@p@I: no client handle (the page has $@p@W window(s))"
+            error "make_grid: window $@p@I is not a HyperView window (client type ?: it answers no client handle)"
+        }
+        if {[catch {@p@C GetModelList}]} {
+            error "make_grid: window $@p@I is not a HyperView window (client type plot)"
         }
         catch {@p@C ReleaseHandle}
         catch {@p@Win ReleaseHandle}
@@ -243,6 +275,44 @@ if {$@p@N == 1} {
 set @p@Ready "$@p@N:$@p@Ctrl"}
     return "[::pis::hw::window_open psi $win]\n[string map [list @p@ psi] $s]\n[::pis::hw::window_close psi]\nset psiReady"
 }
+
+# The client letter of every window of the active page, asked with the same question the grid
+# check uses: H = a HyperView client (it answered GetModelList), P = a chart client (it did
+# not), ? = the window or its client could not be opened at all. Comma list, window 1 first.
+# GetClientType is in NO script on this machine, so this is an INFERENCE from behaviour, not a
+# type string - ::pis::hw::diag prints it as client=H,H,.. so one chart window among HyperView
+# ones is visible in the single line the human copies back.
+proc ::pis::hw::check_clients {} {
+    set s {set @p@N [@p@Page GetNumberOfWindows]
+if {![string is integer -strict $@p@N]} {set @p@N [llength $@p@N]}
+set @p@Out {}
+for {set @p@I 1} {$@p@I <= $@p@N} {incr @p@I} {
+    set @p@T ?
+    if {![catch {@p@Page GetWindowHandle @p@Win $@p@I}]} {
+        if {![catch {@p@Win GetClientHandle @p@C}]} {
+            if {![catch {@p@C GetModelList}]} {set @p@T H} else {set @p@T P}
+            catch {@p@C ReleaseHandle}
+        }
+        catch {@p@Win ReleaseHandle}
+    }
+    lappend @p@Out $@p@T
+}
+set @p@Out}
+    return "[::pis::hw::stack_open psi]\n[string map [list @p@ psi] $s]\n[::pis::hw::page_close psi]\nset psiOut"
+}
+
+# "H,H,P" for the windows of the active page, or "" when the session cannot be asked (no
+# wrapper, no HyperView, a probe that raised). Never raises: ::pis::hw::diag must always print
+# its one line, even after a failed step.
+proc ::pis::hw::clients {} {
+    if {[llength [info commands ::pis::hw::exec_hwi]] == 0 || \
+            [llength [info commands ::pis::hw::probe]] == 0} {
+        return ""
+    }
+    if {[catch {::pis::hw::probe [::pis::hw::check_clients]} got]} { return "" }
+    return [string trim $got]
+}
+
 # --- the variant table ----------------------------------------------------------------
 # op -> ordered list of variant dicts, fields:
 #   n     1..N in trial order (start variant = 1 unless ::pis::hw::use moved it)
@@ -321,25 +391,29 @@ catch {pisM ReleaseHandle}}
             src {conrod/tcl_guide/hv_model_loader.tcl (alternate Draw owner) + guess: Draw on the window} \
             note {same model, drawn by the window instead of the client}]]
     # --- grid bodies ------------------------------------------------------------------
-    # THE LAYOUT TOKEN, read out of the reference scripts (a "T-006 reopened" fix): the token
-    # is "<rows>x<cols>" - hv_model_loader.tcl:498-501 PreferredLayoutToken = "${r}x${c}" with
-    # :457-460 "'1x2' means 1 row, 2 columns = side by side" - and the old variant 1 here sent
-    # "%colsx%rows" instead, i.e. the grid transposed. For 2 windows both spellings happen to
-    # give 2 windows, which is why only the 4-window layouts failed.
+    # THE LAYOUT TOKEN, read out of the reference scripts: the token is "<rows>x<cols>" -
+    # hv_model_loader.tcl:498-501 PreferredLayoutToken = "${r}x${c}" with :457-460 "'1x2' means
+    # 1 row, 2 columns = side by side" - and an earlier variant here sent "%colsx%rows" instead,
+    # i.e. the grid transposed. For 2 windows both spellings happen to give 2 windows, which is
+    # why only the 4-window layouts failed.
     # THE WALK is sourced: batchImportOdb.tcl:126-134 applies the token with
     # '<page> SetLayout <token>' and then gets a window handle AND a client handle for every
-    # window ("add the pane controls"); training.tcl:9,20 sets a window's client TYPE
-    # ('<win> SetClientType Plot'), which is how a window created by a layout change becomes a
-    # plot window. Variant 1 does both, variant 2 drops the client type - so a build that
-    # needs it and a build that refuses it are told apart in the log instead of failing blind.
+    # window ("add the pane controls").
+    # NO VARIANT SETS A CLIENT TYPE. '<win> SetClientType Plot' exists in exactly one script on
+    # this machine, conrod/_tmp_hv/training.tcl:9,20, and that script's own header calls it
+    # "set the 3rd window of page 3 to a CURVE CHART" - it is how a window becomes a HyperGraph
+    # 2D chart, i.e. the defect the owner reported after Load All. The working reference loader
+    # does what the walk below does and nothing else (hv_model_loader.tcl:1179-1180 SetLayout,
+    # :1329-1337 GetClientHandle + AddModel + Draw, :1485-1498 the per-window load).
+    # There is also NO variant carrying a HyperView client type: no script on this machine
+    # passes any value to SetClientType, so a HyperView value would be a guess - and a guess is
+    # exactly what produced this defect.
     # Every call in the walk is caught on purpose: the walk must not be the judge. The
     # read-back (check_grid) is, and its message carries the count it expected and the window
-    # it could not open - one place to read instead of a Tcl error from the middle of a loop.
+    # it could not open or that turned out to be a chart - one place to read instead of a Tcl
+    # error from the middle of a loop.
     set grid_walk {
 for {set pisWi 1} {$pisWi <= %count} {incr pisWi} {catch {pisPage GetWindowHandle pisWin $pisWi}; catch {pisWin GetClientHandle pisC}; catch {pisC ReleaseHandle}; catch {pisWin ReleaseHandle}}
-}
-    set grid_plot {
-for {set pisWi 1} {$pisWi <= %count} {incr pisWi} {catch {pisPage GetWindowHandle pisWin $pisWi}; catch {pisWin SetClientType Plot}; catch {pisWin GetClientHandle pisC}; catch {pisC ReleaseHandle}; catch {pisWin ReleaseHandle}}
 }
     # The legacy word is only for the counts the reference list has (1..4); on any other grid
     # it is empty and that variant fails with the message below instead of sending an empty
@@ -351,51 +425,41 @@ pisPage SetLayout $pisTok
 }
     dict set t make_grid [list \
         [dict create n 1 via hwi \
-            cmd "[::pis::hw::stack_open pis]\npisPage SetLayout %grid\n$grid_plot\n[::pis::hw::page_close pis]" \
-            check [::pis::hw::check_grid %count] want %count \
-            src {conrod/tcl_guide/hv_model_loader.tcl:498-501,512 (token "${r}x${c}", rows first) + conrod/_tmp_hv/batchImportOdb.tcl:126-134 (SetLayout + a client handle per window) + conrod/_tmp_hv/training.tcl:9,20 (SetClientType Plot)} \
-            note {%count windows, every one a plot client; token = rows x cols}] \
-        [dict create n 2 via hwi \
             cmd "[::pis::hw::stack_open pis]\npisPage SetLayout %grid\n$grid_walk\n[::pis::hw::page_close pis]" \
             check [::pis::hw::check_grid %count] want %count \
-            src {conrod/tcl_guide/hv_model_loader.tcl:512 + conrod/_tmp_hv/batchImportOdb.tcl:126-134} \
-            note {same token, WITHOUT SetClientType: tells "the client type is needed" apart}] \
-        [dict create n 3 via hwi \
-            cmd "[::pis::hw::stack_open pis]\npisPage SetLayout %colsx%rows\n$grid_plot\n[::pis::hw::page_close pis]" \
-            check [::pis::hw::check_grid %count] want %count \
-            src {conrod/tcl_guide/hv_model_loader.tcl:512 (transposed spelling) + conrod/_tmp_hv/batchImportOdb.tcl:126-134 + conrod/_tmp_hv/training.tcl:9,20} \
-            note {the token written %cols x %rows instead of rows x cols}] \
-        [dict create n 4 via hwi \
+            src {conrod/tcl_guide/hv_model_loader.tcl:498-501,512,1179-1180 (token "${r}x${c}", rows first, SetLayout then GetClientHandle) + conrod/_tmp_hv/batchImportOdb.tcl:126-134 (a client handle for every window)} \
+            note {%count windows, every one a HYPERVIEW client (no SetClientType: training.tcl:9,20 would make a chart); token = rows x cols}] \
+        [dict create n 2 via hwi \
             cmd "[::pis::hw::stack_open pis]\npisPage SetLayout %colsx%rows\n$grid_walk\n[::pis::hw::page_close pis]" \
             check [::pis::hw::check_grid %count] want %count \
-            src {conrod/tcl_guide/hv_model_loader.tcl:512 (transposed spelling) + conrod/_tmp_hv/batchImportOdb.tcl:126-134} \
-            note {transposed token, no client type}] \
-        [dict create n 5 via hwi \
+            src {conrod/tcl_guide/hv_model_loader.tcl:512 (the transposed spelling of a "RxC" token, :457-460) + conrod/_tmp_hv/batchImportOdb.tcl:126-134} \
+            note {the token written %cols x %rows instead of rows x cols}] \
+        [dict create n 3 via hwi \
             cmd "[::pis::hw::stack_open pis]\npisPage SetLayout {%rows X %cols}\n$grid_walk\n[::pis::hw::page_close pis]" \
             check [::pis::hw::check_grid %count] want %count \
             src {conrod/tcl_guide/hv_model_loader.tcl:512 (the "%rows X %cols" spelling)} \
             note {the token with spaces around the X}] \
-        [dict create n 6 via hwi \
+        [dict create n 4 via hwi \
             cmd "[::pis::hw::stack_open pis]\npisPage SetLayout {%cols X %rows}\n$grid_walk\n[::pis::hw::page_close pis]" \
             check [::pis::hw::check_grid %count] want %count \
             src {conrod/tcl_guide/hv_model_loader.tcl:512 (the "%cols X %rows" spelling)} \
             note {the spaced token, transposed}] \
-        [dict create n 7 via hwi \
+        [dict create n 5 via hwi \
             cmd "[::pis::hw::stack_open pis]\npisPage SetLayout {%rows x %cols}\n$grid_walk\n[::pis::hw::page_close pis]" \
             check [::pis::hw::check_grid %count] want %count \
             src {conrod/tcl_guide/hv_model_loader.tcl:512 (the "%rows x %cols" spelling)} \
             note {the token with a lower-case x and spaces}] \
-        [dict create n 8 via hwi \
+        [dict create n 6 via hwi \
             cmd "[::pis::hw::stack_open pis]\npisPage SetLayout {%rows - %cols}\n$grid_walk\n[::pis::hw::page_close pis]" \
             check [::pis::hw::check_grid %count] want %count \
             src {conrod/tcl_guide/hv_model_loader.tcl:512 (the "%rows - %cols" spelling)} \
             note {the token with a dash}] \
-        [dict create n 9 via hwi \
+        [dict create n 7 via hwi \
             cmd "[::pis::hw::stack_open pis]\npisPage SetLayout %count\n$grid_walk\n[::pis::hw::page_close pis]" \
             check [::pis::hw::check_grid %count] want %count \
             src {conrod/tcl_guide/hv_model_loader.tcl:517 (the plain window count)} \
             note {the layout named by its window count only (arrangement is the build's)}] \
-        [dict create n 10 via hwi \
+        [dict create n 8 via hwi \
             cmd "[::pis::hw::stack_open pis]\n$grid_legacy\n$grid_walk\n[::pis::hw::page_close pis]" \
             check [::pis::hw::check_grid %count] want %count \
             src {conrod/tcl_guide/hv_model_loader.tcl:518 (single 1x1 2H 2V 3H 3V 4H 4V)} \
@@ -723,6 +787,13 @@ proc ::pis::hw::run {op values} {
     ::pis::hw::status [format "Error: %s%s - no variant worked (%d/%d)" $op $scope $total $total]
     set detail $firsterr
     if {$detail eq ""} { set detail $lasterr }
+    # A CHART window is not a variant problem: no variant can turn it back into a HyperView
+    # window (no script on this machine does that - see the CLIENT TYPE note at the top), so
+    # the message names the only thing that works instead of sending the human through the
+    # variant table.
+    if {[string first "is not a HyperView window" $detail] >= 0} {
+        append detail " - File > New gives a session with HyperView windows"
+    }
     if {[llength $tried] > 1} {
         append detail [format " (tried %s)" [join $tried {, }]]
     }
@@ -798,11 +869,13 @@ proc ::pis::hw::verify_window {index} {
     return 1
 }
 
-# Read-back only: does the page really show cols x rows windows, and does EVERY one of them
-# answer a window AND a client handle? Returns the window count HyperView reported. Never
-# journaled. ::pis::hw::run already gates a grid on the same check; this proc is the answer
-# the app shows (diag "wins=") and it names the first window that cannot be opened, so a grid
-# that built 4 windows of which 2 have no client is reported as "window 3", not as a total.
+# Read-back only: does the page really show cols x rows windows, and is EVERY one of them a
+# usable HYPERVIEW window (a window handle, a client handle, and a client that answers
+# GetModelList - i.e. one that can hold a model)? Returns the window count HyperView reported.
+# Never journaled. ::pis::hw::run already gates a grid on the same check; this proc is the
+# answer the app shows (diag "wins=") and it names the first window that cannot be opened or
+# that turned out to be a chart, so a grid that built 4 windows of which 2 are HyperGraph 2D is
+# reported as "window 3 is not a HyperView window (client type plot)", not as a total.
 proc ::pis::hw::verify_grid {cols rows} {
     ::pis::hw::need_exec
     foreach {label value} [list cols $cols rows $rows] {
@@ -839,7 +912,7 @@ proc ::pis::hw::used_list {op} {
 # The variant number one step really used: ::pis::hw::used reset_session, or
 # ::pis::hw::used load_model 3 for window 3 (a step that ran in a window is recorded under
 # "<op>#<window>"). 0 means no variant worked - the same 0 ::pis::hw::diag prints, so a
-# helper script can report "variant 2/10" without parsing a log line.
+# helper script can report "variant 2/8" without parsing a log line.
 proc ::pis::hw::used {op {index ""}} {
     variable adapt_used
     set key $op
@@ -850,13 +923,16 @@ proc ::pis::hw::used {op {index ""}} {
 
 # ONE line under 80 characters: the layout, the variant the grid used, how many windows
 # HyperView really shows, and the variant each window used for its model and its result
-# (0 = no variant worked). This is the line the human copies back when only ok/fail is
-# possible (ENV), so the shape is fixed:
-#   DIAG T6c: layout=2x2 grid=1 wins=4 model=1,1,0,0 result=1,1,0,0
+# (0 = no variant worked), plus the client letter of each window (H = HyperView, P = chart,
+# ? = cannot tell). This is the line the human copies back when only ok/fail is possible (ENV),
+# so the shape is fixed:
+#   DIAG T6d: layout=2x2 grid=1 wins=4 model=1,1,0,0 result=1,1,0,0 client=H,H,H,H
 # The short build code comes first (::pis::hw::build_code; the BUILD line has the full stamp),
 # so the human's copy-back names the copy of this file that produced the line.
 # "layout" is the "<rows>x<cols>" token of the last GOOD grid ("-" while none has succeeded);
 # "wins" is the window count read back from the page, never the count this app asked for.
+# client= is omitted when the session cannot be asked (no wrapper, no HyperView, a probe that
+# raised) - a made-up letter would be worse than no letter.
 proc ::pis::hw::diag {} {
     variable adapt_used
     variable adapt_grid
@@ -866,22 +942,35 @@ proc ::pis::hw::diag {} {
     set head [format "DIAG %s: layout=%s grid=%d wins=%d" [::pis::hw::build_code] $adapt_grid $grid $adapt_wins]
     set models [::pis::hw::used_list load_model]
     set results [::pis::hw::used_list load_result_in_window]
+    set clients [::pis::hw::clients]
+    # Did the session answer at all? (An empty answer means no wrapper / no HyperView / a probe
+    # that raised: then no client letter is printed at all rather than a made-up one.)
+    set have_clients [expr {[llength $clients] > 0}]
     # Both lists line up window by window: the shorter one is padded with 0 (nothing ran
-    # there), so "model=1,1 result=1,0" always means the same two windows.
+    # there), so "model=1,1 result=1,0" always means the same two windows. The client list is
+    # padded with ? for the same reason (a window nobody asked about yet).
     set width [llength $models]
     if {[llength $results] > $width} { set width [llength $results] }
+    if {[llength $clients] > $width} { set width [llength $clients] }
     while {[llength $models] < $width} { lappend models 0 }
     while {[llength $results] < $width} { lappend results 0 }
+    while {[llength $clients] < $width} { lappend clients ? }
     # The line must stay under 80 characters. A layout with more windows than fits drops the
     # OLDEST windows first (they are the ones already proven) and ".." says the list starts
-    # somewhere else.
+    # somewhere else. The client letters are dropped only if even one window would not fit with
+    # them, so the line never exceeds its 80 characters on a big layout.
+    set line ""
     set cut 0
-    while {$cut <= $width} {
+    while {1} {
         set lead [expr {$cut > 0 ? "..," : ""}]
-        set line [format "%s model=%s%s result=%s%s" $head $lead \
+        set bare [format "%s model=%s%s result=%s%s" $head $lead \
             [join [lrange $models $cut end] ,] $lead [join [lrange $results $cut end] ,]]
-        if {[string length $line] < 80} { break }
-        if {$cut >= $width} { break }
+        set full $bare
+        if {$have_clients} {
+            append full [format " client=%s%s" $lead [join [lrange $clients $cut end] ,]]
+        }
+        if {[string length $full] < 80} { set line $full ; break }
+        if {$cut >= $width} { set line $bare ; break }
         incr cut
     }
     puts $line
@@ -982,7 +1071,7 @@ proc ::pis::hw::reset_state {} {
 
 # --- build stamp: ONE line, printed when this file is sourced -------------------------
 # The line answers the first question on a HyperView machine ("which copy is this?"):
-#   BUILD T6c-20261110-1618 | make_grid variants=10 | adapter lines=NNN
+#   BUILD T6d-20261110-1642 | make_grid variants=8 | adapter lines=NNN
 # The line count is measured from the file itself at source time (below), so it cannot go
 # stale the way a hand-written number would.
 proc ::pis::hw::build_line {} {
@@ -994,7 +1083,7 @@ proc ::pis::hw::build_line {} {
     return [format "BUILD %s | make_grid variants=%d | adapter lines=%d" $stamp $n $build_lines]
 }
 
-# The code part of the stamp (T6c in T6c-20261110-1618): what a DIAG line starts with. The
+# The code part of the stamp (T6d in T6d-20261110-1642): what a DIAG line starts with. The
 # time part only fits in the BUILD line - see the note at ::pis::BUILD.
 proc ::pis::hw::build_code {} {
     set stamp "no-stamp"
