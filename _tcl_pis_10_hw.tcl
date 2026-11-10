@@ -1,15 +1,21 @@
 # PIS Workflow - the single HyperView door and the command journal (task T-005).
-# ::pis::hw::exec    the ONLY path to HyperView: runs hwc, journals on success
-# ::pis::journal     in-memory "hwc ..." + "# ..." lines, replayable Tcl
+# ::pis::hw::exec      the hwc door: runs hwc, journals on success
+# ::pis::hw::exec_hwi  the hwi door: runs ONE handle script, journals it as one line
+# ::pis::hw::probe     read-only query (a check), never journaled
+# ::pis::journal       in-memory "hwc ..." / "hwi ..." / "# ..." lines, replayable Tcl
 # Tcl/Tk 8.5 compatible, no tcllib, no network, no package require.
 # Sourcing this file defines procs only: it never calls HyperView.
 #
 # Public procs:
 #   ::pis::hw::exec {args}             -> hwc {*}$args; journals, rethrows errors
+#   ::pis::hw::exec_hwi {script}       -> one hwi script; journals it, rethrows errors
+#                                        (-nojournal: run it, write nothing yet)
+#   ::pis::hw::journal_run {script}    -> journal one hwi script already proven to work
+#   ::pis::hw::probe {script}          -> one hwi script, result returned, NOT journaled
 #   ::pis::hw::context {module item}   -> module/item written in the next comment
 #   ::pis::journal::add {comment cmd}  -> append "# comment" + cmd
 #   ::pis::journal::lines {}           -> journal as text, newline terminated
-#   ::pis::journal::filter {text}      -> skipped count; keeps hwc / # lines
+#   ::pis::journal::filter {text}      -> skipped count; keeps hwc / hwi / # lines
 #   ::pis::journal::save {path}        -> write lines() to path, clears dirty
 #   ::pis::journal::clear {}           -> drop everything, clears dirty
 # Namespace variables later tasks read:
@@ -61,6 +67,98 @@ proc ::pis::hw::exec {args} {
     return $res
 }
 
+# The hwi door (SPEC.md D2 REVISION, 2026-11-10). `script` is ONE complete
+# handle script whose first word is hwi, e.g.
+#   hwi OpenStack
+#   hwi GetSessionHandle pisS
+#   ...                                    (one COMPLETE command per line)
+# Every newline plus its indentation is folded into "; ", so the folded text is
+# both what runs and what lands in the journal - exactly one replayable line.
+# This build ignores an hwc subcommand it does not know without raising, so the
+# only honest way to see the difference between "worked" and "did nothing" is
+# ::pis::hw::probe after the call; exec_hwi itself cannot tell.
+# mode: "-journal" (default) writes the line after the script returns; "-nojournal"
+# runs it and writes nothing, so a caller that must prove the change first (the
+# adapter) can decide afterwards, with ::pis::hw::journal_run.
+proc ::pis::hw::exec_hwi {script {mode "-journal"}} {
+    variable cur_module
+    variable cur_item
+    if {[string trim $script] eq ""} {
+        error "::pis::hw::exec_hwi: no HyperView script given"
+    }
+    if {$mode ne "-journal" && $mode ne "-nojournal"} {
+        error "::pis::hw::exec_hwi: unknown mode '$mode' (expected -journal or -nojournal)"
+    }
+    if {[llength [info commands hwi]] == 0} {
+        error "::pis::hw::exec_hwi: the hwi command is not available (run inside HyperView)"
+    }
+    set line [::pis::hw::fold_script $script]
+    if {![regexp {^hwi[ \t]} $line]} {
+        error "::pis::hw::exec_hwi: the script must start with 'hwi ' so the journal line stays replayable"
+    }
+    set code [catch {uplevel 1 $line} res opts]
+    if {$code} {
+        # Never leave a half-open stack behind for the next call.
+        catch {hwi CloseStack}
+        return -options $opts $res
+    }
+    if {$mode eq "-journal"} {
+        ::pis::hw::journal_run $line
+    }
+    return $res
+}
+
+# Journal one handle script that is ALREADY proven to work (SPEC.md D2 REVISION: a command
+# that changed nothing must never reach a saved journal). Writes the same line exec_hwi
+# writes - folded to one replayable line behind the usual timestamp comment - and returns it.
+proc ::pis::hw::journal_run {script} {
+    variable cur_module
+    variable cur_item
+    if {[string trim $script] eq ""} {
+        error "::pis::hw::journal_run: no HyperView script given"
+    }
+    set line [::pis::hw::fold_script $script]
+    if {![regexp {^hwi[ \t]} $line]} {
+        error "::pis::hw::journal_run: the script must start with 'hwi ' so the journal line stays replayable"
+    }
+    set stamp [clock format [clock seconds] -format "%Y-%m-%d %H:%M:%S"]
+    ::pis::journal::add [format "%s | %s | %s" $stamp $cur_module $cur_item] $line
+    return $line
+}
+
+# Fold a multi-line script into one Tcl line: newline + surrounding blanks -> "; ".
+# Blank lines and leading/trailing blanks of the whole script disappear; runs of
+# blanks INSIDE a line are untouched, so a path with spaces is never damaged.
+proc ::pis::hw::fold_script {script} {
+    set text [string map {"\r\n" "\n" "\r" "\n"} $script]
+    set parts {}
+    foreach raw [split $text "\n"] {
+        set t [string trim $raw]
+        if {$t eq ""} { continue }
+        lappend parts $t
+    }
+    return [join $parts "; "]
+}
+
+# Read-only query: same hwi stack rules as exec_hwi but nothing is journaled, so
+# a saved journal never contains a check pretending to be a step. Used by the
+# adapter to prove a step changed the session before it reports OK.
+proc ::pis::hw::probe {script} {
+    if {[string trim $script] eq ""} {
+        error "::pis::hw::probe: no HyperView script given"
+    }
+    if {[llength [info commands hwi]] == 0} {
+        error "::pis::hw::probe: the hwi command is not available (run inside HyperView)"
+    }
+    set line [::pis::hw::fold_script $script]
+    set code [catch {uplevel 1 $line} res opts]
+    if {$code} {
+        catch {hwi CloseStack}
+        return -options $opts $res
+    }
+    return $res
+}
+
 # The module title (as shown in the GUI) and item recorded in the next journal
 # comment. Modules set this once per item, before their HyperView calls.
 proc ::pis::hw::context {module item} {
@@ -90,8 +188,8 @@ proc ::pis::journal::lines {} {
     return "$text\n"
 }
 
-# Keep only lines whose first word is hwc or that start with #. Returns the
-# number of dropped (non blank) lines; the kept lines land in variable filtered.
+# Keep only lines whose first word is hwc or hwi, or that start with #. Returns
+# the number of dropped (non blank) lines; the kept lines land in variable filtered.
 proc ::pis::journal::filter {text} {
     variable filtered
     set kept {}
@@ -99,7 +197,7 @@ proc ::pis::journal::filter {text} {
     foreach line [split $text "\n"] {
         set t [string trim [string trimright $line "\r"]]
         if {$t eq ""} { continue }
-        if {[regexp {^hwc[ \t]} $t] || [string index $t 0] eq "#"} {
+        if {[regexp {^(hwc|hwi)[ \t]} $t] || [string index $t 0] eq "#"} {
             lappend kept $t
             continue
         }
