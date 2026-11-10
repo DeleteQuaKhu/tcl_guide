@@ -2,17 +2,19 @@
 # ::pis::gui — the single "PIS Workflow" window. Task T-003 built the FRAME: window,
 # block 0, the five module blocks (one shared module-list helper), log pane, status bar,
 # busy lock. Task T-006 wires block 0 to ::pis::step01 (Load All / Reset (New), browse,
-# Add.., config round-trip). Task T-007 wires the "Load Legend" block to ::pis::legend
-# (radio list + "on" + journal + busy guard); its HyperView seam is NOT verified yet
-# (T-002 spike / SPEC Q3 open), so that module is partial on purpose. The other four
-# modules still log one explicit ERROR ("not wired yet"): no silent no-op, no fake run.
+# Add.., config round-trip): every HyperView command comes from the ::pis::hw adapter
+# (T-002c), so a saved journal replays the model and the window grid in a fresh session and
+# no user library is involved (SPEC.md D2). Task T-007 wires the "Load Legend" block to
+# ::pis::legend (radio list + "on" + journal + busy guard); its HyperView seam is NOT
+# verified yet (SPEC Q3, T-002c adapter in place), so that module is partial on purpose. The
+# other four modules still log one explicit ERROR ("not wired yet"): no silent no-op.
 # Tcl 8.5 only: no tcllib, no try/finally, no package require beyond Tk.
 #
 # Sourcing order for a HyperView session: this file sources everything it needs, so
 # `source <root>/01_scripts/_tcl_pis_99_workflow_gui.tcl` is the only command required.
 set _pis_dir [file dirname [file normalize [info script]]]
-foreach _pis_file {_tcl_pis_00_common.tcl _tcl_pis_10_hw.tcl _tcl_pis_01_load_model_results.tcl \
-        _tcl_pis_02_load_legend.tcl} {
+foreach _pis_file {_tcl_pis_00_common.tcl _tcl_pis_10_hw.tcl _tcl_pis_11_hw_adapter.tcl \
+        _tcl_pis_01_load_model_results.tcl _tcl_pis_02_load_legend.tcl} {
     set _pis_path [file join $_pis_dir $_pis_file]
     if {[catch {source $_pis_path} _pis_err]} {
         error "Cannot source $_pis_path: $_pis_err"
@@ -536,7 +538,7 @@ proc ::pis::gui::add_result_files {} {
 
 # Load All / Reset (New). Both follow the same shape: read the widgets, build the cfg in
 # memory, lock the buttons, run the step, ALWAYS unlock, persist only on success.
-# mode: "load" -> ::pis::step01::run, "reset" -> ::pis::step01::reset.
+# mode: "load" -> ::pis::step01::load_all, "reset" -> ::pis::step01::reset_session.
 proc ::pis::gui::run_block0 {mode} {
     variable S
     if {$mode eq "reset"} {
@@ -546,13 +548,12 @@ proc ::pis::gui::run_block0 {mode} {
     }
     set fields [::pis::gui::read_block0]
     set cfg [::pis::gui::cfg_with_fields [::pis::gui::workflow_cfg] $fields]
-    set root [dict get $cfg root]
     ::pis::gui::lock [dict get [dict get $S block0] loadAll]
     ::pis::gui::set_busy 1
     if {$mode eq "reset"} {
-        set code [catch {::pis::step01::reset $root $cfg} res]
+        set code [catch {::pis::step01::reset_session} res]
     } else {
-        set code [catch {::pis::step01::run $root $cfg} res]
+        set code [catch {::pis::step01::load_all $cfg} res]
     }
     ::pis::gui::set_busy 0
     if {$code} {
@@ -568,9 +569,6 @@ proc ::pis::gui::run_block0 {mode} {
     }
     set n [llength [dict get $fields result_files]]
     set msg "Loaded $n result(s) into $res window(s)."
-    if {$::pis::step01::stub_mode} {
-        set msg "STUB MODE | $msg"
-    }
     ::pis::gui::log_line OK "$label: $msg"
     ::pis::gui::set_status $msg darkgreen
     return $res
