@@ -536,6 +536,28 @@ proc ::pis::gui::add_result_files {} {
     return [llength $paths]
 }
 
+# [Remove] and the Delete/BackSpace keys drop every selected line of the result list, so a
+# wrong Add.. needs no restart (the list is the user's, not the program's). Selection is
+# extended: Ctrl/Shift+click removes several lines at once. Nothing is persisted here; the
+# list reaches the ini only when Load All / Reset (New) succeeds.
+proc ::pis::gui::remove_result_files {} {
+    variable S
+    if {![dict exists $S block0]} {
+        return 0
+    }
+    set lb [dict get [dict get $S block0] results]
+    set picked [$lb curselection]
+    if {[llength $picked] == 0} {
+        ::pis::gui::log_line WARN "no result file selected, nothing removed"
+        return 0
+    }
+    foreach i [lsort -integer -decreasing $picked] {
+        $lb delete $i
+    }
+    ::pis::gui::log_line INFO "removed [llength $picked] result file(s)"
+    return [llength $picked]
+}
+
 # Load All / Reset (New). Both follow the same shape: read the widgets, build the cfg in
 # memory, lock the buttons, run the step, ALWAYS unlock, persist only on success.
 # mode: "load" -> ::pis::step01::load_all, "reset" -> ::pis::step01::reset_session.
@@ -606,16 +628,24 @@ proc ::pis::gui::block0 {parent} {
     grid $browse -row 0 -column 2 -sticky e
     ttk::label $f.resLabel -text "Result files (one per line = one window)"
     grid $f.resLabel -row 1 -column 0 -columnspan 3 -sticky w -pady {6 2}
-    set lb [listbox $f.results -height 5 -exportselection 0 -yscrollcommand [list $f.resScroll set]]
+    set lb [listbox $f.results -height 5 -exportselection 0 -selectmode extended \
+        -yscrollcommand [list $f.resScroll set]]
     set sb [ttk::scrollbar $f.resScroll -orient vertical -command [list $lb yview]]
     grid $lb -row 2 -column 0 -columnspan 2 -sticky nsew -padx {0 4}
     grid $sb -row 2 -column 2 -sticky ns
+    # A wrong Add.. must never need a restart: [Remove] and the Delete/BackSpace keys drop
+    # the selected line(s) (Ctrl/Shift+click selects several).
+    bind $lb <Delete> [list ::pis::gui::remove_result_files]
+    bind $lb <BackSpace> [list ::pis::gui::remove_result_files]
     set bar [ttk::frame $f.bar]
     grid $bar -row 3 -column 0 -columnspan 3 -sticky we -pady {6 0}
     set add [ttk::button $bar.add -text "Add.." -command [list ::pis::gui::add_result_files]]
+    set remove [ttk::button $bar.remove -text "Remove" \
+        -command [list ::pis::gui::remove_result_files]]
     set cols [ttk::entry $bar.cols -width 3]
     set rows [ttk::entry $bar.rows -width 3]
     pack $add -side left
+    pack $remove -side left -padx {4 0}
     pack [ttk::label $bar.layoutLabel -text "Layout"] -side left -padx {12 4}
     pack $cols -side left
     pack [ttk::label $bar.x -text "x"] -side left -padx 2
@@ -627,7 +657,9 @@ proc ::pis::gui::block0 {parent} {
     set loadAll [ttk::button $buttons.loadAll -text "Load All" -command [list ::pis::gui::load_all]]
     pack $reset -side left
     pack $loadAll -side right
-    dict set S block0 [dict create frame $f model $model cols $cols rows $rows results $lb add $add reset $reset loadAll $loadAll]
+    dict set S block0 [dict create frame $f model $model cols $cols rows $rows results $lb \
+        add $add remove $remove reset $reset loadAll $loadAll]
+    ::pis::gui::lock $remove
     ::pis::gui::lock $reset
     ::pis::gui::lock $loadAll
     return $f
