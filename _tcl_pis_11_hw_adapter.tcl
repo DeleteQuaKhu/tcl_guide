@@ -45,6 +45,14 @@
 #                               the variant used and the client letter (H|P|?)
 #   ::pis::hw::clients {}       per-window client letter: H = HyperView, P = chart (Plot), ? =
 #                               cannot tell (INFERRED from GetModelList - no GetClientType here)
+#   ::pis::hw::page_info {}     ONE read-only line: page index, layout token, window count, the
+#                               window numbers that really open (what the page IS right now)
+#   ::pis::hw::grid_probe {cols rows {newpage 0}}
+#                               ask HyperView which layout token really gives cols x rows
+#                               windows: one TRY line per form, the page restored, then the
+#                               variant to keep - NOT a step, never journaled. newpage 1 also
+#                               tries the AddPage form, which leaves a page behind (0 = no
+#                               page is added, so the default changes nothing structural)
 #   ::pis::hw::reset_state {}   variants + order back to 1 (tests)
 #   ::pis::hw::run {op values}  run an op (the six operations call this)
 #   ::pis::hw::used {op {win}}  variant number that step really used (0 = none worked)
@@ -52,9 +60,9 @@
 #   ::pis::hw::announce {}      print that line to the console and to the GUI log
 #
 # BUILD STAMP (T-006 iteration, 2026-11-10): ::pis::BUILD is a short code written BY HAND
-# when this file changes, e.g. T6d-20261110-1642, so the HyperView machine can be matched to
+# when this file changes, e.g. T6e-20261111-0918, so the HyperView machine can be matched to
 # a copy of this file without a guess. Sourcing this file prints ONE line,
-#   BUILD T6d-20261110-1642 | make_grid variants=8 | adapter lines=<n>
+#   BUILD T6e-20261111-0918 | make_grid variants=8 | adapter lines=<n>
 # and every ::pis::hw::diag line starts with the same stamp (the time part only fits there).
 #
 # PER-WINDOW LOADING (fix, 2026-11-10): every window is its own client with its OWN model
@@ -66,10 +74,10 @@
 # importer walks windows 1..N the same way (conrod/_tmp_hv/batchImportOdb.tcl:83-87), which
 # is why ::pis::hw::load_model_in_window exists and load_model is only its k = 1 case.
 #
-# CLIENT TYPE - THE ESCAPED T-006 DEFECT (owner report, 2026-11-10: "sau Load All, các window là
-# HyperGraph 2D, không phải HyperView"). This file used to set a client type on every new
+# CLIENT TYPE - THE ESCAPED T-006 DEFECT (owner report, 2026-11-10: "sau Load All, cÃ¡c window lÃ 
+# HyperGraph 2D, khÃ´ng pháº£i HyperView"). This file used to set a client type on every new
 # window: '<win> SetClientType Plot', copied from conrod/_tmp_hv/training.tcl:9,20. Read that
-# script's own header (:1 and :13): "将第三页的第三个窗口客户端设置成曲线图" = "set the client of
+# script's own header (:1 and :13): "å°†ç¬¬ä¸‰é¡µçš„ç¬¬ä¸‰ä¸ªçª—å£å®¢æˆ·ç«¯è®¾ç½®æˆæ›²çº¿å›¾" = "set the client of
 # the 3rd window of page 3 to a CURVE CHART". It is a chart exercise, so Plot is the
 # HyperGraph 2D client - the exact opposite of a window that must show a model and a contour.
 # Consequences, all applied here:
@@ -122,10 +130,10 @@ namespace eval ::pis::hw {
 
 # The build stamp: short code + yyyymmdd-hhmm, written BY HAND when this file changes (the
 # adapter never derives it). The BUILD line and the GUI start line carry the FULL stamp;
-# ::pis::hw::diag carries only the code part (T6d), because the full stamp plus 8 windows of
+# ::pis::hw::diag carries only the code part (T6e), because the full stamp plus 8 windows of
 # model=/result=/client= lists would not fit in the 80 characters a diag line is allowed.
 namespace eval ::pis {
-    variable BUILD "T6d-20261110-1642"
+    variable BUILD "T6e-20261111-0918"
 }
 
 # --- script builders: the hwi handle API is spelled once, here ------------------------
@@ -203,6 +211,17 @@ proc ::pis::hw::legacy_token {cols rows} {
     return ""
 }
 
+# WHY A COUNT MISMATCH ALSO NAMES THE LAYOUT TOKEN (owner's report, 2026-11-11): on the
+# owner's machine EVERY variant of a 2x2 AND of a 4x4 request ended in the same answer,
+# "wins=2", so the count alone could not tell "the token was ignored" from "the page really
+# has 2 windows". '<page> GetLayout' answers the token the page is IN - conrod/_tmp_hv/
+# batchImportOdb.tcl:105 reads the page's layout exactly that way, and conrod/tcl_guide/
+# hv_model_loader.tcl:1123 reads it plus :1136 caches it - so the mismatch now carries it:
+#   wins=2 layout=2H
+# ("layout=-" = the page answered an empty string, "layout=?" = GetLayout itself raised.)
+# That single field is the difference between a spelling problem and a page that does not change
+# at all, and ::pis::hw::grid_probe prints the same two facts for every candidate token.
+#
 # The grid read-back, three questions per window k, in this order:
 #   (a) does the page really have <count> windows,
 #   (b) does window k answer a window handle AND a client handle, and
@@ -222,8 +241,13 @@ proc ::pis::hw::legacy_token {cols rows} {
 proc ::pis::hw::check_grid {count} {
     set s {set @p@W [@p@Page GetNumberOfWindows]
 if {![string is integer -strict $@p@W]} {set @p@W [llength $@p@W]}
+set @p@Lay ?
+if {![catch {set @p@Lay [@p@Page GetLayout]}]} {
+    set @p@Lay [string trim $@p@Lay]
+    if {$@p@Lay eq ""} {set @p@Lay -}
+}
 if {$@p@W != @p@Want} {
-    set @p@Got "wins=$@p@W"
+    set @p@Got "wins=$@p@W layout=$@p@Lay"
 } else {
     set @p@Got $@p@W
     for {set @p@I 1} {$@p@I <= $@p@W} {incr @p@I} {
@@ -311,6 +335,52 @@ proc ::pis::hw::clients {} {
     }
     if {[catch {::pis::hw::probe [::pis::hw::check_clients]} got]} { return "" }
     return [string trim $got]
+}
+
+# --- what the active page IS, read-only -----------------------------------------------
+# The probe behind ::pis::hw::page_info: the active page's index, how many pages the project
+# has, the layout token the page is IN ('<page> GetLayout', batchImportOdb.tcl:105), how many
+# windows it reports, and WHICH window numbers really answer a window handle. That last list is
+# what tells a 0-based window numbering apart from a 1-based one, and "layout=" is what tells a
+# token that was ignored apart from a page that really has that many windows.
+# 'GetNumberOfPages' is only in the vocabulary list of the reference loader (hv_model_loader.tcl:
+# 74) and is never called there, so it is caught: "?" means this build does not answer it.
+proc ::pis::hw::check_page_info {} {
+    set s {set @p@PgI [@p@P GetActivePage]
+set @p@Pages ?
+catch {set @p@Pages [@p@P GetNumberOfPages]}
+set @p@Lay ?
+if {![catch {set @p@Lay [@p@Page GetLayout]}]} {
+    set @p@Lay [string trim $@p@Lay]
+    if {$@p@Lay eq ""} {set @p@Lay -}
+}
+set @p@W [@p@Page GetNumberOfWindows]
+if {![string is integer -strict $@p@W]} {set @p@W [llength $@p@W]}
+set @p@Open {}
+for {set @p@I 1} {$@p@I <= $@p@W} {incr @p@I} {
+    if {![catch {@p@Page GetWindowHandle @p@Win $@p@I}]} {
+        lappend @p@Open $@p@I
+        catch {@p@Win ReleaseHandle}
+    }
+}
+set @p@Op [join $@p@Open ,]
+if {$@p@Op eq ""} {set @p@Op -}
+set @p@Out "page=$@p@PgI pages=$@p@Pages layout='$@p@Lay' wins=$@p@W open=$@p@Op"}
+    return "[::pis::hw::stack_open psi]\n[string map [list @p@ psi] $s]\n[::pis::hw::page_close psi]\nset psiOut"
+}
+
+# ONE line the human can paste back when a grid does not appear: what the page is right now.
+# Read-only - it changes nothing at all - and it never raises, so it also prints its line after
+# a failed Load All. "" when the session cannot be asked (no wrapper / no HyperView).
+proc ::pis::hw::page_info {} {
+    if {[llength [info commands ::pis::hw::exec_hwi]] == 0 || \
+            [llength [info commands ::pis::hw::probe]] == 0} {
+        return ""
+    }
+    if {[catch {::pis::hw::probe [::pis::hw::check_page_info]} got]} { return "" }
+    set line [string trim $got]
+    if {$line ne ""} { puts "PAGE $line" }
+    return $line
 }
 
 # --- the variant table ----------------------------------------------------------------
@@ -886,11 +956,190 @@ proc ::pis::hw::verify_grid {cols rows} {
     set count [expr {$cols * $rows}]
     set got [string trim [::pis::hw::probe [::pis::hw::check_grid $count]]]
     if {$got ne $count} {
-        error [format "the page shows %s window(s) instead of %d (%dx%d)" [string trim $got] \
+        # $got already carries HyperView's own evidence ("wins=2 layout=2H"), so it is
+        # quoted as it is instead of being squeezed into a window count.
+        error [format "the page answered '%s', expected %d window(s) (%dx%d)" [string trim $got] \
             $count $cols $rows]
     }
     return $got
 }
+
+# --- which layout token the page really accepts (a probe, not a step) -------------------
+# Every make_grid variant's token, in variant order, as {<variant number> <token>} pairs. Built
+# from the SAME two helpers the table uses (grid_token / legacy_token) plus the four spellings
+# conrod/tcl_guide/hv_model_loader.tcl:509-514 generates, so the probe and the table cannot
+# drift apart: a test asserts that each token appears in the command of the variant it is
+# paired with. An empty token (a grid the legacy word has no name for) is left out.
+proc ::pis::hw::grid_probe_tokens {cols rows} {
+    return [list \
+        [list 1 [::pis::hw::grid_token $cols $rows]] \
+        [list 2 [format %dx%d $cols $rows]] \
+        [list 3 [format "%d X %d" $rows $cols]] \
+        [list 4 [format "%d X %d" $cols $rows]] \
+        [list 5 [format "%d x %d" $rows $cols]] \
+        [list 6 [format "%d - %d" $rows $cols]] \
+        [list 7 [expr {$cols * $rows}]] \
+        [list 8 [::pis::hw::legacy_token $cols $rows]]]
+}
+# THE QUESTION A COUNT MISMATCH CANNOT ANSWER, asked with HyperView as the judge: for the asked
+# grid, apply every candidate token and read back BOTH facts after each one ('<page> GetLayout'
+# and '<page> GetNumberOfWindows'), then put the page back the way it was. The reference loader
+# does exactly this to learn the token of a window count (hv_model_loader.tcl:1149-1204 applies
+# candidates and re-reads the count, :1210-1237 does it one token at a time). The one STRUCTURAL
+# alternative that is sourced - a new page from '<project> AddPage' with the layout applied to
+# THAT page (batchImportOdb.tcl:124-127) - is tried only when the third argument is 1: adding a
+# page cannot be undone by this file (no delete verb is sourced), so the default probe leaves the
+# page count alone and the answer says what to run next.
+# WHAT IT IS NOT: not a step, never journaled, and it neither records nor moves a variant - a
+# probe must not be able to make Load All look successful. It changes the session (a probe has
+# to), so the page's own token is put back at the end, and the last line names the variant to
+# keep. Output, one short line per form, so the whole block can be pasted back:
+#   TRY v1 '2x2' -> layout='2H' wins=2 was=2
+#   TRY new-page '2x2' -> layout='2H' wins=2 was=1      (only with the third argument 1)
+#   BACK '2H' -> layout='2H' wins=2
+#   TEST make_grid 2x2: asked for 4 window(s), the page shows 2
+#   BEST variant 3 gives 4 window(s); keep it: ::pis::hw::use make_grid 3
+# Returns the variant number that gives the asked count, 0 for the new-page form, "" for none.
+# A form counts only when the count BOTH equals the asked one AND changed: a page that already
+# shows the asked count cannot tell a working token from an ignored one, and it says that instead.
+proc ::pis::hw::grid_probe {cols rows {newpage 0}} {
+    ::pis::hw::need_exec
+    foreach {label value} [list cols $cols rows $rows] {
+        if {![string is integer -strict $value] || $value < 1} {
+            error "::pis::hw::grid_probe: $label must be a positive integer, got: '$value'"
+        }
+    }
+    if {![string is integer -strict $newpage] || ($newpage != 0 && $newpage != 1)} {
+        error "::pis::hw::grid_probe: newpage must be 0 or 1, got: '$newpage'"
+    }
+    set count [expr {$cols * $rows}]
+    set pairs {}
+    foreach pair [::pis::hw::grid_probe_tokens $cols $rows] {
+        if {[string trim [lindex $pair 1]] eq ""} { continue }
+        lappend pairs $pair
+    }
+    set s {set psiOut {}
+set psiLay0 -
+if {![catch {set psiLay0 [psiPage GetLayout]}]} {
+    set psiLay0 [string trim $psiLay0]
+    if {$psiLay0 eq ""} {set psiLay0 -}
+}
+set psiW [psiPage GetNumberOfWindows]
+if {![string is integer -strict $psiW]} {set psiW [llength $psiW]}
+set psiOut [list [list -2 start $psiLay0 $psiW $psiW]]
+foreach psiP @pairs@ {
+    lassign $psiP psiId psiTok
+    set psiWas $psiW
+    catch {psiPage SetLayout $psiTok}
+    set psiLay -
+    if {![catch {set psiLay [psiPage GetLayout]}]} {
+        set psiLay [string trim $psiLay]
+        if {$psiLay eq ""} {set psiLay -}
+    }
+    set psiW [psiPage GetNumberOfWindows]
+    if {![string is integer -strict $psiW]} {set psiW [llength $psiW]}
+    lappend psiOut [list $psiId $psiTok $psiLay $psiW $psiWas]
+}
+set psiNew -
+if {@newpage@} {
+set psiNIdx -
+catch {set psiNIdx [psiP AddPage]}
+if {[string is integer -strict $psiNIdx]} {
+    if {![catch {psiP GetPageHandle psiNewPage $psiNIdx}]} {
+        set psiNW [psiNewPage GetNumberOfWindows]
+        if {![string is integer -strict $psiNW]} {set psiNW [llength $psiNW]}
+        set psiNW0 $psiNW
+        catch {psiNewPage SetLayout @grid@}
+        set psiNL -
+        if {![catch {set psiNL [psiNewPage GetLayout]}]} {
+            set psiNL [string trim $psiNL]
+            if {$psiNL eq ""} {set psiNL -}
+        }
+        set psiNW [psiNewPage GetNumberOfWindows]
+        if {![string is integer -strict $psiNW]} {set psiNW [llength $psiNW]}
+        set psiNew [list 0 "new-page:@grid@" $psiNL $psiNW $psiNW0]
+        catch {psiNewPage ReleaseHandle}
+    }
+}
+}
+if {$psiNew ne "-"} {lappend psiOut $psiNew}
+if {$psiLay0 ne "-"} {catch {psiPage SetLayout $psiLay0}}
+set psiBack -
+if {![catch {set psiBack [psiPage GetLayout]}]} {
+    set psiBack [string trim $psiBack]
+    if {$psiBack eq ""} {set psiBack -}
+}
+set psiBw [psiPage GetNumberOfWindows]
+if {![string is integer -strict $psiBw]} {set psiBw [llength $psiBw]}
+lappend psiOut [list -1 "back:$psiLay0" $psiBack $psiBw -]
+set psiOut}
+    set tok [::pis::hw::quote [::pis::hw::grid_token $cols $rows]]
+    set body [string map [list @pairs@ [list $pairs] @grid@ $tok @newpage@ $newpage] $s]
+    set script "[::pis::hw::stack_open psi]\n$body\n[::pis::hw::page_close psi]\nset psiOut"
+    set got [::pis::hw::probe $script]
+    set best ""
+    set newform 0
+    set back "-"
+    set w0 "-"
+    set forms 0
+    foreach item $got {
+        lassign $item id idtok lay wins was
+        if {$id eq "-2"} {
+            # The page before the probe: a page that ALREADY shows the asked count cannot tell
+            # a token that works from a token that was ignored, and the answer says so.
+            set w0 $wins
+            continue
+        }
+        # A form only counts as a MATCH when it CHANGED the count to the asked one: a token the
+        # build ignored leaves the count where the previous form put it, so it can never win.
+        set changed [expr {$wins == $count && $wins != $was}]
+        if {$id eq "-1"} {
+            # The page's own token was put back - but the page says whether it took it: reporting
+            # the token we ASKED for would be the same "no error = it worked" mistake this file
+            # exists to avoid, so a failed restore is named as such.
+            set asked [string range $idtok 5 end]
+            if {$lay eq $asked} {
+                puts [format "BACK '%s' -> layout='%s' wins=%s" $idtok $lay $wins]
+            } else {
+                puts [format "BACK '%s' -> layout='%s' wins=%s (the page did NOT take its own token back)" \
+                    $idtok $lay $wins]
+            }
+            set back [format "layout='%s' wins=%s" $lay $wins]
+        } elseif {$id == 0} {
+            incr forms
+            puts [format "TRY new-page '%s' -> layout='%s' wins=%s was=%s" $idtok $lay $wins $was]
+            if {$changed} { set newform 1 }
+        } else {
+            incr forms
+            puts [format "TRY v%s '%s' -> layout='%s' wins=%s was=%s" $id $idtok $lay $wins $was]
+            if {$changed && $best eq ""} { set best $id }
+        }
+    }
+    puts [format "TEST make_grid %dx%d: asked for %d window(s), the page shows %s" \
+        $cols $rows $count $w0]
+    if {$best ne ""} {
+        puts [format "BEST variant %s gives %d window(s); keep it: ::pis::hw::use make_grid %s" \
+            $best $count $best]
+        return $best
+    }
+    if {$newform} {
+        puts [format "BEST the NEW-PAGE form gives %d window(s) and no variant does - report this line" $count]
+        return 0
+    }
+    if {$w0 eq $count} {
+        puts [format "BEST the page already shows %d window(s) and no form changed it - nothing to learn" $count]
+        return ""
+    }
+    puts [format "BEST none of the %d form(s) gives %d window(s); the page is back to %s" \
+        $forms $count $back]
+    if {!$newpage} {
+        puts [format "NEXT ::pis::hw::grid_probe %d %d 1   (also try a NEW page: 'AddPage' + the layout)" \
+            $cols $rows]
+    }
+    return ""
+}
+
+
 
 # One per-window record as a comma list, oldest window first: the variants load_model (or
 # load_result_in_window) used for windows 1..N, 0 where no variant worked.
@@ -926,7 +1175,7 @@ proc ::pis::hw::used {op {index ""}} {
 # (0 = no variant worked), plus the client letter of each window (H = HyperView, P = chart,
 # ? = cannot tell). This is the line the human copies back when only ok/fail is possible (ENV),
 # so the shape is fixed:
-#   DIAG T6d: layout=2x2 grid=1 wins=4 model=1,1,0,0 result=1,1,0,0 client=H,H,H,H
+#   DIAG T6e: layout=2x2 grid=1 wins=4 model=1,1,0,0 result=1,1,0,0 client=H,H,H,H
 # The short build code comes first (::pis::hw::build_code; the BUILD line has the full stamp),
 # so the human's copy-back names the copy of this file that produced the line.
 # "layout" is the "<rows>x<cols>" token of the last GOOD grid ("-" while none has succeeded);
@@ -989,10 +1238,15 @@ proc ::pis::hw::make_grid {cols rows} {
     # A grid that fails must never look like a good one in diag: the window count is cleared
     # before the variants run and written again only after the read-back below passed.
     set adapt_wins 0
-    ::pis::hw::run make_grid [dict create \
-        %cols $cols %rows $rows %count $count \
-        %grid [::pis::hw::grid_token $cols $rows] \
-        %legacy [::pis::hw::legacy_token $cols $rows]]
+    # A failed grid also names the ONE console line that answers "which token does this build
+    # accept" - otherwise the human is left with "no variant worked" and nothing to do next.
+    if {[catch {::pis::hw::run make_grid [dict create \
+            %cols $cols %rows $rows %count $count \
+            %grid [::pis::hw::grid_token $cols $rows] \
+            %legacy [::pis::hw::legacy_token $cols $rows]]} err]} {
+        error [format "%s | which token this build accepts: ::pis::hw::grid_probe %d %d" \
+            $err $cols $rows]
+    }
     # The run proved the grid through check_grid already; this second read-back (never
     # journaled - a check is not a step) is what the app REPORTS and what diag prints, so the
     # number in "wins=" is HyperView's own answer, not the number this file asked for.
@@ -1050,6 +1304,9 @@ proc ::pis::hw::help {} {
     }
     puts "  change one: ::pis::hw::use <op> <n>   e.g. ::pis::hw::use make_grid 2"
     puts "  what ran last: ::pis::hw::diag   (one line: layout, grid, wins and every window)"
+    puts "  what the page is now: ::pis::hw::page_info   (read-only: layout token, wins, open windows)"
+    puts "  which token this build accepts: ::pis::hw::grid_probe <cols> <rows> ?newpage 0|1?   (probe, not a step)"
+    puts "    add '1' as the third argument to also try a NEW page; the default leaves the page count alone"
     return
 }
 
@@ -1071,7 +1328,7 @@ proc ::pis::hw::reset_state {} {
 
 # --- build stamp: ONE line, printed when this file is sourced -------------------------
 # The line answers the first question on a HyperView machine ("which copy is this?"):
-#   BUILD T6d-20261110-1642 | make_grid variants=8 | adapter lines=NNN
+#   BUILD T6e-20261111-0918 | make_grid variants=8 | adapter lines=NNN
 # The line count is measured from the file itself at source time (below), so it cannot go
 # stale the way a hand-written number would.
 proc ::pis::hw::build_line {} {
@@ -1083,7 +1340,7 @@ proc ::pis::hw::build_line {} {
     return [format "BUILD %s | make_grid variants=%d | adapter lines=%d" $stamp $n $build_lines]
 }
 
-# The code part of the stamp (T6d in T6d-20261110-1642): what a DIAG line starts with. The
+# The code part of the stamp (T6e in T6e-20261111-0918): what a DIAG line starts with. The
 # time part only fits in the BUILD line - see the note at ::pis::BUILD.
 proc ::pis::hw::build_code {} {
     set stamp "no-stamp"
