@@ -31,6 +31,11 @@
 # through ::pis::hw - the same calls the GUI makes, so the journal looks the same.
 
 # --- the values to edit by hand -------------------------------------------------------
+# THE PATHS BELOW ARE PLACEHOLDERS. Nothing on this machine reads them: the file models an
+# owner machine, where C:/temp/model.h3d is whatever model the owner meant to load. Put real
+# paths here BEFORE sourcing the file - the check now verifies every one of them first and stops
+# with `VERDICT: FAIL input: ...` instead of blaming the code for a path that does not exist
+# (that is exactly what the pass-11 report showed).
 # (The if-guard lets a test preset a value; the file clears these six names after a run, so
 # sourcing it again after an edit always reads the values below and never a stale copy.)
 if {![info exists t6_model]} { set t6_model {C:/temp/model.h3d} }
@@ -170,6 +175,21 @@ proc ::t6::open_report {dir} {
 # line, because the file is what travels, not the console.
 proc ::t6::run {model results cols rows measure try_all} {
     ::t6::emit [format "T006 check %s" [::t6::stamp]]
+    # T-019 item 6: the two paths are checked BEFORE any HyperView call. A placeholder that was
+    # never replaced is an INPUT error, and the report says so in one line instead of letting
+    # every later step fail for the wrong reason.
+    if {![file isfile $model]} {
+        set why [format "input: model file not found: %s (edit MODEL at the top of this file)" $model]
+        ::t6::emit "CHECK $why"
+        return [list FAIL $why]
+    }
+    foreach f $results {
+        if {![file isfile $f]} {
+            set why [format "input: result file not found: %s (edit RESULT file(s) at the top of this file)" $f]
+            ::t6::emit "CHECK $why"
+            return [list FAIL $why]
+        }
+    }
     ::t6::emit [format "ASKED %dx%d = %d window(s), model %s" $cols $rows \
         [expr {$cols * $rows}] $model]
     ::t6::emit [format "ASKED result file(s) = %d" [llength $results]]
