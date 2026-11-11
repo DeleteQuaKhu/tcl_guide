@@ -48,7 +48,7 @@ proc ::pis::step01::need_adapter {} {
     }
     foreach name {reset_session reset_session_soft load_model_in_window \
                       load_model make_grid load_result_in_window verify_window \
-                      models_in_window order} {
+                      models_in_window order begin_run} {
         if {[llength [info commands ::pis::hw::$name]] == 0} {
             error "::pis::step01 needs the HyperView adapter: source _tcl_pis_11_hw_adapter.tcl first (missing ::pis::hw::$name)"
         }
@@ -105,26 +105,35 @@ proc ::pis::step01::validate {root cfg} {
     return [dict create model_file $model result_files $files cols $cols rows $rows]
 }
 
-# C1: the status bar AND the log get HyperView's own words for a failing load step, cut to 70
-# characters - never a generic "failed". Shape: "<step> window <k> variant <v>/<n> failed: <raw>",
-# where <v>/<n> is read out of the adapter's own message when it carries one ("?" otherwise), so
-# the line names the step, the window and the variant that really failed.
+# C1: the status bar AND the log get HyperView's own words for a failing load step - never a
+# generic "failed". Shape: "<step> window <k> failed: <raw>", so the line names the step, the
+# window and HyperView's REASON and nothing else (the adapter's own variant lines stay in the log
+# above it, which is where a variant number belongs).
+# T-019 item 4, two lengths on purpose: the LOG keeps the raw error in FULL (up to 300 characters,
+# its own line) because that is the text a diagnosis needs; the STATUS BAR keeps 70 characters
+# plus " (see log)". A cut that hides the method name ("...could not find requested method: ...")
+# is exactly what made the owner's report unreadable.
 proc ::pis::step01::raw_fail {step k err} {
     set raw [string map [list "\r" " " "\n" " "] [string trim $err]]
-    set v "?"
-    if {[regexp {variant ([0-9]+/[0-9]+) failed} $raw -> vv]} { set v $vv }
+    while {[string first "  " $raw] >= 0} { set raw [string map [list "  " " "] $raw] }
     # The adapter's own message repeats the step, the window and the variant this line already
-    # names; drop that prefix so the 70 characters are spent on HyperView's REASON.
+    # names; drop that prefix so the characters are spent on HyperView's REASON.
     regsub {^[A-Za-z_]+( window [0-9]+)? variant [0-9]+/[0-9]+ failed: } $raw {} raw
-    if {[string length $raw] > 70} { set raw "[string range $raw 0 69].." }
+    set i [string first " | pick another variant" $raw]
+    if {$i >= 0} { set raw [string range $raw 0 [expr {$i - 1}]] }
     if {[string trim $k] eq ""} {
-        set msg [format "%s variant %s failed: %s" $step $v $raw]
+        set head [format "%s failed" $step]
     } else {
-        set msg [format "%s window %s variant %s failed: %s" $step $k $v $raw]
+        set head [format "%s window %s failed" $step $k]
     }
+    set full $raw
+    if {[string length $full] > 300} { set full "[string range $full 0 297]..." }
+    set short $raw
+    if {[string length $short] > 70} { set short "[string range $short 0 69].. (see log)" }
+    set msg [format "%s: %s" $head $short]
     status_red "Error: $msg"
     if {[llength [info commands ::pis::common::log]] > 0} {
-        catch {::pis::common::log "" ERROR $msg}
+        catch {::pis::common::log "" ERROR [format "%s: %s" $head $full]}
     }
     return $msg
 }
@@ -157,6 +166,9 @@ proc ::pis::step01::window_call {k step label cmd} {
 # changes nothing and says nothing (conrod/tcl_guide/hv_model_loader.tcl:1362-1400 attaches the
 # result to a model handle and reports "no model is loaded in the window" at :1400), so attaching
 # blind is the silent failure the owner saw. A window that cannot show its model stops there.
+# The result step itself is the owner's working reference (F3): AddModel, model SetResult,
+# client WaitForResults - that whole sequence lives in ::pis::hw::load_result_in_window, so this
+# module keeps the one order it can check: model, model verified, result, result read back.
 proc ::pis::step01::load_window {k model file} {
     window_call $k load_model [file tail $model] [list ::pis::hw::load_model_in_window $k $model]
     set have -1
@@ -175,6 +187,24 @@ proc ::pis::step01::load_window {k model file} {
     if {[catch {::pis::hw::verify_window $k} why]} {
         set msg [format "window %d read-back failed: %s" $k [string trim $why]]
         status_red "Error: $msg"
+        error $msg
+    }
+    return $k
+}
+
+# One window of the run, and the owner's "which windows were not attempted" tail (T-019 item 5).
+# The loop still STOPS at the first failing window (SPEC.md error states); what changes is that the
+# message now says what that decision left out - on the pass-11 report only window 1 had been
+# touched and nothing in the log said so.
+proc ::pis::step01::load_window_guarded {k total model file} {
+    if {[catch {load_window $k $model $file} why]} {
+        set msg [string trim $why]
+        if {$k < $total} {
+            append msg [format "; windows %d..%d not attempted" [expr {$k + 1}] $total]
+        }
+        if {[llength [info commands ::pis::common::log]] > 0} {
+            catch {::pis::common::log "" ERROR "Load All stopped at window $k: $msg"}
+        }
         error $msg
     }
     return $k
@@ -210,6 +240,8 @@ proc ::pis::step01::load_all {cfg} {
     ::pis::common::log $cfg INFO [format "Load All: %s + %d result file(s) into %dx%d (order %d)" \
         $base $n $cols $rows $order]
     ::pis::hw::status [format "Load All: order %d, %d window(s)" $order $n]
+    # T-019: the OPTIONAL result wait explains itself once per RUN, not once per window.
+    ::pis::hw::begin_run
     # An ALREADY EMPTY session is not a failure: on an empty page the "0 models" check passes
     # without proving the delete verb, so ::pis::hw::reset_session_soft keeps the run alive
     # there and still reports a page that really keeps its models.
@@ -218,13 +250,13 @@ proc ::pis::step01::load_all {cfg} {
         # Window 1 is filled while the page still has the window it starts with, then the
         # grid is built, then the other windows. Order 2 exists for a build that drops the
         # models of a rebuilt page; the per-window read-back decides, not the order.
-        load_window 1 $model [lindex $files 0]
+        load_window_guarded 1 $n $model [lindex $files 0]
         call "Load All" [format "window grid %dx%d" $cols $rows] \
             [list ::pis::hw::make_grid $cols $rows]
         set k 1
         foreach f [lrange $files 1 end] {
             incr k
-            load_window $k $model $f
+            load_window_guarded $k $n $model $f
         }
     } else {
         call "Load All" [format "window grid %dx%d" $cols $rows] \
@@ -232,7 +264,7 @@ proc ::pis::step01::load_all {cfg} {
         set k 0
         foreach f $files {
             incr k
-            load_window $k $model $f
+            load_window_guarded $k $n $model $f
         }
     }
     set last_result $n

@@ -30,6 +30,19 @@
 #   ::pis::hw::verify_window {index}               read-back: window <index> holds 1 model + 1 result
 #   ::pis::hw::select_window {index}               make window <index> the active one
 #   ::pis::hw::import_legend {path}                import a legend into the active window
+#
+# T-019 (2026-11-11) - the result step no longer DEPENDS on WaitForResults. The supplier documents
+# it as valid only in the HyperView - MultiCore profile (docs/refs/HV_API.md sec.5, S16/S17); the
+# owner's build has no such method at all, and the unguarded call stopped Load All on window 1
+# while windows 2..N were never attempted. It is now:
+#   * a guarded OPTIMISATION: poIPostManager GetAsyncMode (S18) is asked once per session, and
+#     only a `1` allows a wait; anything else is skipped with ONE `INFO result wait skipped: <why>`
+#     per run;
+#   * a variant list of its own, op `result_wait`: client form, manager form, and LAST the skip -
+#     a form that failed in this session is not offered again;
+#   * never the proof: the proof is a BOUNDED read-back (poIModel GetResultCtrlHandle S25 +
+#     poIResultCtrl GetNumberOfSubcases S27, ::pis::hw::retry_tries attempts, `after` + `update`,
+#     no coroutine). A wait that fails while the read-back succeeds is a WARN.
 # Console helpers, no file edit needed:
 #   ::pis::hw::use {op n}       try variant n from now on (e.g. ::pis::hw::use make_grid 2);
 #                               "::pis::hw::use order 2" picks the Load All step ORDER
@@ -156,6 +169,26 @@ namespace eval ::pis::hw {
     # ID of the model THIS app loaded (the reference keeps AddModel's answer the same way). An
     # ARRAY on purpose: the load script writes it from inside the folded one-line script.
     if {![info exists adapt_models]} { array set adapt_models {} }
+    # T-019: the GetAsyncMode answer for THIS session ("-" = not asked yet, 0 or 1). WaitForResults
+    # is documented as valid only in the HyperView - MultiCore profile (docs/refs/HV_API.md sec.5,
+    # S16/S17), and GetAsyncMode is the documented question (S18). Asked ONCE per session.
+    if {![info exists adapt_async]} { set adapt_async "-" }
+    # The wait variants that failed in THIS session (a list of variant numbers): the fallback that
+    # keeps "a wait with no fallback" from ever happening - the next window uses the next form, and
+    # the last form is "no wait at all".
+    if {![info exists adapt_wait_bad]} { set adapt_wait_bad {} }
+    # The error the optional wait raised in the last result step ("" = none). Written from INSIDE
+    # the folded script, read right after it ran: a failing wait is a WARN, never an ERROR.
+    if {![info exists wait_error]} { set wait_error "" }
+    # Has this RUN already written its one "result wait ..." line? ::pis::hw::begin_run clears it,
+    # so Load All explains the wait once per run instead of once per window.
+    if {![info exists adapt_wait_notes]} { set adapt_wait_notes 0 }
+    # The BOUNDED read-back retry of the result step (T-019): fixed small count, no infinite loop.
+    # Tcl 8.5 only - "after" + "catch {update}" between the attempts, no coroutine. A test (or an
+    # impatient owner) may set these to 1 / 0 on the console; they are always re-validated.
+    if {![info exists retry_tries]} { set retry_tries 4 }
+    if {![info exists retry_delay]} { set retry_delay 250 }
+
     # The ini this copy reads [layout_tokens] from ("<script dir>/../00_config/
     # pis_workflow_config.ini"), written when the file is sourced (below). "" = read no ini.
     if {![info exists ini_file]} { set ini_file "" }
@@ -166,7 +199,7 @@ namespace eval ::pis::hw {
 # line carries the facts only (id/api/model/result), because the stamp plus 8 windows of 1/0
 # lists would not fit in the 80 characters a diag line is allowed.
 namespace eval ::pis {
-    variable BUILD "T6j-20261111-1650"
+    variable BUILD "T6k-20261111-1703"
 }
 
 # --- script builders: the hwi handle API is spelled once, here ------------------------
@@ -211,6 +244,117 @@ catch {@p@Win ReleaseHandle}}
 proc ::pis::hw::set_layout_step {id} {
     set s {@p@Page SetLayout @id@}
     return "[::pis::hw::stack_open pis]\n[string map [list @p@ pis @id@ $id] $s]\n[::pis::hw::page_close pis]"
+}
+
+# --- the OPTIONAL result wait (T-019) -------------------------------------------------
+# Why this exists: the owner's build has no WaitForResults at all, and the supplier documents it
+# as "valid only in HyperView - MultiCore profile" (docs/refs/HV_API.md sec.5, S16/S17). Pass 8
+# used it because the owner's reference script did (owner fact F3), without checking that
+# precondition, so every Load All stopped on the first window. It is now an OPTIMISATION with a
+# guard and a skip variant: the read-back decides, never the wait.
+
+# One line for the log: newlines flattened, cut to <n> characters with "..". n <= 0 means no cut.
+proc ::pis::hw::clip {text n} {
+    set t [string map [list "\r" " " "\n" " "] [string trim $text]]
+    while {[string first "  " $t] >= 0} { set t [string map [list "  " " "] $t] }
+    if {$n > 0 && [string length $t] > $n} { set t "[string range $t 0 [expr {$n - 2}]].." }
+    return $t
+}
+
+# Read-only: is this session in the HyperView - MultiCore profile? S18 documents the question
+# ('<manager> GetAsyncMode' -> true/false, "Errors: None") and S20 the handle it needs
+# ('<session> GetClientManagerHandle mgr animation', the name from the supplier's own example).
+# Answers 1, 0, or "-" (the question could not be asked: no wrapper, an older build, a probe that
+# raised). Never raises - a missing guard must not break a load.
+proc ::pis::hw::async_script {} {
+    set s {set @p@A -
+if {![catch {@p@S GetClientManagerHandle @p@Mgr animation}]} {
+    if {![catch {set @p@A [@p@Mgr GetAsyncMode]}]} {
+        if {[string is boolean -strict $@p@A]} {set @p@A [expr {$@p@A ? 1 : 0}]} else {set @p@A -}
+    }
+    catch {@p@Mgr ReleaseHandle}
+}
+set @p@A}
+    return "[::pis::hw::stack_open psi]\n[string map [list @p@ psi] $s]\n[::pis::hw::page_close psi]\nset psiA"
+}
+
+# The cached answer. "" wrapper or a failed probe keeps "-" (unknown) for this session: asking
+# again on every window would only repeat the same silence.
+proc ::pis::hw::async_mode {} {
+    variable adapt_async
+    if {$adapt_async ne "-"} { return $adapt_async }
+    if {[llength [info commands ::pis::hw::probe]] == 0} { return "-" }
+    set got ""
+    if {[catch {set got [string trim [::pis::hw::probe [::pis::hw::async_script]]]}]} { return "-" }
+    if {[string is boolean -strict $got]} {
+        set adapt_async [expr {$got ? 1 : 0}]
+    }
+    return $adapt_async
+}
+
+# Which wait this run uses, as a dict {n cmd src why}. The variant list of op `result_wait` IS the
+# fallback chain and its LAST entry is "no wait at all", so a plan always exists:
+#   1. the human pinned a variant with ::pis::hw::use result_wait <n> -> start there;
+#   2. GetAsyncMode is not 1 (or cannot be read)      -> the skip variant, reason named;
+#   3. otherwise the first documented form that has not already failed in this session.
+# The ONE log line per run is written here (INFO "result wait ..." or INFO "result wait skipped:
+# <reason>"), so a skipped wait is visible without reading code and is never repeated per window.
+proc ::pis::hw::wait_decide {} {
+    variable adapt_wait_bad
+    variable adapt_wait_notes
+    set list [::pis::hw::variants result_wait]
+    set total [llength $list]
+    set skip [lindex $list [expr {$total - 1}]]
+    set start [::pis::hw::at result_wait]
+    if {![string is integer -strict $start] || $start < 1 || $start > $total} { set start 1 }
+    set plan [dict create n [dict get $skip n] cmd "" src [dict get $skip src] why ""]
+    set why ""
+    if {$start >= $total} {
+        set why "pinned by ::pis::hw::use result_wait $start"
+    } else {
+        set a [::pis::hw::async_mode]
+        if {$a eq "-"} {
+            set why "GetAsyncMode could not be read (poIPostManager S18), MultiCore state unknown"
+        } elseif {$a != 1} {
+            set why "GetAsyncMode answered $a, this session is not HyperView - MultiCore"
+        } else {
+            set why "no documented wait form is left"
+            for {set n $start} {$n < $total} {incr n} {
+                set v [lindex $list [expr {$n - 1}]]
+                if {[string trim [dict get $v cmd]] eq ""} { continue }
+                if {[lsearch -exact $adapt_wait_bad [dict get $v n]] >= 0} {
+                    set why [format "variant %d failed earlier in this session" [dict get $v n]]
+                    continue
+                }
+                set plan [dict create n [dict get $v n] cmd [dict get $v cmd] \
+                    src [dict get $v src] why ""]
+                set why ""
+                break
+            }
+        }
+    }
+    if {[string trim [dict get $plan cmd]] eq ""} {
+        dict set plan why $why
+        if {!$adapt_wait_notes} {
+            set adapt_wait_notes 1
+            ::pis::hw::note INFO [format "result wait skipped: %s" $why]
+        }
+    } elseif {!$adapt_wait_notes} {
+        set adapt_wait_notes 1
+        ::pis::hw::note INFO [format "result wait: variant %d/%d <%s> (%s)" \
+            [dict get $plan n] $total [::pis::hw::one_line [dict get $plan cmd]] \
+            [dict get $plan src]]
+    }
+    return $plan
+}
+
+# Called once by each Load All: the "result wait ..." line belongs to the RUN, not to the session.
+proc ::pis::hw::begin_run {} {
+    variable adapt_wait_notes
+    variable wait_error
+    set adapt_wait_notes 0
+    set wait_error ""
+    return
 }
 
 # --- read-back checks: each one ends with the value ::pis::hw::probe must return -------
@@ -579,17 +723,57 @@ proc ::pis::hw::models_in_window {index} {
     return $got
 }
 
-# Result attached in one window: a result controller exists for the window's model AND the
-# model list is unchanged (one model). This is a PROXY - it cannot name the result file, and
-# it is honest about that: a build that keeps a controller on an empty model passes it, so the
-# human's "the windows show a contour" is still the final word.
+# The result read-back of one window (T-019): the window must hold exactly ONE model, and that
+# model's result controller must answer a result FILE. Both documented calls are asked:
+#   poIModel GetResultCtrlHandle      (S25: raises with no result, 0 on success)
+#   poIResultCtrl GetNumberOfSubcases (S27: an integer; 0 = no subcase in the file)
+# A BOUNDED retry (::pis::hw::retry_tries, default 4, and ::pis::hw::retry_delay ms) is allowed
+# because a load may still be in flight; there is no infinite loop and no dependency on
+# WaitForResults. Answers "1" on success and RAISES with the window, the attempt count and
+# HyperView's own last words otherwise - a timeout is a FAIL, never a hang and never a silent OK.
 proc ::pis::hw::check_result_attached {win} {
-    set s {set @p@Mid [@p@C GetActiveModel]
+    set s {set @p@Ok 0
+set @p@Why "the retry never ran"
+set @p@K 4
+catch {set @p@K $::pis::hw::retry_tries}
+if {![string is integer -strict $@p@K] || $@p@K < 1} {set @p@K 1}
+set @p@D 250
+catch {set @p@D $::pis::hw::retry_delay}
+if {![string is integer -strict $@p@D] || $@p@D < 0} {set @p@D 0}
+set @p@N [llength [@p@C GetModelList]]
+if {$@p@N != 1} {
+    error "window @win@ holds $@p@N model(s), expected exactly 1"
+}
+set @p@Mid [@p@C GetActiveModel]
+if {[info exists ::pis::hw::adapt_models(@win@)]} {set @p@Mid $::pis::hw::adapt_models(@win@)}
+if {![string is integer -strict $@p@Mid] || $@p@Mid <= 0} {
+    error "window @win@ has no model id (GetActiveModel answered '$@p@Mid')"
+}
 @p@C GetModelHandle @p@M $@p@Mid
-@p@M GetResultCtrlHandle @p@R
-catch {@p@R ReleaseHandle}
-set @p@N [llength [@p@C GetModelList]]}
-    return "[::pis::hw::window_open psi $win]\n[string map [list @p@ psi] $s]\n[::pis::hw::window_close psi]\nset psiN"
+for {set @p@T 1} {$@p@T <= $@p@K} {incr @p@T} {
+    set @p@Why ""
+    if {![catch {@p@M GetResultCtrlHandle @p@R} @p@Why]} {
+        set @p@Sub 0
+        if {[catch {set @p@Sub [@p@R GetNumberOfSubcases]} @p@Why]} {set @p@Sub 0}
+        catch {@p@R ReleaseHandle}
+        if {[string is integer -strict $@p@Sub] && $@p@Sub > 0} {
+            set @p@Ok 1
+            break
+        }
+        set @p@Why "GetNumberOfSubcases answered '$@p@Sub'"
+    }
+    if {$@p@T < $@p@K} {
+        catch {after $@p@D}
+        catch {update}
+    }
+}
+catch {@p@M ReleaseHandle}
+if {!$@p@Ok} {
+    error "window @win@: no result after $@p@K read-back attempt(s): [string trim $@p@Why]"
+}
+set @p@Ok}
+    set s [string map [list @p@ psi @win@ $win] $s]
+    return "[::pis::hw::window_open psi $win]\n$s\n[::pis::hw::window_close psi]\nset psiOk"
 }
 # One window, read back in ONE probe: "<models>:<resultCtrl>". "1:1" is the only ready
 # answer - exactly one model AND a result controller that really exists (GetResultCtrlHandle
@@ -706,6 +890,42 @@ for {set pisWi 1} {$pisWi <= %count} {incr pisWi} {catch {pisPage GetWindowHandl
 }
 
 
+# The per-window result step, as a script template (T-019). @idx@ = the window token (%index or a
+# number), @path@ = the result-file token (%path), @wait@ = the wait fragment chosen by
+# ::pis::hw::wait_decide ("" = skip this time). Order, and the reason for each line:
+#   model id  - the id AddModel RETURNED (::pis::hw::adapt_models) or the client's active model;
+#               a 0/empty answer is a NAMED failure (poIPost AddModel, S21: "model ID, or Null_ID
+#               (0) if AddModel failed"), so no result is ever attached to nothing;
+#   SetResult - poIModel SetResult (S9) on THAT model's handle; its warning code cannot fail the
+#               step, the read-back decides;
+#   GetError  - read right after SetResult because it CLEARS the condition (S19) and because a
+#               load error may be reported there instead of as a Tcl error;
+#   wait      - the optional, guarded fragment (may be empty). Its own error is caught INTO
+#               ::pis::hw::wait_error: a failed wait is a WARN, never a failed step;
+#   GetError  - cleared once more, so a wait that set the condition cannot fail the NEXT step.
+proc ::pis::hw::result_cmd {idx path wait} {
+    set s {set pisMid [pisC GetActiveModel]
+if {[info exists ::pis::hw::adapt_models(@idx@)]} {set pisMid $::pis::hw::adapt_models(@idx@)}
+if {![string is integer -strict $pisMid] || $pisMid <= 0} {
+    error "window @idx@: AddModel returned no model id (got '$pisMid'), so no result can attach - check that the model really loads in this window"
+}
+pisC GetModelHandle pisM $pisMid
+pisM SetResult @path@
+set pisSE ""
+catch {set pisSE [pisS GetError]}
+set ::pis::hw::wait_error ""
+catch {
+@wait@
+} ::pis::hw::wait_error
+catch {pisS GetError}
+catch {pisM ReleaseHandle}
+if {[string trim $pisSE] ne "" && [string trim $pisSE] ne "0"} {
+    error "window @idx@: session error after SetResult: [string trim $pisSE]"
+}}
+    set body [string map [list @idx@ $idx @path@ $path @wait@ $wait] $s]
+    return "[::pis::hw::window_open pis $idx]\n$body\n[::pis::hw::window_close pis]"
+}
+
 # op -> ordered list of variant dicts, fields:
 #   n     1..N in trial order (start variant = 1 unless ::pis::hw::use moved it)
 #   via   hwi = one handle script through exec_hwi; hwc = one command through exec
@@ -735,18 +955,9 @@ for {set pisWi 1} {$pisWi <= $pisNW} {incr pisWi} {pisPage GetWindowHandle pisWi
 set pisNP [pisP GetNumberOfPages]
 for {set pisPi 1} {$pisPi <= $pisNP} {incr pisPi} {pisP GetPageHandle pisPage $pisPi; set pisNW [pisPage GetNumberOfWindows]; for {set pisWi 1} {$pisWi <= $pisNW} {incr pisWi} {pisPage GetWindowHandle pisWin $pisWi; pisWin GetClientHandle pisC; foreach pisMi [pisC GetModelList] {if {[string is integer -strict $pisMi] && $pisMi > 0} {pisC DeleteModel $pisMi}}; catch {pisC ReleaseHandle}; catch {pisWin ReleaseHandle}}; catch {pisPage ReleaseHandle}}
 }
-    # The result step of the working reference (F3, conrod/_tmp_hv/training.tcl:41-43): the model
-    # handle is opened with the ID of the model in THIS window - the ID AddModel returned when
-    # this session recorded one (::pis::hw::adapt_models), otherwise the client's active model
-    # (:55, TCL_StressExport.tcl:22) - then SetResult, then 'client WaitForResults' (owner fact
-    # F3: the reference waits before it reads anything back), then the result is read back.
-    set result_set {
-set pisMid [pisC GetActiveModel]
-if {[info exists ::pis::hw::adapt_models(%index)]} {set pisMid $::pis::hw::adapt_models(%index)}
-pisC GetModelHandle pisM $pisMid
-pisM SetResult %path
-pisC WaitForResults
-catch {pisM ReleaseHandle}}
+    # The result step (T-019) is built by ::pis::hw::result_cmd, which ::pis::hw::load_result_in_window
+    # re-builds per window so the OPTIONAL wait chosen by ::pis::hw::wait_decide is in it. The table
+    # entry below therefore carries NO wait: the documented read-back alone has to pass.
 
     set t [dict create]
     dict set t reset_session [list \
@@ -777,10 +988,10 @@ catch {pisM ReleaseHandle}}
     # the very model this app loaded instead of guessing it.
     dict set t load_model [list \
         [dict create n 1 via hwi \
-            cmd "[::pis::hw::window_open pis %win]\nset pisMid \[pisC AddModel %path\]\nset ::pis::hw::adapt_models(%win) \$pisMid\npisC Draw\n[::pis::hw::window_close pis]" \
+            cmd "[::pis::hw::window_open pis %win]\nset pisMid \[pisC AddModel %path\]\nif {!\[string is integer -strict \$pisMid\] || \$pisMid <= 0} {error \"window %win: AddModel returned '\$pisMid' for %path - the model did not load (poIPost AddModel answers 0 on failure, HV_API.md sec.5 S21)\"}\nset ::pis::hw::adapt_models(%win) \$pisMid\npisC Draw\n[::pis::hw::window_close pis]" \
             check [::pis::hw::check_models_in_window %win] want 1 \
-            src {conrod/_tmp_hv/training.tcl:36,40-43 (AddModel returns the id, SetResult, Draw) + conrod/tcl_guide/hv_model_loader.tcl:1333-1334} \
-            note {window %win holds exactly one model, and its id is kept for the result step}] \
+            src {docs/refs/HV_API.md sec.5 S21 (poIPost AddModel: "the model ID, or Null_ID (0) if AddModel failed") + conrod/_tmp_hv/training.tcl:36-43 (the returned id is kept)} \
+            note {window %win holds exactly one model, its id is kept for the result step, and a 0 from AddModel is a named failure}] \
         [dict create n 2 via hwi \
             cmd "[::pis::hw::stack_open pis]\npisPage GetWindowHandle pisWin %win\npisWin GetClientHandle pisC\npisC AddModel %path\npisWin Draw\n[::pis::hw::window_close pis]" \
             check [::pis::hw::check_models_in_window %win] want 1 \
@@ -804,10 +1015,26 @@ catch {pisM ReleaseHandle}}
             note {%count windows, every one a HYPERVIEW client (no SetClientType: training.tcl:9,20 would make a chart); id measured by layout_table}]]
     dict set t load_result_in_window [list \
         [dict create n 1 via hwi \
-            cmd "[::pis::hw::window_open pis %index]\n$result_set\n[::pis::hw::window_close pis]" \
+            cmd [::pis::hw::result_cmd %index %path ""] \
             check [::pis::hw::check_result_attached %index] want 1 \
-            src {conrod/_tmp_hv/training.tcl:41-43 (GetModelHandle, SetResult, Draw) + owner fact F3 (client WaitForResults)} \
-            note {window %index keeps one model and gains a result controller after WaitForResults}]]
+            src {docs/refs/HV_API.md sec.4 (poIModel SetResult S9, GetResultCtrlHandle S25, poIResultCtrl GetNumberOfSubcases S27) + sec.5 (poIPost AddModel S21, GetError S19)} \
+            note {window %index holds exactly one model AND its own result file, proved by a BOUNDED read-back - never by WaitForResults}]]
+    # --- the OPTIONAL result wait (T-019) -------------------------------------------------
+    # Its own variant list, because it IS the fallback chain: two documented forms, then "no wait
+    # at all". ::pis::hw::wait_decide picks from it (only when poIPostManager GetAsyncMode answers 1)
+    # and the LAST entry must always be the skip - a wait with no fallback is not allowed.
+    dict set t result_wait [list \
+        [dict create n 1 via hwi frag 1 cmd {pisC WaitForResults scalar} \
+            src {docs/refs/HV_API.md sec.5 S16 (poIPost WaitForResults, 2024) - type "scalar" is one of the documented values} \
+            note {the client waits for the scalar results before the read-back runs}] \
+        [dict create n 2 via hwi frag 1 cmd {pisS GetClientManagerHandle pisMgr animation
+pisMgr WaitForResults scalar
+catch {pisMgr ReleaseHandle}} \
+            src {docs/refs/HV_API.md sec.5 S17 (poIPostManager WaitForResults) + S20 (GetClientManagerHandle, name "animation" from the supplier example)} \
+            note {same wait through the session manager instead of the window client}] \
+        [dict create n 3 via hwi frag 1 cmd {} \
+            src {docs/refs/HV_API.md sec.4 S25/S27 (the read-back decides) + sec.5 S18 (GetAsyncMode guard)} \
+            note {no wait at all - the bounded read-back is the only proof, and it is the LAST entry on purpose}]]
     dict set t select_window [list \
         [dict create n 1 via hwi \
             cmd "[::pis::hw::stack_open pis]\npisPage SetActiveWindow %index\n[::pis::hw::page_close pis]" \
@@ -1128,8 +1355,15 @@ proc ::pis::hw::run_list {op list start values} {
             set lasterr [string trim $res]
         }
         if {$firsterr eq ""} { set firsterr $lasterr }
-        ::pis::hw::note WARN [format "%s%s: variant %d/%d failed (%s); trying the next one" \
-            $op $scope $n $total $lasterr]
+        if {$n < $total} {
+            ::pis::hw::note WARN [format "%s%s: variant %d/%d failed (%s); trying the next one" \
+                $op $scope $n $total $lasterr]
+        } else {
+            # The LAST variant: there is no next one, and saying "trying the next one" here would
+            # send the human looking for a variant that does not exist (owner report, pass 11).
+            ::pis::hw::note WARN [format "%s%s: variant %d/%d failed (%s); that was the last variant" \
+                $op $scope $n $total $lasterr]
+        }
         incr n
     }
     # No variant worked. The message names the step, the window (when there is one), the
@@ -1384,6 +1618,7 @@ proc ::pis::hw::make_grid {cols rows} {
 }
 
 proc ::pis::hw::load_result_in_window {index path} {
+    variable adapt_wait_bad
     if {![string is integer -strict $index] || $index < 1} {
         error "::pis::hw::load_result_in_window: window index must be a positive integer, got: '$index'"
     }
@@ -1392,8 +1627,33 @@ proc ::pis::hw::load_result_in_window {index path} {
     if {![file isfile $p]} {
         error "::pis::hw::load_result_in_window: result file not found: $p"
     }
-    return [::pis::hw::run load_result_in_window \
+    # T-019: the OPTIONAL wait is decided BEFORE the script is built. Only the poIPostManager
+    # GetAsyncMode guard can put a wait into the step, and the skip variant is always available,
+    # so no build can lose a window over it. The table's variant list stays the audit trail;
+    # only its cmd is re-built, with the chosen fragment.
+    set plan [::pis::hw::wait_decide]
+    set wcmd [dict get $plan cmd]
+    set list [::pis::hw::variants load_result_in_window]
+    set built {}
+    foreach v $list {
+        lappend built [dict replace $v cmd [::pis::hw::result_cmd %index %path $wcmd]]
+    }
+    set ::pis::hw::wait_error ""
+    set res [::pis::hw::run_list load_result_in_window $built \
+        [::pis::hw::at load_result_in_window] \
         [dict create %path $p %index $index %zindex [expr {$index - 1}]]]
+    # A wait that failed while the read-back SUCCEEDED is a WARN, not an ERROR (T-019), and that
+    # form is not tried again in this session - the next window uses the next form and the chain
+    # ends at "no wait at all".
+    set werr ""
+    catch {set werr $::pis::hw::wait_error}
+    if {[string trim $werr] ne ""} {
+        ::pis::hw::note WARN [format \
+            "load_result_in_window window %d: result wait failed: %s - the read-back decided" \
+            $index [::pis::hw::clip $werr 300]]
+        if {$wcmd ne ""} { lappend adapt_wait_bad [dict get $plan n] }
+    }
+    return $res
 }
 
 proc ::pis::hw::select_window {index} {
@@ -1450,12 +1710,20 @@ proc ::pis::hw::reset_state {} {
     variable adapt_tokens
     variable adapt_layouts
     variable adapt_models
+    variable adapt_async
+    variable adapt_wait_bad
+    variable adapt_wait_notes
+    variable wait_error
     set adapt_at [dict create]
     set adapt_used [dict create]
     set adapt_order 1
     set adapt_grid "-"
     set adapt_tokens [dict create]
     set adapt_layouts [dict create]
+    set adapt_async "-"
+    set adapt_wait_bad {}
+    set adapt_wait_notes 0
+    set wait_error ""
     catch {array unset adapt_models}
     array set adapt_models {}
     return
