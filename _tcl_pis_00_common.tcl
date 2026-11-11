@@ -81,6 +81,38 @@ proc ::pis::common::parse_ini {text path} {
     return $out
 }
 
+# The [layout_tokens] section of ONE ini file, read-only: {"<cols>x<rows>" -> "<token>"}.
+# A layout token belongs to the BUILD, not to a doc: on the owner's machine a guessed spelling
+# is answered with silence, and the only token that cannot be wrong is the one the page itself
+# reports through '<page> GetLayout' (::pis::hw::grid_capture). The owner pastes that line into
+# the ini BY HAND - nothing here writes it.
+# Never throws: a missing, unreadable or corrupt file answers {} and the caller falls back to
+# its documented forms. Keys are "<cols>x<rows>" in GUI order; an entry that is not a positive
+# pair with a non-empty value is dropped, never guessed.
+proc ::pis::common::read_layout_tokens {path} {
+    if {[string trim $path] eq ""} { return [dict create] }
+    if {[catch {open $path r} fh]} { return [dict create] }
+    set text ""
+    if {[catch {set text [read $fh]}]} {
+        catch {close $fh}
+        return [dict create]
+    }
+    close $fh
+    set kv [dict create]
+    if {[catch {set kv [dict get [parse_ini $text $path] layout_tokens]}]} {
+        return [dict create]
+    }
+    set out [dict create]
+    dict for {k v} $kv {
+        set val [string trim $v]
+        if {$val eq ""} { continue }
+        if {![regexp {^([0-9]+)x([0-9]+)$} $k -> c r]} { continue }
+        if {$c < 1 || $r < 1} { continue }
+        dict set out $k $val
+    }
+    return $out
+}
+
 # Fill in missing item-section keys so later tasks can read them blindly, and
 # coerce the boolean keys (a bad value warns once, it never crashes the load).
 proc ::pis::common::normalize {cfg} {

@@ -53,17 +53,41 @@
 #                               variant to keep - NOT a step, never journaled. newpage 1 also
 #                               tries the AddPage form, which leaves a page behind (0 = no
 #                               page is added, so the default changes nothing structural)
-#   ::pis::hw::reset_state {}   variants + order back to 1 (tests)
+#   ::pis::hw::grid_capture {}  read-only: the layout token the page is IN, as ONE GRID line
+#                               plus the ::pis::hw::grid_token_set line to paste (the owner
+#                               sets the layout by hand, HyperView names its own token)
+#   ::pis::hw::grid_token_set {cols rows token}
+#                               remember that token for this cols x rows in this session and
+#                               print the [layout_tokens] line for the ini (added by hand)
+#   ::pis::hw::reset_state {}   variants + order back to 1, no captured token (tests)
 #   ::pis::hw::run {op values}  run an op (the six operations call this)
 #   ::pis::hw::used {op {win}}  variant number that step really used (0 = none worked)
-#   ::pis::hw::build_line {}    the ONE BUILD line (stamp, grid variants, line count)
+#   ::pis::hw::build_line {}    the ONE BUILD line (stamp, grid variants, line count, tokens)
 #   ::pis::hw::announce {}      print that line to the console and to the GUI log
 #
-# BUILD STAMP (T-006 iteration, 2026-11-10): ::pis::BUILD is a short code written BY HAND
-# when this file changes, e.g. T6e-20261111-0918, so the HyperView machine can be matched to
+# BUILD STAMP (T-006 iteration, 2026-11-11): ::pis::BUILD is a short code written BY HAND
+# when this file changes, e.g. T6f-20261111-1018, so the HyperView machine can be matched to
 # a copy of this file without a guess. Sourcing this file prints ONE line,
-#   BUILD T6e-20261111-0918 | make_grid variants=8 | adapter lines=<n>
+#   BUILD T6f-20261111-1018 | make_grid variants=8 | adapter lines=<n> | tokens=<n>
 # and every ::pis::hw::diag line starts with the same stamp (the time part only fits there).
+#
+# OWNER-CAPTURED LAYOUT TOKEN (owner report, 2026-11-11): on the owner's machine Load All with
+# layout 2x2 and 4x1 left the page as it was, while 2x1 and 1x2 worked - so the token is a
+# property of THIS BUILD, not of a document, and every guessed spelling is a guess. The one
+# thing that cannot be wrong is the token the page is already in: conrod/_tmp_hv/
+# batchImportOdb.tcl:105 reads '<page> GetLayout' and :126 applies THAT token with SetLayout.
+# So the token stops being guessed:
+#   1. the owner picks the layout by hand in HyperView, types ::pis::hw::grid_capture, and the
+#      console prints ONE GRID line + the ::pis::hw::grid_token_set line that stores it;
+#   2. that token (this session, or the [layout_tokens] section of the ini, pasted by hand) is
+#      the FIRST form make_grid tries for that cols x rows; the documented variants follow it
+#      unchanged, so a wrong captured token can still fall through;
+#   3. a page that ALREADY is the asked grid is never rebuilt: no SetLayout at all, ONE
+#      comment-only journal line saying a replay needs the same layout set by hand (a fake hwi
+#      line would claim the journal can rebuild a grid this file never built);
+#   4. a grid that still fails prints what was asked, what the page answered (wins=, layout=),
+#      the last form tried and the Fix line that tells the owner what to do next.
+# Nothing here reads a token out of a doc, and nothing writes the ini: one ini, one writer.
 #
 # PER-WINDOW LOADING (fix, 2026-11-10): every window is its own client with its OWN model
 # list, so loading the model once into window 1 leaves windows 2..N empty and the result of
@@ -126,14 +150,21 @@ namespace eval ::pis::hw {
     # How many lines THIS copy of the file has (written when it is sourced, below); the BUILD
     # line prints it so "adapter lines=NNN" is measured, never typed by hand.
     if {![info exists build_lines]} { set build_lines 0 }
+    # The layout tokens the OWNER captured from this build (::pis::hw::grid_token_set), keyed
+    # "<cols>x<rows>" in GUI order ("4x1" = 4 columns, 1 row). The VALUE is HyperView's own
+    # spelling, whatever it is. Session only, and never inferred from a doc.
+    if {![info exists adapt_tokens]} { set adapt_tokens [dict create] }
+    # The ini this copy reads [layout_tokens] from ("<script dir>/../00_config/
+    # pis_workflow_config.ini"), written when the file is sourced (below). "" = read no ini.
+    if {![info exists ini_file]} { set ini_file "" }
 }
 
 # The build stamp: short code + yyyymmdd-hhmm, written BY HAND when this file changes (the
 # adapter never derives it). The BUILD line and the GUI start line carry the FULL stamp;
-# ::pis::hw::diag carries only the code part (T6e), because the full stamp plus 8 windows of
+# ::pis::hw::diag carries only the code part (T6f), because the full stamp plus 8 windows of
 # model=/result=/client= lists would not fit in the 80 characters a diag line is allowed.
 namespace eval ::pis {
-    variable BUILD "T6e-20261111-0918"
+    variable BUILD "T6f-20261111-1018"
 }
 
 # --- script builders: the hwi handle API is spelled once, here ------------------------
@@ -209,6 +240,156 @@ proc ::pis::hw::legacy_token {cols rows} {
     if {$rows == 1} { return "${n}H" }
     if {$cols == 1} { return "${n}V" }
     return ""
+}
+
+# --- the layout token this build really uses (owner-captured, never guessed) ------------
+# The key is "<cols>x<rows>" in GUI order ("4x1" = 4 columns, 1 row), because that is what the
+# owner types; the TOKEN keeps HyperView's own spelling, whatever it is.
+proc ::pis::hw::token_key {cols rows} {
+    return [format %dx%d $cols $rows]
+}
+
+# The [layout_tokens] section of the ini this copy sits next to, read-only: key -> token.
+# The config layer owns the ini grammar whenever it is loaded; the small copy below is for a
+# console where this file was sourced alone (the habit on the HyperView machine), so the
+# captured token works there too. Never throws: no ini, an unreadable ini or a bad line just
+# means "no token", and make_grid then uses its documented forms.
+proc ::pis::hw::ini_tokens {} {
+    variable ini_file
+    if {[string trim $ini_file] eq ""} { return [dict create] }
+    if {[llength [info commands ::pis::common::read_layout_tokens]] > 0} {
+        return [::pis::common::read_layout_tokens $ini_file]
+    }
+    if {[catch {open $ini_file r} fh]} { return [dict create] }
+    set text ""
+    if {[catch {set text [read $fh]}]} {
+        catch {close $fh}
+        return [dict create]
+    }
+    close $fh
+    set out [dict create]
+    set cur ""
+    foreach line [split $text "\n"] {
+        set t [string trim [string trimright $line "\r"]]
+        if {$t eq ""} { continue }
+        set first [string index $t 0]
+        if {$first eq "#" || $first eq ";"} { continue }
+        if {[regexp {^\[([^\[\]]+)\]$} $t -> name]} {
+            set cur [string tolower [string trim $name]]
+            continue
+        }
+        if {$cur ne "layout_tokens"} { continue }
+        set pos [string first "=" $t]
+        if {$pos < 1} { continue }
+        set k [string tolower [string trim [string range $t 0 [expr {$pos - 1}]]]]
+        set v [string trim [string range $t [expr {$pos + 1}] end]]
+        if {![regexp {^([0-9]+)x([0-9]+)$} $k -> c r]} { continue }
+        if {$v eq "" || $c < 1 || $r < 1} { continue }
+        dict set out $k $v
+    }
+    return $out
+}
+
+# The token the OWNER captured for cols x rows: this session first, then the ini. "" = none,
+# and then ::pis::hw::make_grid uses the documented forms exactly as before - no guess added.
+proc ::pis::hw::owner_token {cols rows} {
+    variable adapt_tokens
+    set key [::pis::hw::token_key $cols $rows]
+    if {[dict exists $adapt_tokens $key]} { return [dict get $adapt_tokens $key] }
+    set ini [::pis::hw::ini_tokens]
+    if {[dict exists $ini $key]} { return [dict get $ini $key] }
+    return ""
+}
+
+# How many captured tokens this copy knows (session + ini): the BUILD line prints it, so "the
+# ini I edited is not the ini this file reads" is visible in one line.
+proc ::pis::hw::token_count {} {
+    variable adapt_tokens
+    set all [dict create]
+    dict for {k v} [::pis::hw::ini_tokens] { dict set all $k $v }
+    dict for {k v} $adapt_tokens { dict set all $k $v }
+    return [dict size $all]
+}
+
+# Remember the token the owner captured for ONE grid size (this session only) and print the
+# [layout_tokens] line to paste into the ini BY HAND: writing the ini from here would give the
+# file two writers and hide a typo in a token inside a step.
+proc ::pis::hw::grid_token_set {cols rows token} {
+    variable adapt_tokens
+    foreach {label value} [list cols $cols rows $rows] {
+        if {![string is integer -strict $value] || $value < 1} {
+            error "::pis::hw::grid_token_set: $label must be a positive integer, got: '$value'"
+        }
+    }
+    set tok [string trim $token]
+    if {$tok eq ""} { error "::pis::hw::grid_token_set: empty layout token" }
+    if {[regexp {[\r\n]} $tok]} {
+        error "::pis::hw::grid_token_set: the layout token must be one line, got: '$tok'"
+    }
+    set key [::pis::hw::token_key $cols $rows]
+    dict set adapt_tokens $key $tok
+    puts [format "%s = %s" $key $tok]
+    return $tok
+}
+
+# Read the layout the page is IN ('<page> GetLayout', batchImportOdb.tcl:105) and hand the
+# owner the exact line that stores it. Read-only: no SetLayout, no journal, ONE line under 80
+# characters plus the ::pis::hw::grid_token_set line. "was=<cols>x<rows>" only when the token
+# spells its own shape ("1x4" = 4 columns, 1 row); a word like "2H" does not, so it prints -.
+proc ::pis::hw::grid_capture {} {
+    ::pis::hw::need_exec
+    set st [::pis::hw::page_state]
+    if {[llength $st] == 0} {
+        error "::pis::hw::grid_capture: the page could not be read (is the hwi wrapper available?)"
+    }
+    lassign $st wins lay
+    set cols ""
+    set rows ""
+    set was -
+    if {[regexp {^([0-9]+)[ \t]*[xX][ \t]*([0-9]+)$} $lay -> r c] && $r > 0 && $c > 0} {
+        set rows $r
+        set cols $c
+        set was [::pis::hw::token_key $cols $rows]
+    }
+    set line [format "GRID: wins=%s token=%s was=%s" $wins $lay $was]
+    if {[string length $line] >= 80} { set line [format "GRID: wins=%s token=%s" $wins $lay] }
+    while {[string length $line] >= 80} { set line "[string range $line 0 76].." }
+    puts $line
+    if {$cols ne ""} {
+        puts [format "::pis::hw::grid_token_set %d %d %s" $cols $rows [::pis::hw::quote $lay]]
+    } else {
+        puts [format "::pis::hw::grid_token_set <cols> <rows> %s" [::pis::hw::quote $lay]]
+    }
+    return $lay
+}
+
+# The page as the ONE read-only line ::pis::hw::page_info prints, parsed back to {wins layout};
+# "" when the session cannot be asked (no wrapper, no HyperView, a probe that raised). Never
+# journaled and never raises, so a failure message can carry what HyperView really answered.
+proc ::pis::hw::page_state {} {
+    if {[llength [info commands ::pis::hw::probe]] == 0} { return "" }
+    set got ""
+    if {[catch {set got [string trim [::pis::hw::probe [::pis::hw::check_page_info]]]}]} { return "" }
+    if {![regexp {layout='([^']*)' wins=([0-9]+)} $got -> lay wins]} { return "" }
+    return [list $wins $lay]
+}
+
+# Is the page ALREADY the asked grid? The same read-back a grid step must pass (count AND a
+# HyperView client in every window), so "already there" is never just a number: a page of chart
+# windows is not a grid this file may keep.
+proc ::pis::hw::grid_ready {count} {
+    if {[llength [info commands ::pis::hw::probe]] == 0} { return 0 }
+    set got ""
+    if {[catch {set got [string trim [::pis::hw::probe [::pis::hw::check_grid $count]]]}]} { return 0 }
+    return [expr {$got eq $count}]
+}
+
+# "wins=<m> layout=<token>" as the page answers it, for a failure message; "-" when the session
+# cannot be asked (a made-up count would be worse than none).
+proc ::pis::hw::grid_answer {} {
+    set st [::pis::hw::page_state]
+    if {[llength $st] == 0} { return "-" }
+    return [format "wins=%s layout=%s" [lindex $st 0] [lindex $st 1]]
 }
 
 # WHY A COUNT MISMATCH ALSO NAMES THE LAYOUT TOKEN (owner's report, 2026-11-11): on the
@@ -384,6 +565,41 @@ proc ::pis::hw::page_info {} {
 }
 
 # --- the variant table ----------------------------------------------------------------
+# One grid step's tail, spelled once: after SetLayout, give every window a window handle AND a
+# client handle (batchImportOdb.tcl:126-134, "add the pane controls"). %count is filled by
+# ::pis::hw::fill. Every call is caught on purpose: the walk must not be the judge, the read-back
+# (::pis::hw::check_grid) is.
+proc ::pis::hw::grid_walk {} {
+    return {
+for {set pisWi 1} {$pisWi <= %count} {incr pisWi} {catch {pisPage GetWindowHandle pisWin $pisWi}; catch {pisWin GetClientHandle pisC}; catch {pisC ReleaseHandle}; catch {pisWin ReleaseHandle}}
+}
+}
+
+# The variant that carries the OWNER-captured token: the only form here whose token was read out
+# of this build instead of out of a document (rule 3b of the 2026-11-11 iteration). It sits in
+# FRONT of the documented list when a token exists, so it is tried first and the documented forms
+# are still there to fall back on.
+proc ::pis::hw::owner_variant {} {
+    return [dict create n 1 via hwi \
+        cmd "[::pis::hw::stack_open pis]\npisPage SetLayout %owner\n[::pis::hw::grid_walk]\n[::pis::hw::page_close pis]" \
+        check [::pis::hw::check_grid %count] want %count \
+        src {owner-captured (GetLayout)} \
+        note {the token THIS build reported after the owner set the %count-window layout by hand}]
+}
+
+# The documented variants renumbered to follow the owner form in the SAME run (1 = owner form,
+# so 2..N are the documented ones, in their old order, with their own src).
+proc ::pis::hw::renumber_variants {variants {first 2}} {
+    set out {}
+    set n $first
+    foreach v $variants {
+        dict set v n $n
+        lappend out $v
+        incr n
+    }
+    return $out
+}
+
 # op -> ordered list of variant dicts, fields:
 #   n     1..N in trial order (start variant = 1 unless ::pis::hw::use moved it)
 #   via   hwi = one handle script through exec_hwi; hwc = one command through exec
@@ -482,9 +698,7 @@ catch {pisM ReleaseHandle}}
     # read-back (check_grid) is, and its message carries the count it expected and the window
     # it could not open or that turned out to be a chart - one place to read instead of a Tcl
     # error from the middle of a loop.
-    set grid_walk {
-for {set pisWi 1} {$pisWi <= %count} {incr pisWi} {catch {pisPage GetWindowHandle pisWin $pisWi}; catch {pisWin GetClientHandle pisC}; catch {pisC ReleaseHandle}; catch {pisWin ReleaseHandle}}
-}
+    set grid_walk [::pis::hw::grid_walk]
     # The legacy word is only for the counts the reference list has (1..4); on any other grid
     # it is empty and that variant fails with the message below instead of sending an empty
     # token.
@@ -644,6 +858,20 @@ proc ::pis::hw::note {level msg} {
     return
 }
 
+# A comment-ONLY journal line. A replay must know that the grid was NOT built by this file
+# ("set the same layout by hand"), and a fake hwi line would claim the journal can rebuild it.
+# ::pis::journal has no comment-only entry (its add takes a command too) and _tcl_pis_10_hw.tcl
+# is outside this task's writable files, so the buffer is appended here: the shape stays
+# "# <text>", which is exactly what ::pis::journal::filter keeps.
+proc ::pis::hw::journal_note {text} {
+    set line "# [string trim $text]"
+    if {$line eq "#"} { return }
+    if {![info exists ::pis::journal::buf]} { return }
+    lappend ::pis::journal::buf $line
+    if {[info exists ::pis::journal::dirty]} { set ::pis::journal::dirty 1 }
+    return
+}
+
 # The variant in use must be visible outside the log too (SPEC ENV: no silent fallback).
 proc ::pis::hw::status {msg} {
     if {[llength [info commands ::pis::gui::set_status]] > 0} {
@@ -765,10 +993,17 @@ proc ::pis::hw::record {key n} {
 # and the next variant is tried. Nothing is silent, and the chosen start variant is NOT
 # changed (only the human changes it, with ::pis::hw::use).
 proc ::pis::hw::run {op values} {
+    return [::pis::hw::run_list $op [::pis::hw::variants $op] [::pis::hw::at $op] $values]
+}
+
+# The body of ::pis::hw::run with the variant list and the first number given by the caller:
+# ::pis::hw::make_grid puts the owner-captured token in front (so 1 is that form and the
+# documented ones are 2..N) while every other op keeps its table order. `start` is clamped to
+# the list, so a number kept from a run that had one form more can never skip every variant.
+proc ::pis::hw::run_list {op list start values} {
     ::pis::hw::need_exec
-    set list [::pis::hw::variants $op]
     set total [llength $list]
-    set start [::pis::hw::at $op]
+    if {![string is integer -strict $start] || $start < 1 || $start > $total} { set start 1 }
     set key [::pis::hw::used_key $op $values]
     set scope [::pis::hw::window_scope $values]
     set tried {}
@@ -1236,22 +1471,61 @@ proc ::pis::hw::make_grid {cols rows} {
     }
     set count [expr {$cols * $rows}]
     # A grid that fails must never look like a good one in diag: the window count is cleared
-    # before the variants run and written again only after the read-back below passed.
+    # before anything runs and written again only after a read-back agreed.
     set adapt_wins 0
-    # A failed grid also names the ONE console line that answers "which token does this build
-    # accept" - otherwise the human is left with "no variant worked" and nothing to do next.
-    if {[catch {::pis::hw::run make_grid [dict create \
-            %cols $cols %rows $rows %count $count \
-            %grid [::pis::hw::grid_token $cols $rows] \
-            %legacy [::pis::hw::legacy_token $cols $rows]]} err]} {
-        error [format "%s | which token this build accepts: ::pis::hw::grid_probe %d %d" \
-            $err $cols $rows]
+    ::pis::hw::need_exec
+    # (a) THE PAGE ALREADY IS THE GRID - no SetLayout at all (owner's report, 2026-11-11: the
+    # layout was chosen by hand and a SetLayout with a token this build ignores can only DESTROY
+    # it). The gate is the same read-back a grid step must pass: the count AND a HyperView client
+    # in every window. The journal gets ONE comment line, never an hwi line: a replay cannot
+    # rebuild a grid this file never built, and it has to know that.
+    if {[::pis::hw::grid_ready $count]} {
+        set st [::pis::hw::page_state]
+        set lay -
+        if {[llength $st] > 0} { set lay [lindex $st 1] }
+        ::pis::hw::note INFO [format "make_grid: grid already %d window(s), SetLayout skipped" $count]
+        ::pis::hw::status [format "HV make_grid: %d window(s) already present" $count]
+        ::pis::hw::journal_note [format \
+            "grid %dx%d already present; replay needs the same layout set by hand" $cols $rows]
+        ::pis::hw::record make_grid 0
+        set adapt_grid $lay
+        set adapt_wins $count
+        return $count
+    }
+    # (b) the token the OWNER captured for this size is the FIRST form tried; (c) the documented
+    # list follows it, numbering and src unchanged (src = owner-captured (GetLayout) on the first
+    # one). No token captured: the documented list alone, exactly as before.
+    set list [::pis::hw::variants make_grid]
+    set own [::pis::hw::owner_token $cols $rows]
+    if {$own ne ""} {
+        set list [concat [list [::pis::hw::owner_variant]] [::pis::hw::renumber_variants $list]]
+    }
+    set total [llength $list]
+    set values [dict create %cols $cols %rows $rows %count $count \
+        %grid [::pis::hw::grid_token $cols $rows] \
+        %legacy [::pis::hw::legacy_token $cols $rows] %owner $own]
+    # (d) A grid that still fails names what was asked, what the page answered (wins=, layout=),
+    # the last form tried and the ONE thing left to do: pick the layout by hand, capture its
+    # token, store it. The documented list stays reachable with ::pis::hw::use make_grid <n>.
+    if {[catch {::pis::hw::run_list make_grid $list [::pis::hw::at make_grid] $values} err]} {
+        error [format "%s | asked %d window(s), page answered %s | last form: variant %d/%d | Fix: chọn layout %dx%d bằng tay trong HyperView, gõ ::pis::hw::grid_capture rồi dán dòng ::pis::hw::grid_token_set được in ra" \
+            $err $count [::pis::hw::grid_answer] $total $total $cols $rows]
     }
     # The run proved the grid through check_grid already; this second read-back (never
     # journaled - a check is not a step) is what the app REPORTS and what diag prints, so the
-    # number in "wins=" is HyperView's own answer, not the number this file asked for.
+    # number in "wins=" and the token in "layout=" are HyperView's own answers.
     set wins [::pis::hw::verify_grid $cols $rows]
-    set adapt_grid [::pis::hw::grid_token $cols $rows]
+    set st [::pis::hw::page_state]
+    set lay ""
+    if {[llength $st] > 0} { set lay [lindex $st 1] }
+    if {$lay eq "" || $lay eq "-"} {
+        if {$own ne ""} {
+            set lay $own
+        } else {
+            set lay [::pis::hw::grid_token $cols $rows]
+        }
+    }
+    set adapt_grid $lay
     set adapt_wins $wins
     return $wins
 }
@@ -1307,37 +1581,46 @@ proc ::pis::hw::help {} {
     puts "  what the page is now: ::pis::hw::page_info   (read-only: layout token, wins, open windows)"
     puts "  which token this build accepts: ::pis::hw::grid_probe <cols> <rows> ?newpage 0|1?   (probe, not a step)"
     puts "    add '1' as the third argument to also try a NEW page; the default leaves the page count alone"
+    puts "  the token this build really uses: set the layout by hand, then ::pis::hw::grid_capture"
+    puts "    paste the printed ::pis::hw::grid_token_set line (it also prints the \[layout_tokens\] ini line)"
     return
 }
 
-# Every op back to its first variant, the order back to 1, nothing recorded (tests, and a
-# fresh session).
+# Every op back to its first variant, the order back to 1, nothing recorded and no captured
+# layout token (tests, and a fresh session).
 proc ::pis::hw::reset_state {} {
     variable adapt_at
     variable adapt_used
     variable adapt_order
     variable adapt_grid
     variable adapt_wins
+    variable adapt_tokens
     set adapt_at [dict create]
     set adapt_used [dict create]
     set adapt_order 1
     set adapt_grid "-"
     set adapt_wins 0
+    set adapt_tokens [dict create]
     return
 }
 
 # --- build stamp: ONE line, printed when this file is sourced -------------------------
 # The line answers the first question on a HyperView machine ("which copy is this?"):
-#   BUILD T6e-20261111-0918 | make_grid variants=8 | adapter lines=NNN
+#   BUILD T6f-20261111-1018 | make_grid variants=8 | adapter lines=NNN | tokens=N
 # The line count is measured from the file itself at source time (below), so it cannot go
-# stale the way a hand-written number would.
+# stale the way a hand-written number would. "tokens=" is how many owner-captured layout
+# tokens this copy can see (session + the [layout_tokens] section of the ini it sits next to),
+# so "the ini I edited is not the ini this file reads" shows up before the first Load All.
 proc ::pis::hw::build_line {} {
     variable build_lines
     set stamp "no-stamp"
     if {[info exists ::pis::BUILD]} { set stamp $::pis::BUILD }
     set n 0
     catch { set n [llength [::pis::hw::variants make_grid]] }
-    return [format "BUILD %s | make_grid variants=%d | adapter lines=%d" $stamp $n $build_lines]
+    set toks 0
+    catch { set toks [::pis::hw::token_count] }
+    return [format "BUILD %s | make_grid variants=%d | adapter lines=%d | tokens=%d" \
+        $stamp $n $build_lines $toks]
 }
 
 # The code part of the stamp (T6e in T6e-20261111-0918): what a DIAG line starts with. The
@@ -1372,5 +1655,13 @@ if {[catch {
     set ::pis::hw::build_lines [llength [split [string trimright $_pis_bt "\n"] "\n"]]
 }]} {
     set ::pis::hw::build_lines 0
+}
+# The ini this copy reads [layout_tokens] from: the 00_config folder NEXT TO this file, so a
+# copy of src/ on the HyperView machine finds its own ini and not another install's.
+# info script is the file being sourced HERE, which is the only place that knows it.
+if {[catch {
+    set ::pis::hw::ini_file [file normalize [file join [file dirname [info script]] .. 00_config pis_workflow_config.ini]]
+}]} {
+    set ::pis::hw::ini_file ""
 }
 ::pis::hw::announce
