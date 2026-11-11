@@ -2,6 +2,11 @@
 # T-006 check as ONE FILE (owner, 2026-11-11: "I only use files, I do not run commands").
 #
 # How to use it in HyperView - nothing to type:
+#   0. FIRST: copy the WHOLE src/01_scripts folder (six files) into the HyperView script
+#      path - not one file. A report from an older copy carries an older BUILD line and
+#      cannot answer anything the current copy changed: on 2026-11-11 a report came back
+#      from T6h while the tree was already T6j, so its layout numbers were the old
+#      behaviour and its LAYOUTS line did not exist at all.
 #   1. File > New (the way you always start; this file does not reset for you).
 #   2. Edit the values below: the model file, the result file(s), cols, rows.
 #   3. Source this file (File > Run Script, or drop it on the Tcl console).
@@ -10,6 +15,8 @@
 #      Send that file back. It holds the BUILD line, the LAYOUTS line (layout id -> window
 #      count, measured on YOUR page), the GRID line, the DIAG line (model/result per window)
 #      and ONE VERDICT line (PASS, or FAIL with the reason). That is all I need.
+#      Read the BUILD line before sending: it must name the copy you just copied in
+#      (`T6j-20261111-1650` today). An older stamp means step 0 was skipped.
 #
 # What it does, in this order (nothing else, and it never edits a file):
 #   BUILD   - which copy of the adapter this session runs
