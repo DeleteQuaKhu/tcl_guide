@@ -1,5 +1,5 @@
 # src/01_scripts/_tcl_pis_99_workflow_gui.tcl
-# ::pis::gui — the single "PIS Workflow" window. Task T-003 built the FRAME: window,
+# ::pis::gui - the single "PIS Workflow" window. Task T-003 built the FRAME: window,
 # block 0, the five module blocks (one shared module-list helper), log pane, status bar,
 # busy lock. Task T-006 wires block 0 to ::pis::step01 (Load All / Reset (New), browse,
 # Add.., config round-trip): every HyperView command comes from the ::pis::hw adapter

@@ -1,5 +1,5 @@
 # src/01_scripts/_tcl_pis_02_load_legend.tcl
-# ::pis::legend — the "Load Legend" module (task T-007, PARTIAL: the seam is not verified
+# ::pis::legend - the "Load Legend" module (task T-007, PARTIAL: the seam is not verified
 # inside HyperView yet, the T-002 spike / SPEC Q3 is still open).
 # Tcl/Tk 8.5 compatible, no tcllib, no network, no package require.
 # Sourcing this file defines procs only: it never calls HyperView.

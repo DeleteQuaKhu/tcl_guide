@@ -9,7 +9,9 @@
 #   ::pis::step01::need_common {}         | load_all
 #   ::pis::step01::need_adapter {}        | load_all, reset_session
 #   ::pis::step01::call {module item cmd} | load_all, reset_session
-#   ::pis::step01::window_call {k item cmd} | load_window
+#   ::pis::step01::window_call {k step label cmd} | load_window
+#   ::pis::step01::raw_fail {step k err}  | window_call, load_window (C1: raw reason, 70 chars)
+#   ::pis::step01::status_red {msg}       | raw_fail, load_window (one red status line)
 #   ::pis::step01::load_window {k model file} | load_all
 #   ::pis::step01::validate {root cfg}    | load_all
 #   ::pis::step01::load_all {cfg}         | ::pis::gui::run_block0
@@ -45,7 +47,8 @@ proc ::pis::step01::need_adapter {} {
         error "::pis::step01 needs ::pis::hw: source _tcl_pis_10_hw.tcl first (missing ::pis::hw::exec)"
     }
     foreach name {reset_session reset_session_soft load_model_in_window \
-                      load_model make_grid load_result_in_window verify_window order} {
+                      load_model make_grid load_result_in_window verify_window \
+                      models_in_window order} {
         if {[llength [info commands ::pis::hw::$name]] == 0} {
             error "::pis::step01 needs the HyperView adapter: source _tcl_pis_11_hw_adapter.tcl first (missing ::pis::hw::$name)"
         }
@@ -102,31 +105,76 @@ proc ::pis::step01::validate {root cfg} {
     return [dict create model_file $model result_files $files cols $cols rows $rows]
 }
 
-# One step of ONE window: the journal context first (so the comment names the window), then
-# the adapter call. A failure is re-raised with the adapter's own words - that message
-# already names the step, the window and the variants that were tried
-# ("load_model window 2 variant 1/2 failed: ...") - and the SAME text goes to the status bar,
-# so window k failing is visible both in the log and at the bottom of the GUI.
-proc ::pis::step01::window_call {k item cmd} {
-    ::pis::hw::context "Load All" [format "window %d: %s" $k $item]
+# C1: the status bar AND the log get HyperView's own words for a failing load step, cut to 70
+# characters - never a generic "failed". Shape: "<step> window <k> variant <v>/<n> failed: <raw>",
+# where <v>/<n> is read out of the adapter's own message when it carries one ("?" otherwise), so
+# the line names the step, the window and the variant that really failed.
+proc ::pis::step01::raw_fail {step k err} {
+    set raw [string map [list "\r" " " "\n" " "] [string trim $err]]
+    set v "?"
+    if {[regexp {variant ([0-9]+/[0-9]+) failed} $raw -> vv]} { set v $vv }
+    # The adapter's own message repeats the step, the window and the variant this line already
+    # names; drop that prefix so the 70 characters are spent on HyperView's REASON.
+    regsub {^[A-Za-z_]+( window [0-9]+)? variant [0-9]+/[0-9]+ failed: } $raw {} raw
+    if {[string length $raw] > 70} { set raw "[string range $raw 0 69].." }
+    if {[string trim $k] eq ""} {
+        set msg [format "%s variant %s failed: %s" $step $v $raw]
+    } else {
+        set msg [format "%s window %s variant %s failed: %s" $step $k $v $raw]
+    }
+    status_red "Error: $msg"
+    if {[llength [info commands ::pis::common::log]] > 0} {
+        catch {::pis::common::log "" ERROR $msg}
+    }
+    return $msg
+}
+
+# ONE failing line in red at the bottom of the GUI (the shared sink has no colour argument, so the
+# GUI proc is called with its own).
+proc ::pis::step01::status_red {msg} {
+    if {[llength [info commands ::pis::gui::set_status]] > 0} {
+        catch {::pis::gui::set_status $msg red}
+    } else {
+        catch {::pis::hw::status $msg}
+    }
+    return
+}
+
+# One step of ONE window: the journal context first (so the comment names the window), then the
+# adapter call. A failure is re-raised in the shape raw_fail builds, so the same text is in the
+# log and in the status bar (SPEC.md error states).
+proc ::pis::step01::window_call {k step label cmd} {
+    ::pis::hw::context "Load All" [format "window %d: %s" $k $label]
     if {[catch {{*}$cmd} res]} {
-        set msg [string trim $res]
-        ::pis::hw::status "Error: $msg"
-        error $msg
+        error [raw_fail $step $k $res]
     }
     return $res
 }
 
 # Window k, in this order and no other: ONE model, then ITS result, then the read-back.
-# The read-back is the point (SPEC.md D2 REVISION): "the call returned" is not evidence on a
-# build that answers an unknown command with silence, so the window must prove it holds
-# exactly one model and one result controller before the next window is touched.
+# C2 (owner report 2, "results do not load"): a result is attached ONLY after the model of window
+# k is verified (that window holds exactly 1 model). '<model> SetResult' on a window with no model
+# changes nothing and says nothing (conrod/tcl_guide/hv_model_loader.tcl:1362-1400 attaches the
+# result to a model handle and reports "no model is loaded in the window" at :1400), so attaching
+# blind is the silent failure the owner saw. A window that cannot show its model stops there.
 proc ::pis::step01::load_window {k model file} {
-    window_call $k [file tail $model] [list ::pis::hw::load_model_in_window $k $model]
-    window_call $k [file tail $file] [list ::pis::hw::load_result_in_window $k $file]
+    window_call $k load_model [file tail $model] [list ::pis::hw::load_model_in_window $k $model]
+    set have -1
+    if {[catch {set have [::pis::hw::models_in_window $k]} why]} {
+        error [raw_fail load_model $k $why]
+    }
+    if {$have != 1} {
+        set msg [format "skip result: window %d has no model" $k]
+        status_red "Error: $msg"
+        if {[llength [info commands ::pis::common::log]] > 0} {
+            catch {::pis::common::log "" ERROR $msg}
+        }
+        error $msg
+    }
+    window_call $k load_result [file tail $file] [list ::pis::hw::load_result_in_window $k $file]
     if {[catch {::pis::hw::verify_window $k} why]} {
         set msg [format "window %d read-back failed: %s" $k [string trim $why]]
-        ::pis::hw::status "Error: $msg"
+        status_red "Error: $msg"
         error $msg
     }
     return $k
