@@ -166,7 +166,7 @@ namespace eval ::pis::hw {
 # line carries the facts only (id/api/model/result), because the stamp plus 8 windows of 1/0
 # lists would not fit in the 80 characters a diag line is allowed.
 namespace eval ::pis {
-    variable BUILD "T6i-20261111-1420"
+    variable BUILD "T6j-20261111-1650"
 }
 
 # --- script builders: the hwi handle API is spelled once, here ------------------------
@@ -200,6 +200,17 @@ proc ::pis::hw::window_close {p} {
     set s {catch {@p@C ReleaseHandle}
 catch {@p@Win ReleaseHandle}}
     return "[string map [list @p@ $p] $s]\n[::pis::hw::page_close $p]"
+}
+
+# The ONE step that rebuilds a grid that is already on the page (T-016): '<page> SetLayout <id>'
+# with the id GetLayout just answered. It is NOT executed - the page already IS that layout - it
+# is only written to the journal, so a replay in a fresh session builds the same grid instead of
+# finding a comment that tells the human to do it by hand (S2, A4). Sending a layout id twice is
+# harmless (`docs/refs/HV_API.md` section 2, S1: the id names the layout, it is not a delta),
+# which is what makes this step idempotent.
+proc ::pis::hw::set_layout_step {id} {
+    set s {@p@Page SetLayout @id@}
+    return "[::pis::hw::stack_open pis]\n[string map [list @p@ pis @id@ $id] $s]\n[::pis::hw::page_close pis]"
 }
 
 # --- read-back checks: each one ends with the value ::pis::hw::probe must return -------
@@ -896,11 +907,12 @@ proc ::pis::hw::note {level msg} {
     return
 }
 
-# A comment-ONLY journal line. A replay must know that the grid was NOT built by this file
-# ("set the same layout by hand"), and a fake hwi line would claim the journal can rebuild it.
-# ::pis::journal has no comment-only entry (its add takes a command too) and _tcl_pis_10_hw.tcl
-# is outside this task's writable files, so the buffer is appended here: the shape stays
-# "# <text>", which is exactly what ::pis::journal::filter keeps.
+# A comment-ONLY journal line, used ONLY as a last resort (T-016: make_grid journals a real
+# 'SetLayout <id>' step when the page answers a layout id; this is the fallback for the case where
+# GetLayout answers nothing usable, because a fake hwi line would claim the journal can rebuild a
+# grid it cannot). ::pis::journal has no comment-only entry (its add takes a command too) and
+# _tcl_pis_10_hw.tcl is outside this task's writable files, so the buffer is appended here: the
+# shape stays "# <text>", which is exactly what ::pis::journal::filter keeps.
 proc ::pis::hw::journal_note {text} {
     set line "# [string trim $text]"
     if {$line eq "#"} { return }
@@ -1304,7 +1316,9 @@ proc ::pis::hw::diag {} {
 # Build the cols x rows window grid. The page is the judge (F1/F2):
 #   (a) it ALREADY shows cols*rows real windows (every one answering a window handle, a client
 #       handle and GetModelList)? Then no SetLayout runs at all - a rebuild would take a grid the
-#       owner made by hand away - and the journal gets ONE comment line saying so;
+#       owner made by hand away - and the journal gets ONE 'SetLayout <id>' step with the id
+#       GetLayout answered, so a replay rebuilds the same grid (T-016; the step is journaled, not
+#       executed, because the page already IS that layout);
 #   (b) ::pis::hw::choose_layout names the id (a cached/ini id, or the id layout_table measured);
 #       a failure there happens BEFORE anything is loaded, with the LAYOUTS line and the Fix line;
 #   (c) exactly ONE 'SetLayout <id>' is sent through the wrapper and journaled, once. Success is
@@ -1322,12 +1336,23 @@ proc ::pis::hw::make_grid {cols rows} {
     ::pis::hw::need_exec
     set ob [::pis::hw::observe]
     if {[::pis::hw::observe_ok $ob $count] && [::pis::hw::grid_ready $count]} {
+        set lid [dict get $ob layout]
         ::pis::hw::note INFO [format "make_grid: grid already %d window(s), SetLayout skipped" $count]
         ::pis::hw::status [format "HV make_grid: %d window(s) already present" $count]
-        ::pis::hw::journal_note [format \
-            "grid %dx%d already present; replay needs the same layout set by hand" $cols $rows]
+        # T-016: the grid is NOT rebuilt (that would take the grid the owner made by hand away),
+        # but the journal still needs ONE replayable step, otherwise a replay in a fresh session
+        # finds no layout at all and every later window load fails (S2, A4). '<page> SetLayout <id>'
+        # with the id GetLayout answered is idempotent, so it is journaled and not executed.
+        if {[string is integer -strict $lid] && $lid >= 0} {
+            ::pis::hw::journal_run [::pis::hw::set_layout_step $lid]
+        } else {
+            ::pis::hw::note WARN [format \
+                "make_grid: GetLayout answered '%s', so the grid cannot be journaled as a SetLayout step" $lid]
+            ::pis::hw::journal_note [format \
+                "grid %dx%d already present; replay needs the same layout set by hand" $cols $rows]
+        }
         ::pis::hw::record make_grid 0
-        set adapt_grid [dict get $ob layout]
+        set adapt_grid $lid
         puts [format "GRID: id=%s api=%s clients=%s" $adapt_grid \
             [dict get $ob api] [dict get $ob clients]]
         return $count

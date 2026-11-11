@@ -93,6 +93,9 @@ proc ::pis::hw::exec_hwi {script {mode "-journal"}} {
         error "::pis::hw::exec_hwi: the hwi command is not available (run inside HyperView)"
     }
     set line [::pis::hw::fold_script $script]
+    if {$line eq ""} {
+        error "::pis::hw::exec_hwi: the script holds no command (only blank and comment lines)"
+    }
     if {![regexp {^hwi[ \t]} $line]} {
         error "::pis::hw::exec_hwi: the script must start with 'hwi ' so the journal line stays replayable"
     }
@@ -118,6 +121,9 @@ proc ::pis::hw::journal_run {script} {
         error "::pis::hw::journal_run: no HyperView script given"
     }
     set line [::pis::hw::fold_script $script]
+    if {$line eq ""} {
+        error "::pis::hw::journal_run: the script holds no command (only blank and comment lines)"
+    }
     if {![regexp {^hwi[ \t]} $line]} {
         error "::pis::hw::journal_run: the script must start with 'hwi ' so the journal line stays replayable"
     }
@@ -129,12 +135,17 @@ proc ::pis::hw::journal_run {script} {
 # Fold a multi-line script into one Tcl line: newline + surrounding blanks -> "; ".
 # Blank lines and leading/trailing blanks of the whole script disappear; runs of
 # blanks INSIDE a line are untouched, so a path with spaces is never damaged.
+# A line that starts with "#" is a COMMENT and is dropped BEFORE the fold (T-016): folding
+# joins the lines with "; ", so a comment left in place would swallow every command after it
+# ("# note; hwi OpenStack" runs NOTHING and raises NOTHING) - exactly the silent no-op this
+# repo is fighting. A script that is all comments folds to "" and its caller refuses it.
 proc ::pis::hw::fold_script {script} {
     set text [string map {"\r\n" "\n" "\r" "\n"} $script]
     set parts {}
     foreach raw [split $text "\n"] {
         set t [string trim $raw]
         if {$t eq ""} { continue }
+        if {[string index $t 0] eq "#"} { continue }
         lappend parts $t
     }
     return [join $parts "; "]
@@ -151,6 +162,9 @@ proc ::pis::hw::probe {script} {
         error "::pis::hw::probe: the hwi command is not available (run inside HyperView)"
     }
     set line [::pis::hw::fold_script $script]
+    if {$line eq ""} {
+        error "::pis::hw::probe: the script holds no command (only blank and comment lines)"
+    }
     set code [catch {uplevel 1 $line} res opts]
     if {$code} {
         catch {hwi CloseStack}
