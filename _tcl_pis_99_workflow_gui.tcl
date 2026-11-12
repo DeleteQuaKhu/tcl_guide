@@ -510,8 +510,14 @@ proc ::pis::gui::run_result {scope} {
         return 0
     }
     if {$res == 0} {
-        # nothing selected: ::pis::result::run already logged the WARN.
-        ::pis::gui::set_status "Idle"
+        # Nothing selected (::pis::result::run already logged the WARN), or every window refused
+        # with [log] continue_on_error on. The second case must not look like a quiet "Idle": the
+        # log carries the reason and the status says that nothing changed.
+        if {[::pis::result::selected_item $cfg] eq ""} {
+            ::pis::gui::set_status "Idle"
+        } else {
+            ::pis::gui::set_status "Load result: nothing changed (see the log)" red
+        }
         return 0
     }
     if {$scope eq "layout"} {

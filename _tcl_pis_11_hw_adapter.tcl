@@ -30,6 +30,7 @@
 #   ::pis::hw::verify_window {index}               read-back: window <index> holds 1 model + 1 result
 #   ::pis::hw::select_window {index}               make window <index> the active one
 #   ::pis::hw::import_legend {path}                import a legend into the active window
+#   ::pis::hw::refresh {}                          let Tk paint after a run (ONE `update idletasks`)
 #
 # T-019 (2026-11-11) - the result step no longer DEPENDS on WaitForResults. The supplier documents
 # it as valid only in the HyperView - MultiCore profile (docs/refs/HV_API.md sec.5, S16/S17); the
@@ -89,7 +90,7 @@
 # BUILD STAMP (T-006 iteration, 2026-11-11): ::pis::BUILD is a short code written BY HAND
 # when this file changes, e.g. T6i-20261111-1420, so the HyperView machine can be matched to
 # a copy of this file without a guess. Sourcing this file prints ONE line,
-#   BUILD T6m-20261112-1200 | make_grid variants=1 | adapter lines=<n> | layouts=20
+#   BUILD T8a-20261112-1449 | make_grid variants=1 | adapter lines=<n> | layouts=20
 # "layouts=" is the size of the STATIC table, so a copy without it is visible at once.
 # THE LAYOUT IS AN INTEGER ID, NOT A STRING (owner facts F1/F2, 2026-11-11 - MEASURED, not guessed):
 # F1: for a 4x1 request every spelling ("4x1", "4 x 1", "4 - 1", "4 times 1") gave layout=4 api=3,
@@ -207,7 +208,7 @@ namespace eval ::pis::hw {
 # line carries the facts only (id/api/model/result), because the stamp plus 8 windows of 1/0
 # lists would not fit in the 80 characters a diag line is allowed.
 namespace eval ::pis {
-    variable BUILD "T6m-20261112-1200"
+    variable BUILD "T8a-20261112-1449"
 }
 
 # --- script builders: the hwi handle API is spelled once, here ------------------------
@@ -241,6 +242,19 @@ proc ::pis::hw::window_close {p} {
     set s {catch {@p@C ReleaseHandle}
 catch {@p@Win ReleaseHandle}}
     return "[string map [list @p@ $p] $s]\n[::pis::hw::page_close $p]"
+}
+
+# The LAST step of a run that changed what a window DISPLAYS (T-026). Every window was already
+# drawn by its own script (`<client> Draw` on the client OF THAT WINDOW, PROVEN pattern 2 of
+# docs/refs/HV_API_REF.md, the same form the legend module uses), so this proc only lets Tk paint
+# the redraws it was handed: ONE `update idletasks`, never a substitute for a Draw and never a
+# HyperView call. When Tk is absent (a batch run) the call is skipped instead of raising, because
+# a missing paint must never turn a proven step into a failure.
+proc ::pis::hw::refresh {} {
+    if {[llength [info commands update]] > 0} {
+        catch {update idletasks}
+    }
+    return
 }
 
 # The ONE step that rebuilds a grid that is already on the page (T-016): '<page> SetLayout <id>'
@@ -1810,7 +1824,7 @@ proc ::pis::hw::reset_state {} {
 
 # --- build stamp: ONE line, printed when this file is sourced -------------------------
 # The line answers the first question on a HyperView machine ("which copy is this?"):
-#   BUILD T6m-20261112-1200 | make_grid variants=1 | adapter lines=NNN | layouts=20
+#   BUILD T8a-20261112-1449 | make_grid variants=1 | adapter lines=NNN | layouts=20
 # The line count is measured from the file itself at source time (below), so it cannot go
 # stale the way a hand-written number would. "layouts=" is the size of the STATIC table, so a
 # copy without it shows up before the first Load All.
