@@ -1,5 +1,5 @@
-# PIS Workflow - block 0: load ONE model + N result files into a cols x rows window grid
-# (task T-006). SPEC.md D2: plain HyperView commands only - no user library, no stub mode,
+# PIS Workflow - block 0: load ONE model + N result files into a HyperView layout named by its
+# integer id (task T-006, T-017). SPEC.md D2: plain HyperView commands only - no user library, no stub mode,
 # no bare hwc line in this file. Every command comes from the ::pis::hw adapter (T-002c), so
 # a saved journal replays Load All and Reset (New) in a fresh session (SPEC.md A2-A4).
 # Tcl/Tk 8.5 compatible, no tcllib, no network, no package require, no Tk.
@@ -69,7 +69,9 @@ proc ::pis::step01::call {module item cmd} {
 }
 
 # Every block-0 rule with its specific message (SPEC.md A6/A7, refs/SPEC_load_model.txt for
-# the wording). Returns {model_file result_files cols rows} with absolute paths and integers.
+# the wording). Returns {model_file result_files layout_id windows} with absolute paths and the
+# window count taken from the STATIC layout table (T-017: the id decides the geometry, never a
+# page that a previous session arranged by hand).
 proc ::pis::step01::validate {root cfg} {
     need_common
     set model [string trim [::pis::common::get $cfg session model_file ""]]
@@ -89,20 +91,20 @@ proc ::pis::step01::validate {root cfg} {
     if {[llength $files] == 0} {
         error "No result files given"
     }
-    set cols [string trim [::pis::common::get $cfg layout cols 4]]
-    set rows [string trim [::pis::common::get $cfg layout rows 2]]
-    if {![string is integer -strict $cols] || ![string is integer -strict $rows]} {
-        error "Layout must be two integers (e.g. 4 x 2), got: $cols x $rows"
+    set id [string trim [::pis::common::get $cfg layout id 19]]
+    set windows ""
+    if {[llength [info commands ::pis::hw::layout_windows]] > 0} {
+        set windows [::pis::hw::layout_windows $id]
     }
-    if {$cols <= 0 || $rows <= 0} {
-        error "Layout values must be greater than 0, got: $cols x $rows"
+    if {$windows eq ""} {
+        error [format "layout id %s is not in the table" $id]
     }
-    set max [expr {$cols * $rows}]
     set n [llength $files]
-    if {$n > $max} {
-        error "$n result file(s) exceed layout ${cols}x${rows} (max $max)"
+    if {$n > $windows} {
+        error [format "%d result file(s) exceed layout %s (%d windows)" $n $id $windows]
     }
-    return [dict create model_file $model result_files $files cols $cols rows $rows]
+    return [dict create model_file $model result_files $files \
+        layout_id $id windows $windows]
 }
 
 # C1: the status bar AND the log get HyperView's own words for a failing load step - never a
@@ -230,16 +232,16 @@ proc ::pis::step01::load_all {cfg} {
     set info [validate [dict get $cfg root] $cfg]
     set model [dict get $info model_file]
     set files [dict get $info result_files]
-    set cols [dict get $info cols]
-    set rows [dict get $info rows]
+    set lid [dict get $info layout_id]
+    set windows [dict get $info windows]
     set n [llength $files]
     set base [file tail $model]
     set last_result 0
     set loaded 0
     set order [::pis::hw::order]
-    ::pis::common::log $cfg INFO [format "Load All: %s + %d result file(s) into %dx%d (order %d)" \
-        $base $n $cols $rows $order]
-    ::pis::hw::status [format "Load All: order %d, %d window(s)" $order $n]
+    ::pis::common::log $cfg INFO [format "Load All: %s + %d result file(s) into layout id %s (%d window(s), order %d)" \
+        $base $n $lid $windows $order]
+    ::pis::hw::status [format "Load All: order %d, layout id %s, %d window(s)" $order $lid $n]
     # T-019: the OPTIONAL result wait explains itself once per RUN, not once per window.
     ::pis::hw::begin_run
     # An ALREADY EMPTY session is not a failure: on an empty page the "0 models" check passes
@@ -251,16 +253,16 @@ proc ::pis::step01::load_all {cfg} {
         # grid is built, then the other windows. Order 2 exists for a build that drops the
         # models of a rebuilt page; the per-window read-back decides, not the order.
         load_window_guarded 1 $n $model [lindex $files 0]
-        call "Load All" [format "window grid %dx%d" $cols $rows] \
-            [list ::pis::hw::make_grid $cols $rows]
+        call "Load All" [format "layout id %s" $lid] \
+            [list ::pis::hw::make_grid $lid]
         set k 1
         foreach f [lrange $files 1 end] {
             incr k
             load_window_guarded $k $n $model $f
         }
     } else {
-        call "Load All" [format "window grid %dx%d" $cols $rows] \
-            [list ::pis::hw::make_grid $cols $rows]
+        call "Load All" [format "layout id %s" $lid] \
+            [list ::pis::hw::make_grid $lid]
         set k 0
         foreach f $files {
             incr k

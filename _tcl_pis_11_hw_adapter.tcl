@@ -25,7 +25,7 @@
 #   ::pis::hw::reset_session_soft {}               same, but an already-empty session passes
 #   ::pis::hw::load_model {path}                   load ONE model into window 1 (k = 1)
 #   ::pis::hw::load_model_in_window {index path}   load ONE model into window <index>
-#   ::pis::hw::make_grid {cols rows}               build the cols x rows window grid
+#   ::pis::hw::make_grid {id}                      build the layout named by the integer <id>
 #   ::pis::hw::load_result_in_window {index path}  result file into window <index>
 #   ::pis::hw::verify_window {index}               read-back: window <index> holds 1 model + 1 result
 #   ::pis::hw::select_window {index}               make window <index> the active one
@@ -67,14 +67,20 @@
 #                               cannot tell (INFERRED from GetModelList - no GetClientType here)
 #   ::pis::hw::page_info {}     ONE read-only line: page index, layout id, window count, the
 #                               window numbers that really open (what the page IS right now)
-#   ::pis::hw::layout_table {}  measure this page: ONE LAYOUTS line (id -> window count), e.g.
-#                               "LAYOUTS 1=2 2=2 3=3 4=3 5=4". A probe: never journaled
+#   ::pis::hw::layout_table {}  owner DIAGNOSTIC (never called by Load All): refuses a session that
+#                               is not empty, else SetLayout for every id of the static table, ONE
+#                               LAYOUTS line (id=window count measured on THIS page), then the
+#                               original layout again. Never journaled: it is a probe, and it moves
+#                               the page
 #   ::pis::hw::grid_capture {}  read-only: the layout id the page is IN, as ONE GRID line plus
-#                               the ::pis::hw::grid_token_set line to paste
-#   ::pis::hw::grid_token_set {cols rows id}
-#                               remember that layout id for this cols x rows in this session and
-#                               print the [layout_tokens] line for the ini (added by hand)
-#   ::pis::hw::reset_state {}   variants + order back to 1, no cached layout id (tests)
+#                               the [layout] id line for the ini
+#   ::pis::hw::layout_rows {}   THE static layout table: {id windows {shape} id windows {shape} ...}
+#   ::pis::hw::layout_windows {id}   window count of that id, "" when the id is not in the table
+#   ::pis::hw::layout_shape {id}     the shape text exactly as docs/refs/HV_API.md sec. 2 names it
+#   ::pis::hw::layout_label {id}     "<id>: <w> windows - <shape>" (the GUI combobox text)
+#   ::pis::hw::layout_choices {}     every label, sorted by window count then id (combobox values)
+#   ::pis::hw::layout_count {}       how many ids the table has (20)
+#   ::pis::hw::reset_state {}   variants + order back to 1, nothing recorded, no last grid (tests)
 #   ::pis::hw::run {op values}  run an op (the six operations call this)
 #   ::pis::hw::used {op {win}}  variant number that step really used (0 = none worked)
 #   ::pis::hw::build_line {}    the ONE BUILD line (stamp, grid variants, line count, layout ids)
@@ -83,7 +89,8 @@
 # BUILD STAMP (T-006 iteration, 2026-11-11): ::pis::BUILD is a short code written BY HAND
 # when this file changes, e.g. T6i-20261111-1420, so the HyperView machine can be matched to
 # a copy of this file without a guess. Sourcing this file prints ONE line,
-#   BUILD T6i-20261111-1420 | make_grid variants=1 | adapter lines=<n> | layouts=<n>
+#   BUILD T6m-20261112-1200 | make_grid variants=1 | adapter lines=<n> | layouts=20
+# "layouts=" is the size of the STATIC table, so a copy without it is visible at once.
 # THE LAYOUT IS AN INTEGER ID, NOT A STRING (owner facts F1/F2, 2026-11-11 - MEASURED, not guessed):
 # F1: for a 4x1 request every spelling ("4x1", "4 x 1", "4 - 1", "4 times 1") gave layout=4 api=3,
 #     and every transpose ("1x4", "1 x 4", ...) gave layout=1 api=2. So '<page> SetLayout' reads
@@ -95,18 +102,19 @@
 #     file never asks above api.
 # F3: the owner's working reference sequence is: page SetLayout, client AddModel, model SetResult,
 #     client WaitForResults - in that order, one window at a time.
-# Consequences, all of them new in this pass:
-#   1. ::pis::hw::layout_table measures THIS page: 'SetLayout <n>' for n = 1..30 (stop after three
-#      consecutive errors), read api after each, cache id -> api for the session, print ONE line
-#      "LAYOUTS 1=2 2=2 3=3 4=3 5=4". Nothing journaled: it is a probe, and it moves the page.
-#   2. make_grid wants <cols>*<rows> windows and gets its id from (a) the page itself when it
-#      already shows that many windows (no SetLayout at all), (b) [layout_tokens] in the ini or
-#      ::pis::hw::grid_token_set (integers only), (c) the ids of layout_table whose api is the
-#      wanted count - one id: use it; several: the lowest one plus the Override line; none: print
-#      the table and the one Fix line, BEFORE anything is loaded.
-#   3. Only the final 'SetLayout <id>' is a step: it goes through the wrapper and is journaled
-#      once. Success is api == wanted with a window handle and a client handle for every window
-#      1..api (never a probe above api), and one GRID line per build: "GRID: id=5 api=4 clients=4".
+# F8: the "lowest layout id with that many windows" rule showed a shape nobody asked for (4x1 ->
+#     2x2, 1x4 -> 2x2, 4x2 -> 2x4 on the owner's build), because several ids share one window
+#     count. T-017 removes the rule: the GUI sends the ID, and the static table below is the only
+#     place a shape is written down.
+# T-017 CONSEQUENCES (2026-11-12):
+#   1. ::pis::hw::layout_rows is THE table (20 ids, docs/refs/HV_API.md sec. 2). Nothing measures
+#      a page to learn it, nothing caches it, nothing infers an id from a window count.
+#   2. make_grid {id} reads GetLayout first: the same id means the effect is skipped but ONE
+#      'hwi ... SetLayout <id>' line is still journaled (T-016, replayable). Otherwise it sends
+#      SetLayout <id> and reads BOTH GetLayout == id and GetNumberOfWindows == the table's count
+#      back, plus the per-window walk (a window without a client, or a chart window, fails it).
+#   3. ::pis::hw::layout_table is an owner DIAGNOSTIC only: it refuses a session that is not empty
+#      (its sweep would destroy the page) and no Load All path calls it.
 # The old string machinery (sweep_tokens, "RxC"/"R X C"/"R - C", the plain count, the legacy
 # words) is GONE: F1 says this build cannot read any of it, so a candidate list of spellings is a
 # list of things that cannot work.
@@ -166,13 +174,9 @@ namespace eval ::pis::hw {
     # How many lines THIS copy of the file has (written when it is sourced, below); the BUILD
     # line prints it so "adapter lines=NNN" is measured, never typed by hand.
     if {![info exists build_lines]} { set build_lines 0 }
-    # The layout IDs this session knows for a size, keyed "<cols>x<rows>" in GUI order ("4x1" =
-    # 4 columns, 1 row). The VALUE is a layout ID (an integer) the page accepted, from
-    # ::pis::hw::grid_token_set, the ini, or a grid that already worked. Session only.
-    if {![info exists adapt_tokens]} { set adapt_tokens [dict create] }
-    # The layout table measured on THIS page (::pis::hw::layout_table): layout ID -> window count
-    # the page answered. Empty until something measures it; never guessed from a document.
-    if {![info exists adapt_layouts]} { set adapt_layouts [dict create] }
+    # The layout table is STATIC (T-017): it lives in ::pis::hw::layout_rows, is transcribed from
+    # docs/refs/HV_API.md sec. 2 and is never measured, cached or inferred. Nothing about a layout
+    # is kept in a namespace variable any more (the token cache of T-006..T-014 is gone).
     # The model ID '<client> AddModel' returned per window, so '<model> GetModelHandle' gets the
     # ID of the model THIS app loaded (the reference keeps AddModel's answer the same way). An
     # ARRAY on purpose: the load script writes it from inside the folded one-line script.
@@ -196,10 +200,6 @@ namespace eval ::pis::hw {
     # impatient owner) may set these to 1 / 0 on the console; they are always re-validated.
     if {![info exists retry_tries]} { set retry_tries 4 }
     if {![info exists retry_delay]} { set retry_delay 250 }
-
-    # The ini this copy reads [layout_tokens] from ("<script dir>/../00_config/
-    # pis_workflow_config.ini"), written when the file is sourced (below). "" = read no ini.
-    if {![info exists ini_file]} { set ini_file "" }
 }
 
 # The build stamp: short code + yyyymmdd-hhmm, written BY HAND when this file changes (the
@@ -207,7 +207,7 @@ namespace eval ::pis::hw {
 # line carries the facts only (id/api/model/result), because the stamp plus 8 windows of 1/0
 # lists would not fit in the 80 characters a diag line is allowed.
 namespace eval ::pis {
-    variable BUILD "T6l-20261112-0940"
+    variable BUILD "T6m-20261112-1200"
 }
 
 # --- script builders: the hwi handle API is spelled once, here ------------------------
@@ -404,100 +404,96 @@ for {set @p@Wi 1} {$@p@Wi <= $@p@NW} {incr @p@Wi} {catch {@p@Page GetWindowHandl
 # grid_sweep and sweep_table had no reader left once the layout became an integer id; a dead proc
 # is a lie about what this file can do.
 
-# --- the layout ID this build really uses (integer only - owner fact F1) -----------------
-# The key is "<cols>x<rows>" in GUI order ("4x1" = 4 columns, 1 row), because that is what the
-# owner types; the VALUE is a layout ID (a positive integer), because F1 measured that this build
-# reads only the leading integer of '<page> SetLayout'.
-proc ::pis::hw::token_key {cols rows} {
-    return [format %dx%d $cols $rows]
+# --- THE layout table (T-017): ONE static place, docs/refs/HV_API.md sec. 2 -------------
+# id | windows | shape. The shape text is the doc's own wording, copied verbatim; where the doc
+# gives no shape for an id ("four windows (shape not stated)") the label says exactly that and no
+# name is invented. This is the ONLY place a layout id or its window count is written down:
+# nothing measures a page to learn it, nothing caches it, nothing infers an id from a window
+# count (owner fact F8: several ids share one count, so a count cannot name a shape).
+proc ::pis::hw::layout_rows {} {
+    return {
+        0 1 {one window}
+        1 2 {two windows (left and right)}
+        2 2 {two windows (top and bottom)}
+        3 3 {three windows (one left and two right)}
+        4 3 {three windows (two left and one right)}
+        5 3 {three windows (two top and one bottom)}
+        6 3 {three windows (one top and two bottom)}
+        7 3 {three windows (left, middle, and right)}
+        8 3 {three windows (top, middle, and bottom)}
+        9 4 {four windows (shape not stated)}
+        10 6 {three rows of two}
+        11 6 {two rows of three}
+        12 9 {nine windows}
+        13 12 {four rows of three}
+        14 12 {three rows of four}
+        15 16 {sixteen windows}
+        16 4 {four rows of one}
+        17 8 {four rows of two}
+        18 4 {one row of four}
+        19 8 {two rows of four}
+    }
 }
 
-# --- the layout ID this build really uses (integer only - owner fact F1) -----------------
-# The key is "<cols>x<rows>" in GUI order ("4x1" = 4 columns, 1 row), because that is what the
-# owner types; the VALUE is a layout ID: a positive INTEGER, because F1 measured that this build
-# reads only the leading integer of '<page> SetLayout'. A string value (a "CxR" token, a legacy
-# word) is dropped with no error, exactly like an empty one: it cannot work.
-# The config layer owns the ini grammar whenever it is loaded; the small copy below is for a
-# console where this file was sourced alone (the habit on the HyperView machine), so a cached id
-# works there too. Never throws: no ini, an unreadable ini or a bad line just means "no id", and
-# make_grid then measures the page with ::pis::hw::layout_table.
-proc ::pis::hw::ini_tokens {} {
-    variable ini_file
-    if {[string trim $ini_file] eq ""} { return [dict create] }
-    if {[llength [info commands ::pis::common::read_layout_tokens]] > 0} {
-        return [::pis::common::read_layout_tokens $ini_file]
+# Window count of ONE id, or "" when the id is not in the table. Only the exact integer text is an
+# id: "18x1", "4 x 1" or "a" answer "" - a size is not an id (F1/F8).
+proc ::pis::hw::layout_windows {id} {
+    set lid [string trim $id]
+    if {![string is integer -strict $lid]} { return "" }
+    foreach {rid wins shape} [::pis::hw::layout_rows] {
+        if {$rid == $lid} { return $wins }
     }
-    if {[catch {open $ini_file r} fh]} { return [dict create] }
-    set text ""
-    if {[catch {set text [read $fh]}]} {
-        catch {close $fh}
-        return [dict create]
-    }
-    close $fh
-    set out [dict create]
-    set cur ""
-    foreach line [split $text "\n"] {
-        set t [string trim [string trimright $line "\r"]]
-        if {$t eq ""} { continue }
-        set first [string index $t 0]
-        if {$first eq "#" || $first eq ";"} { continue }
-        if {[regexp {^\[([^\[\]]+)\]$} $t -> name]} {
-            set cur [string tolower [string trim $name]]
-            continue
-        }
-        if {$cur ne "layout_tokens"} { continue }
-        set pos [string first "=" $t]
-        if {$pos < 1} { continue }
-        set k [string tolower [string trim [string range $t 0 [expr {$pos - 1}]]]]
-        set v [string trim [string range $t [expr {$pos + 1}] end]]
-        if {![regexp {^([0-9]+)x([0-9]+)$} $k -> c r]} { continue }
-        if {$v eq "" || $c < 1 || $r < 1} { continue }
-        if {![string is integer -strict $v] || $v < 1} { continue }
-        dict set out $k $v
-    }
-    return $out
-}
-
-# The layout ID this session knows for cols x rows: this session first, then the ini. "" = none,
-# and then ::pis::hw::make_grid measures the page (no guess added). Integers only.
-proc ::pis::hw::grid_id {cols rows} {
-    variable adapt_tokens
-    set key [::pis::hw::token_key $cols $rows]
-    if {[dict exists $adapt_tokens $key]} { return [dict get $adapt_tokens $key] }
-    set ini [::pis::hw::ini_tokens]
-    if {[dict exists $ini $key]} { return [dict get $ini $key] }
     return ""
 }
 
-# How many layout IDs this copy knows (session + ini): the BUILD line prints it, so "the ini I
-# edited is not the ini this file reads" is visible in one line.
-proc ::pis::hw::token_count {} {
-    variable adapt_tokens
-    set all [dict create]
-    dict for {k v} [::pis::hw::ini_tokens] { dict set all $k $v }
-    dict for {k v} $adapt_tokens { dict set all $k $v }
-    return [dict size $all]
+# The doc's shape text for ONE id, "" when the id is not in the table.
+proc ::pis::hw::layout_shape {id} {
+    set lid [string trim $id]
+    if {![string is integer -strict $lid]} { return "" }
+    foreach {rid wins shape} [::pis::hw::layout_rows] {
+        if {$rid == $lid} { return $shape }
+    }
+    return ""
 }
 
-# Remember the layout ID for ONE grid size (this session only) and print the [layout_tokens] line
-# to paste into the ini BY HAND: writing the ini from here would give the file two writers.
-# Integers only - F1 measured that a non-integer argument can only be ignored by this build.
-proc ::pis::hw::grid_token_set {cols rows id} {
-    variable adapt_tokens
-    foreach {label value} [list cols $cols rows $rows] {
-        if {![string is integer -strict $value] || $value < 1} {
-            error "::pis::hw::grid_token_set: $label must be a positive integer, got: '$value'"
-        }
+# The GUI combobox text: "<id>: <w> windows - <shape>" ("" for an id outside the table, so a
+# caller can tell "unknown" from "one window").
+proc ::pis::hw::layout_label {id} {
+    set wins [::pis::hw::layout_windows $id]
+    if {$wins eq ""} { return "" }
+    return [format "%s: %s windows - %s" \
+        [string trim $id] $wins [::pis::hw::layout_shape $id]]
+}
+
+# Order of the combobox: window count first, then id - so every 4-window entry sits together and
+# the owner compares shapes instead of hunting for an id.
+proc ::pis::hw::layout_cmp {a b} {
+    set wa [lindex $a 0]
+    set ia [lindex $a 1]
+    set wb [lindex $b 0]
+    set ib [lindex $b 1]
+    if {$wa != $wb} { return [expr {$wa < $wb ? -1 : 1}] }
+    if {$ia != $ib} { return [expr {$ia < $ib ? -1 : 1}] }
+    return 0
+}
+
+# Every label of the table, sorted by window count then id (the combobox values).
+proc ::pis::hw::layout_choices {} {
+    set pairs {}
+    foreach {rid wins shape} [::pis::hw::layout_rows] {
+        lappend pairs [list $wins $rid]
     }
-    set lid [string trim $id]
-    if {$lid eq ""} { error "::pis::hw::grid_token_set: empty layout id" }
-    if {![string is integer -strict $lid] || $lid < 1} {
-        error "::pis::hw::grid_token_set: the layout id must be a positive integer, got: '$lid'"
+    set labels {}
+    foreach pair [lsort -command ::pis::hw::layout_cmp $pairs] {
+        lappend labels [::pis::hw::layout_label [lindex $pair 1]]
     }
-    set key [::pis::hw::token_key $cols $rows]
-    dict set adapt_tokens $key $lid
-    puts [format "%s = %s" $key $lid]
-    return $lid
+    return $labels
+}
+
+# How many ids the table has (20): the BUILD line prints it, so a copy without the table is
+# visible in one line.
+proc ::pis::hw::layout_count {} {
+    return [expr {[llength [::pis::hw::layout_rows]] / 3}]
 }
 
 # ONE line under 80 characters for a layout table measured on this page:
@@ -515,28 +511,45 @@ proc ::pis::hw::layout_line {table} {
     return $line
 }
 
-# Which INTEGER layout id gives how many windows on THIS page (F1: '<page> SetLayout' reads only
-# the leading integer and treats it as a layout ID, so an id is the only thing worth sending).
-# Measured, never guessed: 'SetLayout <n>' for n = 1..30, read api after each, stop after three
-# consecutive SetLayout errors. It MOVES the page, so it is a probe and nothing is journaled; the
-# table is cached for the session and returned as {id api id api ...}. Prints ONE line.
+# OWNER DIAGNOSTIC (T-017): what does THIS build really answer for every id of the table?
+# '<page> SetLayout <id>' for all 20 ids, read '<page> GetNumberOfWindows' after each, put the
+# original layout back and print ONE LAYOUTS line (id=count measured, in table order). It MOVES the
+# page, so it is a probe (never journaled) and it REFUSES a session that is not empty - a sweep
+# there would take the models the owner just loaded with it. NO Load All path calls it.
+# Returns {id count id count ...} for the ids the page accepted.
 proc ::pis::hw::layout_table {} {
-    variable adapt_layouts
     ::pis::hw::need_exec
-    set s {set @p@Out {}
-set @p@Err 0
-for {set @p@N 1} {$@p@N <= 30} {incr @p@N} {
-    if {[catch {@p@Page SetLayout $@p@N}]} {
-        incr @p@Err
-        if {$@p@Err >= 3} { break }
-        continue
+    set models ""
+    if {[catch {set models [string trim [::pis::hw::probe [::pis::hw::check_models_on_page]]]} merr]} {
+        set models -1
+        ::pis::hw::note WARN "layout_table: the page could not be read: [string trim $merr]"
     }
-    set @p@Err 0
-    set @p@A [@p@Page GetNumberOfWindows]
-    if {![string is integer -strict $@p@A]} { set @p@A [llength $@p@A] }
+    if {$models ne "0"} {
+        if {$models eq "-1"} {
+            set why "the page did not answer how many models it holds"
+        } else {
+            set why [format "%s model(s) on the page" $models]
+        }
+        ::pis::hw::status [format "Error: layout_table refused: the session is not empty (%s)" $why]
+        ::pis::hw::note ERROR [format "layout_table: refused - the session is not empty (%s); File > New, then run it again" $why]
+        error [format "layout_table refused: session not empty (%s)" $why]
+    }
+    set ids {}
+    foreach {rid wins shape} [::pis::hw::layout_rows] { lappend ids $rid }
+    set s {set @p@Prev -
+if {![catch {set @p@Prev [@p@Page GetLayout]}]} {set @p@Prev [string trim $@p@Prev]}
+set @p@Out {}
+foreach @p@N {@ids@} {
+    catch {@p@Page SetLayout $@p@N}
+    set @p@A -1
+    if {![catch {set @p@A [@p@Page GetNumberOfWindows]}]} {
+        if {![string is integer -strict $@p@A]} { set @p@A [llength $@p@A] }
+    }
     lappend @p@Out $@p@N $@p@A
 }
+if {[string is integer -strict $@p@Prev]} {catch {@p@Page SetLayout $@p@Prev}}
 set @p@Out}
+    set s [string map [list @ids@ $ids] $s]
     set got ""
     set script "[::pis::hw::stack_open psi]\n[string map [list @p@ psi] $s]\n[::pis::hw::page_close psi]\nset psiOut"
     if {[catch {set got [::pis::hw::probe $script]} perr]} {
@@ -547,53 +560,13 @@ set @p@Out}
     foreach {id api} $got {
         if {[string is integer -strict $id]} { dict set table $id $api }
     }
-    set adapt_layouts $table
     ::pis::hw::layout_line $table
     return $table
 }
 
-# The layout ID make_grid must send for cols x rows. Order: (b) a cached/ini id, (c) the ids whose
-# measured api is the wanted count - one: that one, several: the LOWEST one plus the Override
-# line, none: the table plus the one Fix line and an error BEFORE anything is loaded. (a), "the
-# page already is the grid", is make_grid's own first test and never reaches this proc.
-# Returns {id how} where how is "cached" or "table".
-proc ::pis::hw::choose_layout {cols rows} {
-    variable adapt_layouts
-    set count [expr {$cols * $rows}]
-    set known [::pis::hw::grid_id $cols $rows]
-    if {$known ne ""} { return [list $known cached] }
-    if {[dict size $adapt_layouts] == 0} {
-        set table [::pis::hw::layout_table]
-    } else {
-        set table $adapt_layouts
-    }
-    set hits {}
-    dict for {id api} $table {
-        if {[string is integer -strict $api] && $api == $count} { lappend hits $id }
-    }
-    if {[llength $hits] == 0} {
-        ::pis::hw::layout_line $table
-        set msg [format "make_grid: no layout id gives %d window(s) for %dx%d (tried %d id(s))" \
-            $count $cols $rows [dict size $table]]
-        append msg "\nFix: choose the layout by hand in HyperView, then click Load All again"
-        ::pis::hw::note ERROR [format "make_grid: no layout id gives %d window(s); see the LAYOUTS line" $count]
-        ::pis::hw::status [format "Error: make_grid %dx%d: no layout id gives %d window(s)" \
-            $cols $rows $count]
-        error $msg
-    }
-    set hits [lsort -integer $hits]
-    set id [lindex $hits 0]
-    if {[llength $hits] > 1} {
-        ::pis::hw::note WARN [format "make_grid: layout id %s chosen from %s (shape unverified)" \
-            $id [join $hits ,]]
-        puts [format "Override: ::pis::hw::grid_token_set %d %d %s" $cols $rows $id]
-    }
-    return [list $id table]
-}
-
 # Read the layout the page is IN ('<page> GetLayout' answers the INTEGER id, F1) and hand the
-# owner the line that stores it. Read-only, no SetLayout, no journal: ONE line under 80 characters
-# plus the ::pis::hw::grid_token_set line to paste into the ini by hand.
+# owner the ini line that stores it. Read-only, no SetLayout, no journal: ONE line under 80
+# characters plus the one ini line to paste by hand.
 proc ::pis::hw::grid_capture {} {
     ::pis::hw::need_exec
     set ob [::pis::hw::observe_dict]
@@ -605,7 +578,13 @@ proc ::pis::hw::grid_capture {} {
     set line [format "GRID: id=%s wins=%s" $lay $wins]
     while {[string length $line] >= 80} { set line "[string range $line 0 76].." }
     puts $line
-    puts [format "::pis::hw::grid_token_set <cols> <rows> %s" [::pis::hw::quote $lay]]
+    set label [::pis::hw::layout_label $lay]
+    if {$label eq ""} {
+        puts [format "# id %s is not in the table: \[layout\] id = 19 stays" $lay]
+    } else {
+        puts [format "# paste into 00_config/pis_workflow_config.ini: \[layout\] id = %s   (%s)" \
+            $lay $label]
+    }
     return $lay
 }
 
@@ -725,6 +704,54 @@ if {$@p@A != @p@Want || $@p@H != $@p@A || $@p@Ct != $@p@A} {
 }
 set @p@Got @p@Want}
     set s [string map [list @p@Want $count] $s]
+    return "[::pis::hw::stack_open psi]\n[string map [list @p@ psi] $s]\n[::pis::hw::page_close psi]\nset psiGot"
+}
+
+# The read-back every make_grid step is judged by (T-017) and the ONLY place the layout rule
+# lives: '<page> GetLayout' must equal the asked id AND '<page> GetNumberOfWindows' must equal the
+# table's window count for that id, then the same per-window walk check_grid uses (a window that
+# answers no client handle, or a chart window, fails it). Answers "<layout id>:<window count>"
+# on success and RAISES otherwise, naming the id, the expected count and what was read:
+#   layout: GetLayout=9 windows=4 wanted id=18 with 4 window(s)
+proc ::pis::hw::check_layout {id count} {
+    set s {set @p@L -
+if {![catch {set @p@L [@p@Page GetLayout]}]} {set @p@L [string trim $@p@L]}
+set @p@A [@p@Page GetNumberOfWindows]
+if {![string is integer -strict $@p@A]} {set @p@A [llength $@p@A]}
+set @p@H 0
+set @p@Ct 0
+set @p@Bad 0
+for {set @p@I 1} {$@p@I <= $@p@A} {incr @p@I} {
+    if {[catch {@p@Page GetWindowHandle @p@Win $@p@I}]} {
+        if {!$@p@Bad} { set @p@Bad $@p@I }
+        continue
+    }
+    incr @p@H
+    if {[catch {@p@Win GetClientHandle @p@C}]} {
+        if {!$@p@Bad} { set @p@Bad $@p@I }
+        catch {@p@Win ReleaseHandle}
+        continue
+    }
+    incr @p@Ct
+    if {[catch {@p@C GetModelList}]} {
+        catch {@p@C ReleaseHandle}
+        catch {@p@Win ReleaseHandle}
+        error "make_grid: window $@p@I is not a HyperView window (client type plot)"
+    }
+    catch {@p@C ReleaseHandle}
+    catch {@p@Win ReleaseHandle}
+}
+if {$@p@L ne "@p@Id" || $@p@A != @p@Want} {
+    error "layout: GetLayout=$@p@L windows=$@p@A wanted id=@p@Id with @p@Want window(s)"
+}
+if {$@p@H != $@p@A || $@p@Ct != $@p@A} {
+    if {$@p@Bad} {
+        error "grid: api=$@p@A handles=$@p@H clients=$@p@Ct wanted=@p@Want (window $@p@Bad did not answer)"
+    }
+    error "grid: api=$@p@A handles=$@p@H clients=$@p@Ct wanted=@p@Want"
+}
+set @p@Got "$@p@L:$@p@A"}
+    set s [string map [list @p@Id $id @p@Want $count @p@ psi] $s]
     return "[::pis::hw::stack_open psi]\n[string map [list @p@ psi] $s]\n[::pis::hw::page_close psi]\nset psiGot"
 }
 
@@ -1039,9 +1066,9 @@ for {set pisPi 1} {$pisPi <= $pisNP} {incr pisPi} {pisP GetPageHandle pisPage $p
     dict set t make_grid [list \
         [dict create n 1 via hwi \
             cmd "[::pis::hw::stack_open pis]\npisPage SetLayout %id\n$grid_walk\n[::pis::hw::page_close pis]" \
-            check [::pis::hw::check_grid %count] want %count \
-            src {conrod/_tmp_hv/batchImportOdb.tcl:105,126 (GetLayout / SetLayout) + owner fact F1 2026-11-11 (SetLayout reads a layout ID)} \
-            note {%count windows, every one a HYPERVIEW client (no SetClientType: training.tcl:9,20 would make a chart); id measured by layout_table}]]
+            check [::pis::hw::check_layout %id %count] want %want \
+            src {conrod/_tmp_hv/batchImportOdb.tcl:105,126 (GetLayout / SetLayout) + owner fact F1 2026-11-11 (SetLayout reads a layout ID) + S1/S2/S3 (docs/refs/HV_API.md sec. 2)} \
+            note {GetLayout == %id and %count HYPERVIEW windows proven by the read-back (no SetClientType: training.tcl:9,20 would make a chart)}]]
     dict set t load_result_in_window [list \
         [dict create n 1 via hwi \
             cmd [::pis::hw::result_cmd %index %path ""] \
@@ -1303,7 +1330,7 @@ proc ::pis::hw::run {op values} {
 }
 
 # The body of ::pis::hw::run with the variant list and the first number given by the caller.
-# ::pis::hw::make_grid passes the ONE form (its %id was resolved by choose_layout) while every
+# ::pis::hw::make_grid passes the ONE form (its %id comes from the caller, T-017) while every
 # other op keeps its table order. `start` is clamped to the list, so a number kept from a run that
 # had more forms can never skip every variant.
 proc ::pis::hw::run_list {op list start values} {
@@ -1576,73 +1603,68 @@ proc ::pis::hw::diag {} {
     return $line
 }
 
-# Build the cols x rows window grid. The page is the judge (F1/F2):
-#   (a) it ALREADY shows cols*rows real windows (every one answering a window handle, a client
-#       handle and GetModelList)? Then no SetLayout runs at all - a rebuild would take a grid the
-#       owner made by hand away - and the journal gets ONE 'SetLayout <id>' step with the id
-#       GetLayout answered, so a replay rebuilds the same grid (T-016; the step is journaled, not
-#       executed, because the page already IS that layout);
-#   (b) ::pis::hw::choose_layout names the id (a cached/ini id, or the id layout_table measured);
-#       a failure there happens BEFORE anything is loaded, with the LAYOUTS line and the Fix line;
-#   (c) exactly ONE 'SetLayout <id>' is sent through the wrapper and journaled, once. Success is
-#       api == cols*rows with a window handle and a client handle for every window 1..api.
+# Build the layout named by ONE integer id (T-017). The table is the judge, the page is the proof:
+#   (a) '<page> GetLayout' already answers that id AND the page really shows its window count
+#       (every window answering a window handle, a client handle and GetModelList)? Then no
+#       SetLayout runs - a rebuild would take the grid the owner made by hand away - and the
+#       journal gets ONE 'SetLayout <id>' step with that id, so a replay rebuilds the same layout
+#       (T-016; the step is journaled, not executed, because the page already IS that layout);
+#   (b) otherwise exactly ONE 'SetLayout <id>' is sent through the wrapper and journaled once, and
+#       the read-back (::pis::hw::check_layout) proves BOTH GetLayout == id and
+#       GetNumberOfWindows == the table's count, plus a client handle for every window 1..api.
+# An id outside the table is refused here, with one message and 0 HyperView calls.
 # Prints ONE GRID line per call: "GRID: id=<n> api=<a> clients=<c>".
-proc ::pis::hw::make_grid {cols rows} {
+proc ::pis::hw::make_grid {id} {
     variable adapt_grid
-    variable adapt_tokens
-    foreach {label value} [list cols $cols rows $rows] {
-        if {![string is integer -strict $value] || $value < 1} {
-            error "::pis::hw::make_grid: $label must be a positive integer, got: '$value'"
-        }
+    set lid [string trim $id]
+    if {![string is integer -strict $lid]} {
+        error "::pis::hw::make_grid: the layout id must be an integer, got: '$id'"
     }
-    set count [expr {$cols * $rows}]
+    set count [::pis::hw::layout_windows $lid]
+    if {$count eq ""} {
+        error [format "::pis::hw::make_grid: layout id %s is not in the table (docs/refs/HV_API.md sec. 2 has %d ids)" \
+            $lid [::pis::hw::layout_count]]
+    }
     ::pis::hw::need_exec
     set ob [::pis::hw::observe]
-    if {[::pis::hw::observe_ok $ob $count] && [::pis::hw::grid_ready $count]} {
-        set lid [dict get $ob layout]
-        ::pis::hw::note INFO [format "make_grid: grid already %d window(s), SetLayout skipped" $count]
-        ::pis::hw::status [format "HV make_grid: %d window(s) already present" $count]
+    set now [dict get $ob layout]
+    if {[string is integer -strict $now] && $now == $lid && \
+            [::pis::hw::observe_ok $ob $count] && [::pis::hw::grid_ready $count]} {
+        ::pis::hw::note INFO [format "make_grid: the page is already layout id %s (%d window(s)), SetLayout skipped" \
+            $lid $count]
+        ::pis::hw::status [format "HV make_grid: layout id %s already present" $lid]
         # T-016: the grid is NOT rebuilt (that would take the grid the owner made by hand away),
         # but the journal still needs ONE replayable step, otherwise a replay in a fresh session
         # finds no layout at all and every later window load fails (S2, A4). '<page> SetLayout <id>'
         # with the id GetLayout answered is idempotent, so it is journaled and not executed.
-        if {[string is integer -strict $lid] && $lid >= 0} {
-            ::pis::hw::journal_run [::pis::hw::set_layout_step $lid]
-        } else {
-            ::pis::hw::note WARN [format \
-                "make_grid: GetLayout answered '%s', so the grid cannot be journaled as a SetLayout step" $lid]
-            ::pis::hw::journal_note [format \
-                "grid %dx%d already present; replay needs the same layout set by hand" $cols $rows]
-        }
+        ::pis::hw::journal_run [::pis::hw::set_layout_step $lid]
         ::pis::hw::record make_grid 0
         set adapt_grid $lid
         puts [format "GRID: id=%s api=%s clients=%s" $adapt_grid \
             [dict get $ob api] [dict get $ob clients]]
         return $count
     }
-    lassign [::pis::hw::choose_layout $cols $rows] id how
     set list [::pis::hw::variants make_grid]
-    set values [dict create %cols $cols %rows $rows %count $count %id $id]
+    set values [dict create %id $lid %count $count %want [format "%s:%s" $lid $count]]
     if {[catch {::pis::hw::run_list make_grid $list [::pis::hw::at make_grid] $values} err]} {
-        # The status bar names the SIZE as well as the step: a failed Load All must say which
-        # grid it could not build, not only that a variant failed (run_list's own line is one
-        # step shorter than what the human needs to act on).
-        ::pis::hw::status [format "Error: make_grid %dx%d: layout id %s did not give %d window(s)" \
-            $cols $rows $id $count]
-        error [format "%s | asked %d window(s) with layout id %s (%s) | Fix: choose the layout by hand in HyperView, then click Load All again" \
-            $err $count $id $how]
+        # The status bar names the id as well as the step: a failed Load All must say which layout
+        # it could not build, not only that a variant failed (run_list's own line is one step
+        # shorter than what the human needs to act on).
+        ::pis::hw::status [format "Error: make_grid: layout id %s did not give %d window(s)" \
+            $lid $count]
+        error [format "%s | asked layout id %s (%s, %d window(s)) | Fix: pick another entry in the Layout list, then click Load All again" \
+            $err $lid [::pis::hw::layout_shape $lid] $count]
     }
     set ob [::pis::hw::observe]
-    if {![::pis::hw::observe_ok $ob $count]} {
+    if {![::pis::hw::observe_ok $ob $count] || [dict get $ob layout] != $lid} {
         error [format \
-            "make_grid: the page changed after the step: grid: api=%s handles=%s clients=%s wanted=%d" \
-            [dict get $ob api] [dict get $ob handles] [dict get $ob clients] $count]
+            "make_grid: the page changed after the step: layout id %s, api=%s handles=%s clients=%s, wanted id %s with %d window(s)" \
+            [dict get $ob layout] [dict get $ob api] [dict get $ob handles] \
+            [dict get $ob clients] $lid $count]
     }
-    dict set adapt_tokens [::pis::hw::token_key $cols $rows] $id
-    set adapt_grid [dict get $ob layout]
-    if {$adapt_grid eq "-"} { set adapt_grid $id }
-    puts [format "GRID: id=%s api=%s clients=%s" $id [dict get $ob api] [dict get $ob clients]]
-    ::pis::hw::status [format "HV make_grid: layout id %s, %s window(s)" $id $count]
+    set adapt_grid $lid
+    puts [format "GRID: id=%s api=%s clients=%s" $lid [dict get $ob api] [dict get $ob clients]]
+    ::pis::hw::status [format "HV make_grid: layout id %s, %s window(s)" $lid $count]
     return $count
 }
 
@@ -1750,22 +1772,20 @@ proc ::pis::hw::help {} {
     puts "  what ran last: ::pis::hw::diag   (ONE line: id= api= model= result= per window)"
     puts "  what the page has NOW: ::pis::hw::observe   (api= handles= clients= layout=, read-only)"
     puts "  what the page is now: ::pis::hw::page_info   (read-only: layout id, wins, open windows)"
-    puts "  which layout id this build has: ::pis::hw::layout_table   (probe, not a step)"
-    puts "    ONE LAYOUTS line, id=window count, e.g. LAYOUTS 1=2 2=2 3=3 4=3 5=4"
-    puts "  pin one by hand: set the layout in HyperView, then ::pis::hw::grid_capture"
-    puts "    paste the printed ::pis::hw::grid_token_set <cols> <rows> <id> line, or the ini line"
+    puts "  which layout id this build has: ::pis::hw::layout_table   (DIAGNOSTIC: refuses a session"
+    puts "    that is not empty, else ONE LAYOUTS line, id=window count measured on this page)"
+    puts "  the table itself: ::pis::hw::layout_choices   (<id>: <w> windows - <shape>, no page read)"
+    puts "  which layout the page is IN: ::pis::hw::grid_capture   (read-only, plus the ini line)"
     return
 }
 
-# Every op back to its first variant, the order back to 1, nothing recorded, no cached layout id
-# and no measured layout table (tests, and a fresh session).
+# Every op back to its first variant, the order back to 1 and nothing recorded (tests, and a fresh
+# session). The layout table is static, so there is nothing layout-related to reset.
 proc ::pis::hw::reset_state {} {
     variable adapt_at
     variable adapt_used
     variable adapt_order
     variable adapt_grid
-    variable adapt_tokens
-    variable adapt_layouts
     variable adapt_models
     variable adapt_async
     variable adapt_wait_bad
@@ -1777,8 +1797,6 @@ proc ::pis::hw::reset_state {} {
     set adapt_used [dict create]
     set adapt_order 1
     set adapt_grid "-"
-    set adapt_tokens [dict create]
-    set adapt_layouts [dict create]
     set adapt_async "-"
     set adapt_wait_bad {}
     set adapt_wait_notes 0
@@ -1792,21 +1810,20 @@ proc ::pis::hw::reset_state {} {
 
 # --- build stamp: ONE line, printed when this file is sourced -------------------------
 # The line answers the first question on a HyperView machine ("which copy is this?"):
-#   BUILD T6i-20261111-1420 | make_grid variants=1 | adapter lines=NNN | layouts=N
+#   BUILD T6m-20261112-1200 | make_grid variants=1 | adapter lines=NNN | layouts=20
 # The line count is measured from the file itself at source time (below), so it cannot go
-# stale the way a hand-written number would. "layouts=" is how many layout ids this copy can see
-# (session + the [layout_tokens] section of the ini it sits next to), so "the ini I edited is not
-# the ini this file reads" shows up before the first Load All.
+# stale the way a hand-written number would. "layouts=" is the size of the STATIC table, so a
+# copy without it shows up before the first Load All.
 proc ::pis::hw::build_line {} {
     variable build_lines
     set stamp "no-stamp"
     if {[info exists ::pis::BUILD]} { set stamp $::pis::BUILD }
     set n 0
     catch { set n [llength [::pis::hw::variants make_grid]] }
-    set toks 0
-    catch { set toks [::pis::hw::token_count] }
+    set ids 0
+    catch { set ids [::pis::hw::layout_count] }
     return [format "BUILD %s | make_grid variants=%d | adapter lines=%d | layouts=%d" \
-        $stamp $n $build_lines $toks]
+        $stamp $n $build_lines $ids]
 }
 
 # Console + GUI log, exactly one line each. The console always gets it (puts); the GUI pane
@@ -1831,13 +1848,5 @@ if {[catch {
     set ::pis::hw::build_lines [llength [split [string trimright $_pis_bt "\n"] "\n"]]
 }]} {
     set ::pis::hw::build_lines 0
-}
-# The ini this copy reads [layout_tokens] from: the 00_config folder NEXT TO this file, so a
-# copy of src/ on the HyperView machine finds its own ini and not another install's.
-# info script is the file being sourced HERE, which is the only place that knows it.
-if {[catch {
-    set ::pis::hw::ini_file [file normalize [file join [file dirname [info script]] .. 00_config pis_workflow_config.ini]]
-}]} {
-    set ::pis::hw::ini_file ""
 }
 ::pis::hw::announce

@@ -603,25 +603,48 @@ proc ::pis::gui::workflow_cfg {} {
     return [dict get $S cfg]
 }
 
-# The four block-0 values as a plain dict (ini values, no widget access).
+# The block-0 values as a plain dict (ini values, no widget access). T-017: the layout is ONE
+# integer id from the static table, never a cols x rows pair.
 proc ::pis::gui::fields_from_cfg {cfg} {
     return [dict create \
         model_file [::pis::common::get $cfg session model_file ""] \
         result_files [::pis::common::get $cfg session result_files ""] \
-        cols [::pis::common::get $cfg layout cols 4] \
-        rows [::pis::common::get $cfg layout rows 2]]
+        layout_id [::pis::common::get $cfg layout id 19]]
 }
 
 # Fields -> cfg (in memory only, nothing is written yet).
 proc ::pis::gui::cfg_with_fields {cfg fields} {
     dict set cfg session model_file [dict get $fields model_file]
     dict set cfg session result_files [dict get $fields result_files]
-    dict set cfg layout cols [dict get $fields cols]
-    dict set cfg layout rows [dict get $fields rows]
+    dict set cfg layout id [dict get $fields layout_id]
     return $cfg
 }
 
+# The id the combobox currently shows: its text is "<id>: <w> windows - <shape>".
+proc ::pis::gui::picked_layout {} {
+    variable S
+    set id ""
+    if {[dict exists $S block0]} {
+        set box [dict get [dict get $S block0] layout]
+        if {[winfo exists $box]} {
+            set text [string trim [$box get]]
+            if {[regexp {^([0-9]+):} $text -> n]} { set id $n }
+        }
+    }
+    return $id
+}
+
+# The owner picked a line: from now on the widget is the truth, not an ini id the table does
+# not know (see fill_block0: such an id stays "for display only" until then).
+proc ::pis::gui::layout_picked {} {
+    variable S
+    catch {dict unset S layout_unknown}
+    return 1
+}
+
 # Widgets -> fields. Blank result lines are dropped; the rest keeps the list order.
+# T-017: an ini layout id that is NOT in the table is kept here until the owner picks an entry,
+# so Load All can refuse it by name instead of quietly replacing it with the default.
 proc ::pis::gui::read_block0 {} {
     variable S
     if {![dict exists $S block0]} {
@@ -633,11 +656,15 @@ proc ::pis::gui::read_block0 {} {
         set item [string trim $item]
         if {$item ne ""} { lappend files $item }
     }
+    if {[dict exists $S layout_unknown]} {
+        set id [dict get $S layout_unknown]
+    } else {
+        set id [::pis::gui::picked_layout]
+    }
     return [dict create \
         model_file [string trim [[dict get $b model] get]] \
         result_files $files \
-        cols [string trim [[dict get $b cols] get]] \
-        rows [string trim [[dict get $b rows] get]]]
+        layout_id $id]
 }
 
 # Fields -> widgets (used on start and after a reload of the config).
@@ -655,12 +682,17 @@ proc ::pis::gui::fill_block0 {fields} {
     foreach item [dict get $fields result_files] {
         $lb insert end $item
     }
-    set cols [dict get $b cols]
-    $cols delete 0 end
-    $cols insert 0 [dict get $fields cols]
-    set rows [dict get $b rows]
-    $rows delete 0 end
-    $rows insert 0 [dict get $fields rows]
+    set id [dict get $fields layout_id]
+    set label [::pis::hw::layout_label $id]
+    if {$label eq ""} {
+        dict set S layout_unknown $id
+        set label [::pis::hw::layout_label 19]
+        ::pis::gui::log_line WARN \
+            "layout id $id is not in the table; pick an entry from the Layout list"
+    } else {
+        catch {dict unset S layout_unknown}
+    }
+    [dict get $b layout] set $label
     return $fields
 }
 
@@ -767,11 +799,26 @@ proc ::pis::gui::run_block0 {mode} {
     set n [llength [dict get $fields result_files]]
     # The step order is part of the result line: a Load All that needed order 2 must be
     # visible in the status bar, not only in the log (SPEC ENV: no silent mode).
-    set msg [format "Loaded %d result(s) into %d window(s), order %d." \
-        $n $res [::pis::hw::order]]
+    set msg [format "Loaded %d result(s) into layout id %s (%d window(s)), order %d." \
+        $n [dict get $fields layout_id] $res [::pis::hw::order]]
     ::pis::gui::log_line OK "$label: $msg"
     ::pis::gui::set_status $msg darkgreen
     return $res
+}
+
+# [X] on the window: block 0 (model, result list, layout id) is persisted the same way a
+# successful Load All persists it, then the window closes - SPEC.md A12 says a relaunch restores
+# the same values, and T-017 adds "the layout id is saved when the app closes" to that moment.
+# A failed save is one WARN, never a dialog that keeps the window open.
+proc ::pis::gui::close_window {} {
+    variable S
+    if {[catch {::pis::gui::apply_block0 [::pis::gui::read_block0]} err]} {
+        catch {::pis::gui::log_line WARN "closing: block 0 not saved: $err"}
+    }
+    if {[dict exists $S top] && [winfo exists [dict get $S top]]} {
+        destroy [dict get $S top]
+    }
+    return
 }
 
 proc ::pis::gui::load_all {} {
@@ -791,8 +838,8 @@ proc ::pis::gui::reset_all {} {
     return [::pis::gui::run_block0 reset]
 }
 
-# Block 0 (SPEC_gui s.4): one model file, one result file per line/window, cols x rows,
-# [Reset (New)], [Load All]. Wired in T-006 to ::pis::step01.
+# Block 0 (SPEC_gui s.4): one model file, one result file per line/window, ONE layout id
+# (combobox, T-017), [Reset (New)], [Load All]. Wired in T-006 to ::pis::step01.
 proc ::pis::gui::block0 {parent} {
     variable S
     set f [ttk::labelframe $parent.block0 -text "0. Load model & results" -padding 4]
@@ -820,23 +867,25 @@ proc ::pis::gui::block0 {parent} {
     set add [ttk::button $bar.add -text "Add.." -command [list ::pis::gui::add_result_files]]
     set remove [ttk::button $bar.remove -text "Remove" \
         -command [list ::pis::gui::remove_result_files]]
-    set cols [ttk::entry $bar.cols -width 3]
-    set rows [ttk::entry $bar.rows -width 3]
+    set layout [ttk::combobox $bar.layout -state readonly -width 58 \
+        -values [::pis::hw::layout_choices]]
     pack $add -side left
     pack $remove -side left -padx {4 0}
+    # T-017: ONE read-only combobox of the 20 documented layouts ("<id>: <w> windows - <shape>",
+    # sorted by window count then id). There is no cols x rows field any more: a size cannot name
+    # a layout id (owner fact F8), and the id is what '<page> SetLayout' reads.
     pack [ttk::label $bar.layoutLabel -text "Layout"] -side left -padx {12 4}
-    pack $cols -side left
-    pack [ttk::label $bar.x -text "x"] -side left -padx 2
-    pack $rows -side left
-    pack [ttk::label $bar.hint -text "(cols x rows)"] -side left -padx 4
+    pack $layout -side left
+    bind $layout <<ComboboxSelected>> [list ::pis::gui::layout_picked]
     set buttons [ttk::frame $f.buttons]
     grid $buttons -row 4 -column 0 -columnspan 3 -sticky we -pady {6 0}
     set reset [ttk::button $buttons.reset -text "Reset (New)" -command [list ::pis::gui::reset_all]]
     set loadAll [ttk::button $buttons.loadAll -text "Load All" -command [list ::pis::gui::load_all]]
     pack $reset -side left
     pack $loadAll -side right
-    dict set S block0 [dict create frame $f model $model cols $cols rows $rows results $lb \
+    dict set S block0 [dict create frame $f model $model layout $layout results $lb \
         add $add remove $remove reset $reset loadAll $loadAll]
+    ::pis::gui::lock $layout
     ::pis::gui::lock $remove
     ::pis::gui::lock $reset
     ::pis::gui::lock $loadAll
@@ -859,6 +908,7 @@ proc ::pis::gui::build {} {
     set w [toplevel $top]
     wm title $w "PIS Workflow"
     wm minsize $w 960 600
+    wm protocol $w WM_DELETE_WINDOW [list ::pis::gui::close_window]
     grid columnconfigure $w 0 -weight 0 -minsize 660
     grid columnconfigure $w 1 -weight 1
     grid rowconfigure $w 0 -weight 1
