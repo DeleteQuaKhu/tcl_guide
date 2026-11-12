@@ -196,6 +196,10 @@ namespace eval ::pis::hw {
     # Has this RUN already written its one "result wait ..." line? ::pis::hw::begin_run clears it,
     # so Load All explains the wait once per run instead of once per window.
     if {![info exists adapt_wait_notes]} { set adapt_wait_notes 0 }
+    # T-027: the methods THIS build answered "could not find requested method" for, "class method"
+    # -> 1. Recorded once per run and never retried (::pis::hw::absent_*); a method list of the
+    # supplier help is not a promise that the owner's build has it (F9 (a) of docs/refs/HV_API.md).
+    if {![info exists adapt_absent]} { set adapt_absent [dict create] }
     # The BOUNDED read-back retry of the result step (T-019): fixed small count, no infinite loop.
     # Tcl 8.5 only - "after" + "catch {update}" between the attempts, no coroutine. A test (or an
     # impatient owner) may set these to 1 / 0 on the console; they are always re-validated.
@@ -208,7 +212,7 @@ namespace eval ::pis::hw {
 # line carries the facts only (id/api/model/result), because the stamp plus 8 windows of 1/0
 # lists would not fit in the 80 characters a diag line is allowed.
 namespace eval ::pis {
-    variable BUILD "T8a-20261112-1449"
+    variable BUILD "T8b-20261112-1638"
 }
 
 # --- script builders: the hwi handle API is spelled once, here ------------------------
@@ -266,6 +270,111 @@ proc ::pis::hw::refresh {} {
 proc ::pis::hw::set_layout_step {id} {
     set s {@p@Page SetLayout @id@}
     return "[::pis::hw::stack_open pis]\n[string map [list @p@ pis @id@ $id] $s]\n[::pis::hw::page_close pis]"
+}
+
+# --- the ABSENT-METHOD rule (T-027; ONE place, every module reuses it) -----------------
+# The owner's build answered on 2026-11-12, verbatim:
+#   Object named: pisCt (of type poIContourCtrl) could not find requested method: SetEnabled
+#   Or the method was called with incorrect arguments.
+# docs/refs/HV_API.md S41 lists SetEnabled for the 2024 supplier help, so the help is not wrong -
+# THIS build does not have that method. Retrying it on every window would only repeat the same
+# error, so the method is recorded ONCE and every later caller skips it (windows 2..N included).
+#
+# The rule in full (SPEC.md A10):
+#   * "could not find requested method: <name>" ALONE is proof of absence;
+#   * the longer text ("... Or the method was called with incorrect arguments") is NOT proof by
+#     itself: it can also mean the ARGUMENTS were wrong. It is proof only when the call used the
+#     arguments the supplier documents for that method, which the caller states with
+#     `documented 1`. A guessed argument is never turned into a fact.
+# A method that is recorded here is never sent again in this run: a variant that needs it is
+# skipped WITHOUT being counted as a failed attempt.
+
+# Split the build's own text: answers {class name ambiguous} or "" when the text is not that
+# error at all. The class is "" when the text does not name it.
+proc ::pis::hw::absent_parse {text} {
+    set t [string map [list "\r" " " "\n" " "] [string trim $text]]
+    set name ""
+    if {![regexp {could not find requested method:[ \t]*([A-Za-z_][A-Za-z0-9_]*)} $t -> name]} {
+        return ""
+    }
+    set class ""
+    if {![regexp {\(of type[ \t]+([A-Za-z_][A-Za-z0-9_]*)\)} $t -> class]} {
+        set class ""
+    }
+    set ambiguous 0
+    if {[regexp -nocase {or the method was called with incorrect arguments} $t]} {
+        set ambiguous 1
+    }
+    return [list $class $name $ambiguous]
+}
+
+# "class name", or just the name when the class is unknown: the key the record is kept under and
+# the text a log line prints.
+proc ::pis::hw::absent_key {class name} {
+    set c [string trim $class]
+    set n [string trim $name]
+    if {$c eq ""} { return $n }
+    return "$c $n"
+}
+
+# Does this build lack <class> <name>? A caller that does not know the class matches by name.
+proc ::pis::hw::absent_has {class name} {
+    variable adapt_absent
+    if {[string trim $name] eq ""} { return 0 }
+    if {[dict exists $adapt_absent [::pis::hw::absent_key $class $name]]} { return 1 }
+    if {[string trim $class] eq ""} {
+        foreach k [dict keys $adapt_absent] {
+            if {[lindex $k end] eq [string trim $name]} { return 1 }
+        }
+    }
+    return 0
+}
+
+# Which method a build text PROVES absent, as {class name}, or "" when it proves nothing.
+# `documented` says whether the call used the arguments the supplier prints for that method.
+proc ::pis::hw::absent_of {text documented} {
+    set parsed [::pis::hw::absent_parse $text]
+    if {[llength $parsed] < 3} { return "" }
+    lassign $parsed class name ambiguous
+    if {$ambiguous && !$documented} { return "" }
+    return [list $class $name]
+}
+
+# Record a method the build does not have. Answers "class name" the FIRST time this run stores it
+# (so the caller writes its ONE INFO line), "" when it was already known or the text proves
+# nothing. Never raises.
+proc ::pis::hw::absent_note {text {documented 1}} {
+    variable adapt_absent
+    set pair [::pis::hw::absent_of $text $documented]
+    if {[llength $pair] < 2} { return "" }
+    lassign $pair class name
+    set key [::pis::hw::absent_key $class $name]
+    if {[dict exists $adapt_absent $key]} { return "" }
+    dict set adapt_absent $key 1
+    return $key
+}
+
+# Record a method the code KNOWS is absent (diagnostics, tests, a supplied fact).
+proc ::pis::hw::absent_add {class name} {
+    variable adapt_absent
+    set key [::pis::hw::absent_key $class $name]
+    if {$key eq ""} { return "" }
+    if {[dict exists $adapt_absent $key]} { return "" }
+    dict set adapt_absent $key 1
+    return $key
+}
+
+# Every method recorded in this run ("class name", in the order they were found).
+proc ::pis::hw::absent_list {} {
+    variable adapt_absent
+    return [dict keys $adapt_absent]
+}
+
+# A new RUN forgets them: the INFO line is then written once per run, not once per session.
+proc ::pis::hw::absent_reset {} {
+    variable adapt_absent
+    set adapt_absent [dict create]
+    return
 }
 
 # --- the OPTIONAL result wait (T-019) -------------------------------------------------
@@ -1807,6 +1916,7 @@ proc ::pis::hw::reset_state {} {
     variable adapt_notes_seen
     variable sess_note
     variable wait_error
+    variable adapt_absent
     set adapt_at [dict create]
     set adapt_used [dict create]
     set adapt_order 1
@@ -1817,6 +1927,7 @@ proc ::pis::hw::reset_state {} {
     set adapt_notes_seen [dict create]
     set sess_note ""
     set wait_error ""
+    set adapt_absent [dict create]
     catch {array unset adapt_models}
     array set adapt_models {}
     return
@@ -1824,7 +1935,7 @@ proc ::pis::hw::reset_state {} {
 
 # --- build stamp: ONE line, printed when this file is sourced -------------------------
 # The line answers the first question on a HyperView machine ("which copy is this?"):
-#   BUILD T8a-20261112-1449 | make_grid variants=1 | adapter lines=NNN | layouts=20
+#   BUILD T8b-20261112-1638 | make_grid variants=1 | adapter lines=NNN | layouts=20
 # The line count is measured from the file itself at source time (below), so it cannot go
 # stale the way a hand-written number would. "layouts=" is the size of the STATIC table, so a
 # copy without it shows up before the first Load All.

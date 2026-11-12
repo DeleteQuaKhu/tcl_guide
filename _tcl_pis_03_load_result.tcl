@@ -1,13 +1,14 @@
 # src/01_scripts/_tcl_pis_03_load_result.tcl
-# ::pis::result - the "Load result" module (task T-008, fixed by T-026): make the targeted
-# window(s) really DISPLAY the typed result type (the contour data type).
+# ::pis::result - the "Load result" module (task T-008, reworked by T-026 and T-027): make the
+# targeted window(s) really DISPLAY the typed result type (the contour data type).
 # Tcl/Tk 8.5 compatible, no tcllib, no network, no package require.
 # Sourcing this file defines procs only: it never calls HyperView.
 #
 # WHAT "APPLIED" MEANS (T-026, after the owner's `T-008: fail 2` on 2026-11-12: the log said the
 # result was applied while the window's contour did not change). Every form below is named in
 # docs/refs/HV_API.md section 11 FIRST, before it is used here:
-#   set  : poIContourCtrl SetDimensionEnabled (S35) -> poIContourCtrl SetDataType (S28)
+#   set  : poIContourCtrl SetDataType (S28) and/or poIContourCtrl SetDimensionEnabled (S35), in the
+#          order of the variant (see VARIANT TABLE below)
 #          -> poIResultCtrl SetCurrentSubcase (S39, ONLY when the window has none)
 #          -> <client> Draw on the CLIENT OF THAT WINDOW (PROVEN pattern 2 of HV_API_REF.md)
 #   read : poIResultCtrl GetSubcaseList (S32) / GetDataTypeList (S30) / GetCurrentSubcase (S40) /
@@ -17,11 +18,31 @@
 # stays gray), and S35/S39 are silent no-ops on a build that ignores them. The step is judged by
 # the READ-BACKS only, and a window that accepted every command without changing is an ERROR.
 #
-# Two steps stay UNVERIFIED-GUESS and are NOT invented:
-#   - the data COMPONENT: S37 prints no value space, so GetDataComponent is READ and printed, and
-#     SetDataComponent is never sent;
-#   - poIContourCtrl SetEnabled (S41): its `pool` argument has no printed value, so it is the LAST
-#     variant (variant 2) and is only tried after the documented form failed its read-back.
+# T-027 (owner's `T-008: fail 3`, 2026-11-12) fixed three defects of T-026:
+#   (a) poIContourCtrl SetEnabled (S41) does NOT EXIST on the owner's build ("could not find
+#       requested method: SetEnabled"). It is gone from the production variants; a method the
+#       build says it does not have is now recorded ONCE and skipped everywhere
+#       (::pis::hw::absent_*, SPEC.md A10);
+#   (b) the ORDER of "enable the dimensions" and "SetDataType" was never documented - T-026
+#       enabled first because the planning prompt said so. The supplier prints no order, so BOTH
+#       orders are variants and the read-back decides;
+#   (c) the failure text listed only the LAST variant, so the outcome of the documented order was
+#       invisible. Every variant now leaves ONE line in the log: what step it reached, the build's
+#       own error text in full, and every value read back; the status bar keeps the first 70
+#       characters of the FIRST variant's line plus " (see log)".
+#
+# VARIANT TABLE (production). Each variant is the same read-back and the same verdict; they differ
+# only in ORDER and in the boolean literal of SetDimensionEnabled's `state`:
+#   1  type-first,   state true   order UNVERIFIED-GUESS (the doc prints none), form DOC
+#                                 (S35: "True if enabled, false if not")
+#   2  enable-first, state true   order UNVERIFIED-GUESS (the T-026 order), form DOC
+#   3  type-first,   state 1      both UNVERIFIED-GUESS (the doc prints true/false)
+#   4  enable-first, state 1      both UNVERIFIED-GUESS
+# The plan only enables the dimensions that do NOT already read true (S36), so an enabled
+# dimension is never touched; the doc prints no way to ask "does this model contain solids", so the
+# verdict requires AT LEAST ONE dimension true and prints the other two (a model without solids
+# must not be refused). SetDataComponent is never sent (S37 prints no value space): the component
+# is READ (S38) and printed.
 #
 # The ONE seam: ::pis::result::apply_to_window {cfg index name}
 #   - the only place that touches a window or a contour control, and the only place that sends a
@@ -41,11 +62,18 @@
 #   ::pis::result::probe_script {index}             -> read-only chain answering the state probe
 #   ::pis::result::read_state {index}               -> dict of the read-backs, raises if none
 #   ::pis::result::verdict {st label}               -> {1 ""} when the window shows it, else {0 why}
-#   ::pis::result::build_script {index plan variant} -> one hwi script: enable -> type -> subcase -> Draw
+#   ::pis::result::build_script {index plan variant} -> one hwi script: the variant's own order
 #   ::pis::result::plan {st label}                  -> what one window's script needs (label/enable/sub)
-#   ::pis::result::variants {}                      -> the variant numbers, documented form first
+#   ::pis::result::variants {}                      -> the variant numbers, documented forms first
+#   ::pis::result::variant_info {v}                 -> order/state + the src class of each part
+#   ::pis::result::variant_name {v}                 -> "type-first, true" (report text)
+#   ::pis::result::variant_needs {v}                -> the {class method} pairs the variant sends
+#   ::pis::result::step_of {raw variant}            -> the step the build's own text names
+#   ::pis::result::variant_line {win name v n ...}  -> the one line a failed variant leaves
+#   ::pis::result::head_cut {text {n}}              -> <n> chars + " (see log)" (status bar)
 #   ::pis::result::reset_state {}                   -> counters back to 0 (tests)
-# Namespace variables: applied, calls, last_window, last_type, readback, state, variant, answer
+# Namespace variables: applied, calls, last_window, last_type, readback, state, variant, answer,
+#                      failed
 
 namespace eval ::pis::result {
     if {![info exists applied]} { set applied 0 }
@@ -56,6 +84,7 @@ namespace eval ::pis::result {
     if {![info exists state]} { set state "" }
     if {![info exists variant]} { set variant 0 }
     if {![info exists answer]} { set answer "" }
+    if {![info exists failed]} { set failed 0 }
 }
 
 # The module title exactly as the GUI shows it: it goes into the journal comment and the
@@ -328,13 +357,60 @@ proc ::pis::result::line_text {win st} {
 }
 
 # The ONE sentence a window that took every command and changed nothing leaves behind: the window,
-# the requested name and EVERY value read, in full - never a summary and never a cut.
+# the requested name and EVERY value read, in full - never a summary and never a cut. T-027 builds
+# its per-variant lines (variant_line) on the same values; this single-window form is kept because
+# docs/refs/HV_API.md section 11 and the report files quote it verbatim.
 proc ::pis::result::fail_text {win name st why} {
     set comp [string trim [dict get $st component]]
     if {$comp eq ""} { set comp "?" }
     return [format "result window %s: '%s' not displayed (type='%s' enabled='%s' subcase='%s' component='%s') | %s" \
         $win $name [dict get $st type] [::pis::result::enabled_text $st] \
         [dict get $st subcase] $comp $why]
+}
+
+# Which step a variant reached, judged from the build's OWN text: the method it could not find, a
+# method name it printed, or - when the text names none - the first state-changing command of that
+# variant. Derived from the error, never invented.
+proc ::pis::result::step_of {raw variant} {
+    set t [string trim $raw]
+    set name ""
+    if {[regexp {could not find requested method:[ \t]*([A-Za-z_][A-Za-z0-9_]*)} $t -> name]} {
+        return $name
+    }
+    foreach m {SetDataType SetDimensionEnabled SetCurrentSubcase Draw} {
+        if {[string first $m $t] >= 0} { return $m }
+    }
+    if {[dict get [::pis::result::variant_info $variant] order] eq "type_first"} {
+        return "SetDataType"
+    }
+    return "SetDimensionEnabled"
+}
+
+# The one line a FAILED variant leaves (T-027 item 2). It keeps the documented prefix of SPEC.md
+# A10 ("result window k: '<name>' not displayed") and appends the variant's own surname, the step it
+# reached and either the build's raw text or every value read back - in full, never cut.
+proc ::pis::result::variant_line {win name v n short step detail} {
+    return [format "result window %s: '%s' not displayed | variant %s/%s %s: step %s -> %s" \
+        $win $name $v $n $short $step $detail]
+}
+
+# The read-back values as the tail of a variant line; "" (no dict) means the probe answered nothing.
+proc ::pis::result::read_suffix {st} {
+    if {$st eq ""} {
+        return " | read-back: none (the window did not answer the probe)"
+    }
+    return " | read-back: [::pis::result::values_text $st]"
+}
+
+# The STATUS BAR version of a report line: the first <n> characters plus " (see log)", the same two
+# lengths the model loader uses (T-019). The log keeps the full line.
+proc ::pis::result::head_cut {text {n 70}} {
+    set t [string map [list "\r" " " "\n" " "] [string trim $text]]
+    while {[string first "  " $t] >= 0} { set t [string map [list "  " " "] $t] }
+    if {$n > 0 && [string length $t] > $n} {
+        set t [string range $t 0 [expr {$n - 1}]]
+    }
+    return "$t (see log)"
 }
 
 # Is the window DISPLAYING the requested label? Answers {1 ""} or {0 <why>}, and only the
@@ -375,27 +451,81 @@ proc ::pis::result::verdict {st label} {
     return [list 0 [join $why "; "]]
 }
 
-# The variant list, documented form FIRST: 1 = exactly the sequence of docs/refs/HV_API.md section
-# 11 (S5, S35, S28, S39, Draw); 2 = the same plus poIContourCtrl SetEnabled (S41, UNVERIFIED-GUESS:
-# its `pool` argument has no printed value). A variant that fails the read-back falls through to
-# the next one; the LAST variant's failure text is the one raised.
+# The variant list, in the order the module tries them. The order and the boolean literal of
+# S35's `state` are the ONLY two things the supplier does not pin down, so each combination is one
+# variant and the READ-BACK - never the order of this list - decides. Documented forms come first.
 proc ::pis::result::variants {} {
-    return [list 1 2]
+    return [list 1 2 3 4]
 }
 
-# The apply script of one window: the chain of <index> + the state-changing lines of <variant>,
-# in the documented order. Built with the adapter's builders, so the handle chain and the journal
+# One variant, in one dict:
+#   order      "type_first" | "enable_first"
+#   order_src  DOC when the supplier prints the order, otherwise UNVERIFIED-GUESS + the reason
+#   state      the literal sent as S35's `state` argument ("true" or "1")
+#   state_src  DOC when the supplier's own words print that form, otherwise UNVERIFIED-GUESS
+# The order is UNKNOWN in every variant: S35 and S28 are two pages of the same class and neither
+# says which one must come first. Because a type change may reset state, "type-first" is preferred
+# and is variant 1; the T-026 order follows as variant 2. The literal `true`/`false` is what S35
+# prints ("True if enabled, false if not") and the supplier's own examples use (`SetIfMultipleLayer
+# true`), so a variant that sends `true` is DOC and the `1`/`0` form is UNVERIFIED-GUESS.
+proc ::pis::result::variant_info {v} {
+    set doc_state {DOC S35 "True if enabled, false if not"}
+    set guess_state {UNVERIFIED-GUESS the doc prints true/false, not 1/0}
+    set doc_order {DOC the doc prints no order}
+    set guess_order {UNVERIFIED-GUESS the doc prints no order; a type change may reset state}
+    switch -- $v {
+        1 { return [dict create order type_first order_src $guess_order \
+                        state true state_src $doc_state] }
+        2 { return [dict create order enable_first order_src $guess_order \
+                        state true state_src $doc_state] }
+        3 { return [dict create order type_first order_src $guess_order \
+                        state 1 state_src $guess_state] }
+        4 { return [dict create order enable_first order_src $guess_order \
+                        state 1 state_src $guess_state] }
+    }
+    error "::pis::result::variant_info: unknown variant '$v' (expected one of: [::pis::result::variants])"
+}
+
+# "type-first, true" / "enable-first, 1": the short name a report line and the log use.
+proc ::pis::result::variant_name {v} {
+    set info [::pis::result::variant_info $v]
+    set ord [dict get $info order]
+    if {$ord eq "type_first"} {
+        set ord "type-first"
+    } else {
+        set ord "enable-first"
+    }
+    return "$ord, [dict get $info state]"
+}
+
+# The {class method} pairs a variant sends. Before a variant runs, every pair is asked against the
+# ABSENT-METHOD record (::pis::hw::absent_has): a method the build said it does not have is never
+# sent again - not in this window, not in window 2..N - and a variant that needs it is skipped
+# instead of being counted as a failed attempt (T-027 / SPEC.md A10).
+proc ::pis::result::variant_needs {v} {
+    return [list [list poIContourCtrl SetDataType] [list poIContourCtrl SetDimensionEnabled]]
+}
+
+# The apply script of one window: the chain of <index> + the state-changing lines of <variant> in
+# THAT variant's order. Built with the adapter's builders, so the handle chain and the journal
 # spelling stay in one file; the script is sent with -nojournal and journaled only after the
 # read-back proved it (SPEC.md A2-A4: a command that changed nothing must never reach a journal).
 proc ::pis::result::build_script {index plan variant} {
-    set lines [list "pisR GetContourCtrlHandle pisCt"]
+    set info [::pis::result::variant_info $variant]
+    set state [dict get $info state]
+    set types [list "pisCt SetDataType [::pis::hw::quote [dict get $plan label]]"]
+    set dims [list]
     foreach d [dict get $plan enable] {
-        lappend lines "pisCt SetDimensionEnabled $d 1"
+        lappend dims "pisCt SetDimensionEnabled $d $state"
     }
-    if {$variant >= 2} {
-        lappend lines "pisCt SetEnabled 1 1"
+    set lines [list "pisR GetContourCtrlHandle pisCt"]
+    if {[dict get $info order] eq "type_first"} {
+        foreach line $types { lappend lines $line }
+        foreach line $dims { lappend lines $line }
+    } else {
+        foreach line $dims { lappend lines $line }
+        foreach line $types { lappend lines $line }
     }
-    lappend lines "pisCt SetDataType [::pis::hw::quote [dict get $plan label]]"
     set sub [dict get $plan sub]
     if {$sub ne ""} {
         lappend lines "pisR SetCurrentSubcase $sub"
@@ -415,16 +545,19 @@ proc ::pis::result::plan {st label} {
 }
 
 # THE SEAM. Bring ONE window to "shows <name>" and prove it with the read-backs, or raise with every
-# value read. Order (docs/refs/HV_API.md section 11, T-026):
+# variant's own outcome. Order (docs/refs/HV_API.md section 11, T-027):
 #   1. read the window first, so the decision is never taken on a guess;
 #   2. find <name> in the data type labels the file itself reported (S30) - an unknown name stops
 #      here, before any SetActiveWindow/SetDataType/SetCurrentSubcase and before any journal line,
 #      because nothing was changed and nothing may be claimed;
-#   3. apply the lowest variant (documented sequence), read back, and only when the read-back says
-#      the window is NOT showing it, try the next variant;
-#   4. on a pass: journal exactly the script that passed (one replayable line), count the window and
-#      answer {window type}; on no pass at all: raise the LAST variant's text, listing every value
-#      read, so the log never says "applied" about a window that did not change.
+#   3. apply the lowest variant, read back, and only when the read-back says the window is NOT
+#      showing it, try the next one - unless the build already PROVED it does not have a method that
+#      variant needs: then the variant is SKIPPED, not counted as a failed attempt;
+#   4. on a pass: the failed variants before it are logged as INFO (a fallthrough stays visible),
+#      ONLY the passing script is journaled, and the answer is {window type};
+#   5. on no pass at all: every variant leaves ONE ERROR line in the log - its short name, the step
+#      it reached, the build's own text in full and every value read back - and the raised text (the
+#      status bar) keeps the first 70 characters of the FIRST of those lines + " (see log)".
 proc ::pis::result::apply_to_window {cfg index name} {
     variable calls
     variable last_window
@@ -432,6 +565,7 @@ proc ::pis::result::apply_to_window {cfg index name} {
     variable readback
     variable state
     variable variant
+    variable failed
     ::pis::result::need_common
     ::pis::result::need_hw
     set want [string trim $name]
@@ -466,56 +600,83 @@ proc ::pis::result::apply_to_window {cfg index name} {
     }
     set plan [::pis::result::plan $st $label]
     set all [::pis::result::variants]
-    set last [lindex $all end]
-    set lastwhy ""
+    set n [llength $all]
+    set fails [list]
+    set first ""
     set res ""
     foreach v $all {
+        # ABSENT-METHOD RULE (2nd half): a variant that needs a method this build does not have is
+        # skipped - never sent, never counted as a failed attempt, in this window or any later one.
+        set missing ""
+        foreach pair [::pis::result::variant_needs $v] {
+            lassign $pair class method
+            if {[::pis::hw::absent_has $class $method]} {
+                set missing $method
+                break
+            }
+        }
+        if {$missing ne ""} { continue }
         set scr [::pis::result::build_script $index $plan $v]
         set code [catch {::pis::hw::exec_hwi $scr -nojournal} res]
-        set got ""
+        set raw [string trim $res]
         if {$code} {
-            # A variant that raised cannot have changed anything: judge it on a fresh read-back when
-            # the chain still answers, otherwise report the build's own message unchanged.
-            if {![catch {set got [::pis::result::read_state $index]}]} {
-                set lastwhy [::pis::result::fail_text $win $want $got \
-                    "the apply script failed: [string trim $res]"]
-            } else {
-                set lastwhy [format "result window %s: '%s' not displayed | the apply script failed: %s" \
-                    $win $want [string trim $res]]
+            # ABSENT-METHOD RULE (1st half): the build's own text decides. The arguments of every
+            # production variant are the documented ones, so `documented 1`; the record is written
+            # once per run and the INFO line below is its only announcement.
+            set key [::pis::hw::absent_note $raw 1]
+            if {$key ne ""} {
+                ::pis::common::log $cfg INFO [format "method absent on this build: %s" $key]
             }
-            if {$v ne $last} {
-                ::pis::common::log $cfg INFO [format "result window %s: variant %s failed | trying the next form" $win $v]
-            }
-            continue
         }
+        # Always read back, even when the variant raised: the values are what a diagnosis needs.
+        set got ""
         set rerr ""
+        set rok 1
         if {[catch {set got [::pis::result::read_state $index]} rerr]} {
-            set lastwhy [format "result window %s: '%s' not displayed | the read-back after the change failed: %s" \
-                $win $want [string trim $rerr]]
-            if {$v ne $last} {
-                ::pis::common::log $cfg INFO [format "result window %s: variant %s failed | trying the next form" $win $v]
+            set rok 0
+            set got ""
+        }
+        set line ""
+        if {$code} {
+            set line [::pis::result::variant_line $win $want $v $n \
+                [::pis::result::variant_name $v] [::pis::result::step_of $raw $v] \
+                [format "the apply script failed: %s%s" $raw [::pis::result::read_suffix $got]]]
+        } elseif {!$rok} {
+            set line [::pis::result::variant_line $win $want $v $n \
+                [::pis::result::variant_name $v] "read-back" \
+                [format "the read-back after the change failed: %s" [string trim $rerr]]]
+        } else {
+            lassign [::pis::result::verdict $got $label] ok why
+            if {$ok} {
+                foreach done $fails {
+                    ::pis::common::log $cfg INFO $done
+                }
+                ::pis::hw::context [::pis::result::title] $label
+                ::pis::hw::journal_run $scr
+                incr calls
+                set last_window $win
+                set last_type $label
+                set readback [dict get $got type]
+                set state $got
+                set variant $v
+                return [list $win $label]
             }
-            continue
+            set line [::pis::result::variant_line $win $want $v $n \
+                [::pis::result::variant_name $v] "read-back" \
+                [format "%s | %s" [::pis::result::values_text $got] $why]]
         }
-        lassign [::pis::result::verdict $got $label] ok why
-        if {$ok} {
-            ::pis::hw::context [::pis::result::title] $label
-            ::pis::hw::journal_run $scr
-            incr calls
-            set last_window $win
-            set last_type $label
-            set readback [dict get $got type]
-            set state $got
-            set variant $v
-            return [list $win $label]
-        }
-        set lastwhy [::pis::result::fail_text $win $want $got $why]
-        if {$v ne $last} {
-            ::pis::common::log $cfg INFO [format "result window %s: variant %s failed (%s) | trying the next form" \
-                $win $v [::pis::result::values_text $got]]
-        }
+        lappend fails $line
+        if {$first eq ""} { set first $line }
     }
-    error $lastwhy
+    incr failed
+    if {$first eq ""} {
+        error [format "result window %s: '%s' not displayed | no variant could run, method(s) absent on this build: %s" \
+            $win $want [::pis::hw::absent_list]]
+    }
+    foreach line $fails {
+        ::pis::common::log $cfg ERROR $line
+    }
+    error [::pis::result::head_cut $first]
 }
 
 # The module entry point (SPEC.md A10). scope "layout" = every window Load All created, anything
@@ -525,12 +686,17 @@ proc ::pis::result::apply_to_window {cfg index name} {
 # the number of windows that changed, so 0 can never be mistaken for "all done".
 proc ::pis::result::run {root cfg scope} {
     variable applied
+    variable failed
     ::pis::result::need_common
     ::pis::result::need_hw
     if {$scope ne "layout" && $scope ne "active"} {
         error "::pis::result::run: unknown scope '$scope' (expected active or layout)"
     }
     set applied 0
+    set failed 0
+    # A new run forgets which methods this build lacks, so the ONE "method absent on this build"
+    # INFO line is written once per run and not once per session (T-027).
+    catch {::pis::hw::absent_reset}
     set name [::pis::result::selected_item $cfg]
     if {$name eq ""} {
         ::pis::common::log $cfg WARN "module [::pis::result::title]: no item selected, nothing run"
@@ -567,6 +733,7 @@ proc ::pis::result::run {root cfg scope} {
 # touches HyperView).
 proc ::pis::result::reset_state {} {
     variable applied 0
+    variable failed 0
     variable calls 0
     variable last_window ""
     variable last_type ""
