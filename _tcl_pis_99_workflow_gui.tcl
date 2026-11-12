@@ -8,6 +8,8 @@
 # ::pis::legend (radio list + "on" + journal + busy guard); its HyperView seam is NOT
 # verified yet (SPEC Q3, T-002c adapter in place), so that module is partial on purpose. The
 # other four modules still log one explicit ERROR ("not wired yet"): no silent no-op.
+# Module lists (Load result, Load Legend, Measures, Section Cut, Capture) are REAL radiobutton /
+# checkbutton rows in a scrolling canvas (not a text listbox), seeded at start by seed_modules.
 # Tcl 8.5 only: no tcllib, no try/finally, no package require beyond Tk.
 #
 # Sourcing order for a HyperView session: this file sources everything it needs, so
@@ -126,57 +128,194 @@ proc ::pis::gui::chosen {key} {
     return $out
 }
 
+# --- module lists made of REAL widgets (SPEC_gui s.5, s.6) -----------------------------------
+# Load result / Load Legend (radio): one radiobutton per row, exactly one chosen.
+# Measures / Section Cut / Capture (check): one checkbutton per row, many can be ticked.
+# The dict S stays the single source of truth (items / checked / sel); widgets only mirror it.
+# Rows live in a canvas so a long list scrolls. Tk 8.5 safe (classic tk widgets).
+
+# Defaults used only when the ini has no item1..itemN for that module. The texts are
+# EXAMPLES from the GUI picture: replace them by the real names (they are plain rows, the
+# user edits them with double-click / [+] / [-]). Legend is left empty on purpose: a fake
+# file path would only produce a "file not found" at run time.
+proc ::pis::gui::default_items {} {
+    return [dict create \
+        result {SF MS AS CPRESS} \
+        legend {} \
+        measures {{Measures 1} {Measures 2} {Measures 3}} \
+        section {section1 section2 section3} \
+        capture {{View 1} {View 2} {View 3}}]
+}
+
+# ini section named like the module key: item1..itemN, selected (1-based, 0 = none), and for
+# legend also "on" (same keys ::pis::gui::legend_cfg writes for one run).
+proc ::pis::gui::cfg_items {cfg key} {
+    set items [list]
+    if {[catch {
+        for {set i 1} {$i <= 200} {incr i} {
+            set item [string trim [::pis::common::get $cfg $key item$i ""]]
+            if {$item eq ""} {
+                break
+            }
+            lappend items $item
+        }
+    }]} {
+        return [list]
+    }
+    return $items
+}
+
+proc ::pis::gui::seed_modules {} {
+    variable S
+    set cfg [::pis::gui::workflow_cfg]
+    set defaults [::pis::gui::default_items]
+    foreach spec [::pis::gui::module_specs] {
+        set key [dict get $spec key]
+        set mode [dict get $spec mode]
+        set items [::pis::gui::cfg_items $cfg $key]
+        set from ini
+        if {[llength $items] == 0} {
+            set items [dict get $defaults $key]
+            set from default
+        }
+        set sel -1
+        if {$mode eq "radio" && [llength $items] > 0} {
+            set sel 0
+            if {$from eq "ini" && ![catch {::pis::common::get $cfg $key selected 1} picked] \
+                    && [string is integer -strict $picked] && $picked >= 0 && $picked <= [llength $items]} {
+                set sel [expr {$picked - 1}]
+            }
+        }
+        if {$key eq "legend" && ![catch {::pis::common::get $cfg legend on 1} on] \
+                && [string is boolean -strict $on]} {
+            set ::pis::gui::on_legend [expr {$on ? 1 : 0}]
+        }
+        set flags [list]
+        foreach item $items {
+            lappend flags 1
+        }
+        dict set S items $key $items
+        dict set S checked $key $flags
+        dict set S sel $key $sel
+        ::pis::gui::render $key
+        if {[llength $items] == 0} {
+            ::pis::gui::log_line INFO "module [dict get $spec title]: list is empty, use \[+\] to add rows"
+        }
+    }
+    return 1
+}
+
+# Rebuild every row of one module from S. Called after add / delete / edit, never from a
+# row's own -command (a widget is never destroyed while its own callback runs).
 proc ::pis::gui::render {key} {
     variable S
-    set lb [dict get $S mods $key lb]
-    set check [expr {[dict get $S mode $key] eq "check"}]
+    set inner [dict get $S mods $key inner]
+    set mode [dict get $S mode $key]
+    foreach w [winfo children $inner] {
+        if {[string match "$inner.r*" $w]} {
+            destroy $w
+        }
+    }
     set flags [dict get $S checked $key]
-    $lb delete 0 end
     set i 0
     foreach text [dict get $S items $key] {
-        if {$check && [lindex $flags $i]} {
-            $lb insert end "\[v\] $text"
-        } elseif {$check} {
-            $lb insert end "\[ \] $text"
+        set r "$inner.r$i"
+        if {$mode eq "check"} {
+            set ::pis::gui::chk($key,$i) [expr {[lindex $flags $i] eq "1" ? 1 : 0}]
+            checkbutton $r -text $text -variable ::pis::gui::chk($key,$i) \
+                -command [list ::pis::gui::on_toggle $key $i]
         } else {
-            $lb insert end $text
+            radiobutton $r -text $text -variable ::pis::gui::rad($key) -value $i \
+                -command [list ::pis::gui::on_pick $key $i]
         }
+        $r configure -anchor w -justify left -padx 2 -pady 0 -borderwidth 0 -highlightthickness 0
+        pack $r -side top -fill x
+        bind $r <Double-Button-1> [list ::pis::gui::edit_row $key $i]
+        bind $r <MouseWheel> [list ::pis::gui::wheel $key %D]
+        bind $r <Button-4> [list ::pis::gui::wheel $key 120]
+        bind $r <Button-5> [list ::pis::gui::wheel $key -120]
         incr i
     }
-    set sel [dict get $S sel $key]
-    $lb selection clear 0 end
-    if {$sel >= 0 && $sel < [$lb size]} {
-        $lb selection set $sel
-    }
-    return [$lb size]
+    set ::pis::gui::rad($key) [dict get $S sel $key]
+    ::pis::gui::mark $key
+    return $i
 }
 
-# Click: radio = select the row; check = toggle its box (row order never changes).
-proc ::pis::gui::click {key x y} {
+# Current row (the radio that is chosen, or the last clicked/edited check row) is tinted, so
+# [+] / [-] always show which row they act on. The ticks themselves are the widgets' own.
+proc ::pis::gui::mark {key} {
     variable S
-    set lb [dict get $S mods $key lb]
-    set idx [$lb nearest $y]
-    if {$idx < 0 || $idx >= [$lb size]} {
+    set inner [dict get $S mods $key inner]
+    set sel [dict get $S sel $key]
+    set n [llength [dict get $S items $key]]
+    for {set i 0} {$i < $n} {incr i} {
+        set r "$inner.r$i"
+        if {![winfo exists $r]} {
+            continue
+        }
+        set color white
+        if {$i == $sel} {
+            set color #cfe3f7
+        }
+        $r configure -background $color -activebackground $color
+    }
+    return $sel
+}
+
+proc ::pis::gui::on_toggle {key i} {
+    variable S
+    dict set S checked $key [lreplace [dict get $S checked $key] $i $i $::pis::gui::chk($key,$i)]
+    dict set S sel $key $i
+    ::pis::gui::mark $key
+    return $i
+}
+
+proc ::pis::gui::on_pick {key i} {
+    variable S
+    dict set S sel $key $i
+    ::pis::gui::mark $key
+    return $i
+}
+
+proc ::pis::gui::wheel {key delta} {
+    variable S
+    if {$delta == 0} {
         return 0
     }
-    if {[dict get $S mode $key] eq "check"} {
-        set flags [dict get $S checked $key]
-        dict set S checked $key [lreplace $flags $idx $idx [expr {![lindex $flags $idx]}]]
-    }
-    dict set S sel $key $idx
-    ::pis::gui::render $key
-    return $idx
+    set cv [dict get $S mods $key canvas]
+    $cv yview scroll [expr {$delta > 0 ? -1 : 1}] units
+    return 1
 }
 
-proc ::pis::gui::edit_at {key y} {
+# Scroll the canvas so row $index is fully visible.
+proc ::pis::gui::see {key index} {
     variable S
-    set lb [dict get $S mods $key lb]
-    return [::pis::gui::edit_row $key [$lb nearest $y]]
+    set cv [dict get $S mods $key canvas]
+    set inner [dict get $S mods $key inner]
+    set r "$inner.r$index"
+    update idletasks
+    if {![winfo exists $r]} {
+        return 0
+    }
+    set total [winfo height $inner]
+    if {$total <= 0} {
+        return 0
+    }
+    lassign [$cv yview] y0 y1
+    set top [expr {double([winfo y $r]) / $total}]
+    set bottom [expr {double([winfo y $r] + [winfo height $r]) / $total}]
+    if {$top < $y0} {
+        $cv yview moveto $top
+    } elseif {$bottom > $y1} {
+        $cv yview moveto [expr {$bottom - ($y1 - $y0)}]
+    }
+    return 1
 }
 
-# [+] inserts below the selected row (or at the end) and edits it immediately (s.5).
+# [+] inserts below the current row (or at the end) and edits it immediately (s.5).
 proc ::pis::gui::add_row {key} {
     variable S
+    ::pis::gui::commit $key
     set sel [dict get $S sel $key]
     if {$sel < 0} {
         set sel [llength [dict get $S items $key]]
@@ -191,16 +330,29 @@ proc ::pis::gui::add_row {key} {
     return $sel
 }
 
+# Remove row $idx and keep a valid current row.
+proc ::pis::gui::drop_row {key idx} {
+    variable S
+    dict set S items $key [lreplace [dict get $S items $key] $idx $idx]
+    dict set S checked $key [lreplace [dict get $S checked $key] $idx $idx]
+    set n [llength [dict get $S items $key]]
+    set sel $idx
+    if {$sel >= $n} {
+        set sel [expr {$n - 1}]
+    }
+    dict set S sel $key $sel
+    return $sel
+}
+
 proc ::pis::gui::del_row {key} {
     variable S
+    ::pis::gui::commit $key
     set sel [dict get $S sel $key]
     if {$sel < 0 || $sel >= [llength [dict get $S items $key]]} {
         ::pis::gui::log_line WARN "module [dict get $S title $key]: no row selected, nothing removed"
         return 0
     }
-    dict set S items $key [lreplace [dict get $S items $key] $sel $sel]
-    dict set S checked $key [lreplace [dict get $S checked $key] $sel $sel]
-    dict set S sel $key -1
+    ::pis::gui::drop_row $key $sel
     ::pis::gui::render $key
     return 1
 }
@@ -209,31 +361,32 @@ proc ::pis::gui::del_row {key} {
 proc ::pis::gui::edit_row {key index} {
     variable S
     variable EDIT
-    set lb [dict get $S mods $key lb]
-    set bb ""
-    if {$index >= 0 && $index < [$lb size]} {
-        set bb [$lb bbox $index]
-    }
-    if {[llength $bb] == 0} {
+    ::pis::gui::commit $key
+    set inner [dict get $S mods $key inner]
+    set r "$inner.r$index"
+    if {![winfo exists $r]} {
         return 0
     }
-    ::pis::gui::commit $key
-    set e "$lb.edit"
+    set e "$inner.edit"
     if {![winfo exists $e]} {
-        set e [entry $e]
+        entry $e -borderwidth 1 -relief solid
         bind $e <Return> [list ::pis::gui::commit $key]
         bind $e <Escape> [list ::pis::gui::edit_cancel $key]
         bind $e <FocusOut> [list ::pis::gui::commit $key]
     }
     $e delete 0 end
     $e insert 0 [lindex [dict get $S items $key] $index]
-    place $e -in $lb -x [lindex $bb 0] -y [lindex $bb 1] -width [expr {[winfo width $lb] - 6}] -height [lindex $bb 3]
-    focus $e
-    $lb see $index
+    place $e -in $r -x 0 -y 0 -relwidth 1.0 -relheight 1.0
+    raise $e
+    dict set S sel $key $index
     dict set EDIT $key $index
+    ::pis::gui::see $key $index
+    focus $e
+    $e selection range 0 end
     return 1
 }
 
+# Commit the typed text. An empty text removes the row (a new row that was never named).
 proc ::pis::gui::commit {key} {
     variable S
     variable EDIT
@@ -242,11 +395,15 @@ proc ::pis::gui::commit {key} {
     }
     set idx [dict get $EDIT $key]
     dict unset EDIT $key
-    set e "[dict get $S mods $key lb].edit"
-    set text [$e get]
+    set e "[dict get $S mods $key inner].edit"
+    set text [string trim [$e get]]
     place forget $e
     if {$idx >= 0 && $idx < [llength [dict get $S items $key]]} {
-        dict set S items $key [lreplace [dict get $S items $key] $idx $idx $text]
+        if {$text eq ""} {
+            ::pis::gui::drop_row $key $idx
+        } else {
+            dict set S items $key [lreplace [dict get $S items $key] $idx $idx $text]
+        }
     }
     ::pis::gui::render $key
     return $text
@@ -255,11 +412,20 @@ proc ::pis::gui::commit {key} {
 proc ::pis::gui::edit_cancel {key} {
     variable S
     variable EDIT
-    place forget "[dict get $S mods $key lb].edit"
+    if {![dict exists $EDIT $key]} {
+        return 0
+    }
+    set idx [dict get $EDIT $key]
     dict unset EDIT $key
+    place forget "[dict get $S mods $key inner].edit"
+    if {$idx >= 0 && $idx < [llength [dict get $S items $key]] \
+            && [lindex [dict get $S items $key] $idx] eq ""} {
+        ::pis::gui::drop_row $key $idx
+    }
     ::pis::gui::render $key
     return 0
 }
+
 
 # Busy guard (SPEC A11: a second click while a module runs does nothing). The buttons are
 # locked too, but a queued event can still arrive; this is the one check every entry uses.
@@ -373,7 +539,8 @@ proc ::pis::gui::clear_log {} {
 }
 
 # Shared module-list helper (SPEC_gui s.5): the module name IS the run-for-active-window
-# button; then the user-typed list, [+] [-], and one [Apply all layout]. No global Run button.
+# button; then the user-typed list (real radio / check buttons), [+] [-], and one
+# [Apply all layout]. No global Run button.
 proc ::pis::gui::module_block {parent spec} {
     variable S
     set key [dict get $spec key]
@@ -389,14 +556,21 @@ proc ::pis::gui::module_block {parent spec} {
         dict set S on $key $on
         ::pis::gui::lock $on
     }
-    set box [ttk::frame $f.box]
+    set box [frame $f.box -relief sunken -borderwidth 1 -background white]
     pack $box -side top -fill both -expand 1 -pady {4 0}
-    set lb [listbox $box.list -height 5 -exportselection 0 -activestyle none -yscrollcommand [list $box.yscroll set] -selectmode [expr {[dict get $spec mode] eq "radio" ? "browse" : "extended"}]]
-    set sb [ttk::scrollbar $box.yscroll -orient vertical -command [list $lb yview]]
+    set cv [canvas $box.cv -background white -highlightthickness 0 -borderwidth 0 \
+        -height 96 -width 150 -yscrollincrement 18 -yscrollcommand [list $box.yscroll set]]
+    set sb [ttk::scrollbar $box.yscroll -orient vertical -command [list $cv yview]]
     pack $sb -side right -fill y
-    pack $lb -side left -fill both -expand 1
-    bind $lb <Button-1> [list ::pis::gui::click $key %x %y]
-    bind $lb <Double-Button-1> [list ::pis::gui::edit_at $key %y]
+    pack $cv -side left -fill both -expand 1
+    set inner [frame $cv.inner -background white]
+    set win [$cv create window 0 0 -anchor nw -window $inner]
+    bind $inner <Configure> [list $cv configure -scrollregion {0 0 %w %h}]
+    bind $cv <Configure> [list $cv itemconfigure $win -width %w]
+    bind $cv <MouseWheel> [list ::pis::gui::wheel $key %D]
+    bind $inner <MouseWheel> [list ::pis::gui::wheel $key %D]
+    bind $cv <Button-4> [list ::pis::gui::wheel $key 120]
+    bind $cv <Button-5> [list ::pis::gui::wheel $key -120]
     set bar [ttk::frame $f.bar]
     pack $bar -side top -fill x -pady {4 0}
     set plus [ttk::button $bar.plus -text "+" -width 3 -command [list ::pis::gui::add_row $key]]
@@ -405,7 +579,7 @@ proc ::pis::gui::module_block {parent spec} {
     pack $plus -side left
     pack $minus -side left -padx {4 0}
     pack $apply -side right
-    dict set S mods $key [dict create frame $f name $name lb $lb apply $apply]
+    dict set S mods $key [dict create frame $f name $name lb $inner inner $inner canvas $cv apply $apply]
     dict set S items $key [list]
     dict set S checked $key [list]
     dict set S sel $key -1
@@ -415,6 +589,7 @@ proc ::pis::gui::module_block {parent spec} {
     ::pis::gui::lock $apply
     return $f
 }
+
 
 # --- block 0 wiring (task T-006) -------------------------------------------
 # The config dict is loaded once per session (SPEC.md D1: one ini, it also carries the
@@ -736,9 +911,10 @@ proc ::pis::gui::build {} {
     dict set S log $log
     dict set S status $status
     ::pis::gui::lock $run
-    ::pis::gui::log_line INFO "BUILD $::pis::BUILD | Workflow GUI started (block 0 + Load Legend wired; tasks T-006, T-007)"
+    ::pis::gui::log_line INFO "BUILD $::pis::BUILD | Workflow GUI started (block 0 + Load Legend wired; tasks T-006, T-007; module lists = real radio/check buttons)"
     ::pis::gui::set_status "Idle"
     ::pis::gui::fill_block0 [::pis::gui::fields_from_cfg [::pis::gui::workflow_cfg]]
+    ::pis::gui::seed_modules
     return $top
 }
 
