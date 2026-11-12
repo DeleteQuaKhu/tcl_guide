@@ -43,6 +43,14 @@
 #   * never the proof: the proof is a BOUNDED read-back (poIModel GetResultCtrlHandle S25 +
 #     poIResultCtrl GetNumberOfSubcases S27, ::pis::hw::retry_tries attempts, `after` + `update`,
 #     no coroutine). A wait that fails while the read-back succeeds is a WARN.
+# T-019 pass 12 (2026-11-12) - GetError is a NOTE, never a judge. The owner's report: window 1
+# loaded, window 2 stopped Load All with `session error after SetResult: (poIPost::GetResultList)`
+# although the result WAS attached; a 4-window grid never reached windows 3 and 4. The session
+# condition is now read (a) BEFORE SetResult to flush a leftover from the window before, and (b)
+# after SetResult as ::pis::hw::sess_note: logged as ONE `WARN ... the read-back succeeded` per
+# distinct text and per run, and quoted inside the failure message only when the READ-BACK failed.
+# Reason: a method that really fails is RAISED by the handle object (F6), so the condition is
+# additional information - the same rule the failed wait already followed.
 # Console helpers, no file edit needed:
 #   ::pis::hw::use {op n}       try variant n from now on (e.g. ::pis::hw::use make_grid 2);
 #                               "::pis::hw::use order 2" picks the Load All step ORDER
@@ -199,7 +207,7 @@ namespace eval ::pis::hw {
 # line carries the facts only (id/api/model/result), because the stamp plus 8 windows of 1/0
 # lists would not fit in the 80 characters a diag line is allowed.
 namespace eval ::pis {
-    variable BUILD "T6k-20261111-1703"
+    variable BUILD "T6l-20261112-0940"
 }
 
 # --- script builders: the hwi handle API is spelled once, here ------------------------
@@ -351,10 +359,24 @@ proc ::pis::hw::wait_decide {} {
 # Called once by each Load All: the "result wait ..." line belongs to the RUN, not to the session.
 proc ::pis::hw::begin_run {} {
     variable adapt_wait_notes
+    variable adapt_notes_seen
+    variable sess_note
     variable wait_error
     set adapt_wait_notes 0
+    set adapt_notes_seen [dict create]
+    set sess_note ""
     set wait_error ""
     return
+}
+
+# The session's post-SetResult condition of the window that just ran (T-019 pass 12). A NOTE, not
+# a verdict: F7 says this build writes "(poIPost::GetResultList)" there while the result really is
+# attached, so only ::pis::hw::check_result_attached may fail a step. Written by result_cmd,
+# READ (and logged at most once per distinct text) by load_result_in_window.
+# The notes already logged in this session, so 8 windows cannot print the same line 8 times.
+namespace eval ::pis::hw {
+    variable sess_note ""
+    variable adapt_notes_seen [dict create]
 }
 
 # --- read-back checks: each one ends with the value ::pis::hw::probe must return -------
@@ -896,13 +918,18 @@ for {set pisWi 1} {$pisWi <= %count} {incr pisWi} {catch {pisPage GetWindowHandl
 #   model id  - the id AddModel RETURNED (::pis::hw::adapt_models) or the client's active model;
 #               a 0/empty answer is a NAMED failure (poIPost AddModel, S21: "model ID, or Null_ID
 #               (0) if AddModel failed"), so no result is ever attached to nothing;
+#   flush     - GetError read BEFORE SetResult: the read CLEARS the condition (S19), so whatever
+#               shows up after SetResult belongs to THIS call and not to the window before it;
 #   SetResult - poIModel SetResult (S9) on THAT model's handle; its warning code cannot fail the
 #               step, the read-back decides;
-#   GetError  - read right after SetResult because it CLEARS the condition (S19) and because a
-#               load error may be reported there instead of as a Tcl error;
+#   note      - GetError read right after SetResult is kept as a NOTE in ::pis::hw::sess_note,
+#               never as a failure (pass 12, owner-measured F7): the owner's build answers
+#               "(poIPost::GetResultList)" on window 2 while the result IS attached, and the
+#               supplier's own rule is that a method failure is RAISED, not reported through the
+#               session condition (F6). Only the read-back can fail a step (T-019);
 #   wait      - the optional, guarded fragment (may be empty). Its own error is caught INTO
 #               ::pis::hw::wait_error: a failed wait is a WARN, never a failed step;
-#   GetError  - cleared once more, so a wait that set the condition cannot fail the NEXT step.
+#   clear     - GetError once more, so a note from this window cannot sit in front of the next.
 proc ::pis::hw::result_cmd {idx path wait} {
     set s {set pisMid [pisC GetActiveModel]
 if {[info exists ::pis::hw::adapt_models(@idx@)]} {set pisMid $::pis::hw::adapt_models(@idx@)}
@@ -910,18 +937,20 @@ if {![string is integer -strict $pisMid] || $pisMid <= 0} {
     error "window @idx@: AddModel returned no model id (got '$pisMid'), so no result can attach - check that the model really loads in this window"
 }
 pisC GetModelHandle pisM $pisMid
+set ::pis::hw::sess_note ""
+catch {pisS GetError}
 pisM SetResult @path@
 set pisSE ""
 catch {set pisSE [pisS GetError]}
+if {[string trim $pisSE] ne "" && [string trim $pisSE] ne "0"} {
+    set ::pis::hw::sess_note [string trim $pisSE]
+}
 set ::pis::hw::wait_error ""
 catch {
 @wait@
 } ::pis::hw::wait_error
 catch {pisS GetError}
-catch {pisM ReleaseHandle}
-if {[string trim $pisSE] ne "" && [string trim $pisSE] ne "0"} {
-    error "window @idx@: session error after SetResult: [string trim $pisSE]"
-}}
+catch {pisM ReleaseHandle}}
     set body [string map [list @idx@ $idx @path@ $path @wait@ $wait] $s]
     return "[::pis::hw::window_open pis $idx]\n$body\n[::pis::hw::window_close pis]"
 }
@@ -1619,6 +1648,7 @@ proc ::pis::hw::make_grid {cols rows} {
 
 proc ::pis::hw::load_result_in_window {index path} {
     variable adapt_wait_bad
+    variable adapt_notes_seen
     if {![string is integer -strict $index] || $index < 1} {
         error "::pis::hw::load_result_in_window: window index must be a positive integer, got: '$index'"
     }
@@ -1639,9 +1669,36 @@ proc ::pis::hw::load_result_in_window {index path} {
         lappend built [dict replace $v cmd [::pis::hw::result_cmd %index %path $wcmd]]
     }
     set ::pis::hw::wait_error ""
-    set res [::pis::hw::run_list load_result_in_window $built \
-        [::pis::hw::at load_result_in_window] \
-        [dict create %path $p %index $index %zindex [expr {$index - 1}]]]
+    set ::pis::hw::sess_note ""
+    set res ""
+    if {[catch {
+        set res [::pis::hw::run_list load_result_in_window $built \
+            [::pis::hw::at load_result_in_window] \
+            [dict create %path $p %index $index %zindex [expr {$index - 1}]]]
+    } rerr]} {
+        # The step failed on its READ-BACK (the only judge). A session condition from GetError is
+        # then the best explanation this build offers, so it is quoted - never the other way round.
+        set nerr ""
+        catch {set nerr $::pis::hw::sess_note}
+        if {[string trim $nerr] ne ""} {
+            error "$rerr (session note after SetResult: [::pis::hw::clip $nerr 200])"
+        }
+        error $rerr
+    }
+    # PASSED the read-back, so a non-empty GetError is a NOTE, not a failure (F7: this build
+    # answers "(poIPost::GetResultList)" on window 2 with the result attached). ONE WARN per
+    # distinct text per RUN, so a full grid cannot fill the log with the same line.
+    set nerr ""
+    catch {set nerr $::pis::hw::sess_note}
+    set nerr [string trim $nerr]
+    if {$nerr ne ""} {
+        if {![dict exists $adapt_notes_seen $nerr]} {
+            dict set adapt_notes_seen $nerr 1
+            ::pis::hw::note WARN [format \
+                "load_result_in_window window %d: session note after SetResult: %s - the read-back succeeded" \
+                $index [::pis::hw::clip $nerr 200]]
+        }
+    }
     # A wait that failed while the read-back SUCCEEDED is a WARN, not an ERROR (T-019), and that
     # form is not tried again in this session - the next window uses the next form and the chain
     # ends at "no wait at all".
@@ -1713,6 +1770,8 @@ proc ::pis::hw::reset_state {} {
     variable adapt_async
     variable adapt_wait_bad
     variable adapt_wait_notes
+    variable adapt_notes_seen
+    variable sess_note
     variable wait_error
     set adapt_at [dict create]
     set adapt_used [dict create]
@@ -1723,6 +1782,8 @@ proc ::pis::hw::reset_state {} {
     set adapt_async "-"
     set adapt_wait_bad {}
     set adapt_wait_notes 0
+    set adapt_notes_seen [dict create]
+    set sess_note ""
     set wait_error ""
     catch {array unset adapt_models}
     array set adapt_models {}

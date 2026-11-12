@@ -8,7 +8,10 @@
 #      from T6h while the tree was already T6j, so its layout numbers were the old
 #      behaviour and its LAYOUTS line did not exist at all.
 #   1. File > New (the way you always start; this file does not reset for you).
-#   2. Edit the values below: the model file, the result file(s), cols, rows.
+#   2. Nothing to edit in the normal case. The model and the result files come from this file
+#      (bottom of this comment) and, when those do not exist on your machine, from the workflow's
+#      own ini: 00_config/pis_workflow_config.ini, [session] model_file / result_files. Edit them
+#      only to check a DIFFERENT model or result set than the GUI last used.
 #   3. Source this file (File > Run Script, or drop it on the Tcl console).
 #   4. It prints a short transcript and writes ONE report file:
 #          src/02_working/t006_check.txt
@@ -16,7 +19,7 @@
 #      count, measured on YOUR page), the GRID line, the DIAG line (model/result per window)
 #      and ONE VERDICT line (PASS, or FAIL with the reason). That is all I need.
 #      Read the BUILD line before sending: it must name the copy you just copied in
-#      (`T6j-20261111-1650` today). An older stamp means step 0 was skipped.
+#      (`T6l-20261112-0940` today). An older stamp means step 0 was skipped.
 #
 # What it does, in this order (nothing else, and it never edits a file):
 #   BUILD   - which copy of the adapter this session runs
@@ -31,11 +34,12 @@
 # through ::pis::hw - the same calls the GUI makes, so the journal looks the same.
 
 # --- the values to edit by hand -------------------------------------------------------
-# THE PATHS BELOW ARE PLACEHOLDERS. Nothing on this machine reads them: the file models an
-# owner machine, where C:/temp/model.h3d is whatever model the owner meant to load. Put real
-# paths here BEFORE sourcing the file - the check now verifies every one of them first and stops
-# with `VERDICT: FAIL input: ...` instead of blaming the code for a path that does not exist
-# (that is exactly what the pass-11 report showed).
+# THESE ARE EXAMPLES, not this machine's files. If the model below does not exist, the check asks
+# 00_config/pis_workflow_config.ini ([session] model_file / result_files) and says so in a CHECK
+# line - the pass-12 report died on `C:/temp/model.h3d` while the GUI had been loading a real
+# model all along, and a check must not fail for a path the app itself knows. Both ways can be
+# empty: then the run stops with `VERDICT: FAIL input: ...` naming them, instead of blaming the
+# code for a path that does not exist.
 # (The if-guard lets a test preset a value; the file clears these six names after a run, so
 # sourcing it again after an edit always reads the values below and never a stale copy.)
 if {![info exists t6_model]} { set t6_model {C:/temp/model.h3d} }
@@ -171,6 +175,86 @@ proc ::t6::open_report {dir} {
     return [list $fd ""]
 }
 
+# --- input paths: the ini the workflow itself uses, so a report never stops on a placeholder ----
+# Read one value out of the app's ini WITHOUT loading the app: the file is plain text - [section]
+# headers, `key = value`, ';' or '#' at the start of a line is a comment. Returns "" when the
+# section or the key is absent (an empty value `key =` is also "", which is a valid answer).
+proc ::t6::ini_get {file section key} {
+    if {![file isfile $file]} { return "" }
+    if {[catch {open $file r} fd]} { return "" }
+    set out ""
+    set in ""
+    while {[gets $fd line] >= 0} {
+        set line [string trim $line]
+        if {$line eq ""} { continue }
+        set c [string index $line 0]
+        if {$c eq ";" || $c eq "#"} { continue }
+        if {[regexp {^\[(.+)\]$} $line -> sec]} {
+            set in [string trim $sec]
+            continue
+        }
+        if {$in ne $section} { continue }
+        if {![regexp {^([^=]+)=(.*)$} $line -> k v]} { continue }
+        if {[string trim $k] ne $key} { continue }
+        set out [string trim $v]
+    }
+    catch {close $fd}
+    return $out
+}
+
+# A path from the ini is absolute or relative to the APP folder (the folder that holds 00_config
+# and 02_working), never to this file.
+proc ::t6::abs {root p} {
+    if {[file pathtype $p] eq "absolute"} { return [file normalize $p] }
+    return [file normalize [file join $root $p]]
+}
+
+# The values to run with: what the file says, unless it does not name a real file - then the app's
+# own ini is asked (that is where the GUI keeps the model and the result list it last used), and a
+# CHECK line says so. Empty stays empty: "no result file at all" is a real choice, not a typo.
+# Returns {model results notes}.
+proc ::t6::inputs {model results ini root} {
+    set notes {}
+    set m [string trim $model]
+    if {$m ne "" && ![file isfile $m]} {
+        set ini_m [::t6::ini_get $ini session model_file]
+        if {$ini_m ne ""} {
+            set cand [::t6::abs $root $ini_m]
+            if {[file isfile $cand]} {
+                lappend notes [format "input: model from %s \[session\] model_file: %s" \
+                    [file tail $ini] $cand]
+                set m $cand
+            }
+        }
+    }
+    set rs {}
+    set bad 0
+    foreach f $results {
+        if {![file isfile $f]} { set bad 1 }
+    }
+    if {[llength $results] > 0 && $bad} {
+        set ini_r [::t6::ini_get $ini session result_files]
+        if {$ini_r ne ""} {
+            set cand {}
+            set all 1
+            foreach f $ini_r {
+                set a [::t6::abs $root $f]
+                if {![file isfile $a]} { set all 0 }
+                lappend cand $a
+            }
+            if {$all} {
+                lappend notes [format "input: %d result file(s) from %s \[session\] result_files" \
+                    [llength $cand] [file tail $ini]]
+                set rs $cand
+            }
+        }
+    } else {
+        set rs $results
+    }
+    if {[llength $rs] == 0} { set rs $results }
+    return [list $m $rs $notes]
+}
+
 # The whole run. Every step is caught: one failure must still produce a report with a VERDICT
 # line, because the file is what travels, not the console.
 proc ::t6::run {model results cols rows measure try_all} {
@@ -179,13 +263,13 @@ proc ::t6::run {model results cols rows measure try_all} {
     # never replaced is an INPUT error, and the report says so in one line instead of letting
     # every later step fail for the wrong reason.
     if {![file isfile $model]} {
-        set why [format "input: model file not found: %s (edit MODEL at the top of this file)" $model]
+        set why [format "input: model file not found: %s (edit MODEL at the top of this file, or put it in \[session\] model_file of 00_config/pis_workflow_config.ini)" $model]
         ::t6::emit "CHECK $why"
         return [list FAIL $why]
     }
     foreach f $results {
         if {![file isfile $f]} {
-            set why [format "input: result file not found: %s (edit RESULT file(s) at the top of this file)" $f]
+            set why [format "input: result file not found: %s (edit the result file(s) at the top of this file, or put them in \[session\] result_files of 00_config/pis_workflow_config.ini)" $f]
             ::t6::emit "CHECK $why"
             return [list FAIL $why]
         }
@@ -233,6 +317,13 @@ proc ::t6::run {model results cols rows measure try_all} {
 # --- source the app, run, write the report --------------------------------------------
 set t6_dir [file dirname [file normalize [info script]]]
 set t6_scripts [file normalize [file join $t6_dir .. 01_scripts]]
+# The app folder (holds 00_config / 02_working) and the ini the GUI itself reads. A path the file
+# cannot use is taken from there, so a report is never blocked by a placeholder (pass 12).
+set t6_root [file normalize [file join $t6_dir .. ..]]
+# A test may preset t6_ini to point at its own file; otherwise the app's own ini is read.
+if {![info exists t6_ini]} {
+    set t6_ini [file join $t6_root 00_config pis_workflow_config.ini]
+}
 if {[string trim $t6_report_dir] ne ""} {
     set t6_out $t6_report_dir
 } else {
@@ -256,6 +347,8 @@ if {$t6_fd eq ""} {
         set t6_verdict [list FAIL "the app did not load (see STEP line)"]
     } else {
         ::t6::log_sink
+        lassign [::t6::inputs $t6_model $t6_results $t6_ini $t6_root] t6_model t6_results t6_inote
+        foreach t6_n $t6_inote { ::t6::emit "CHECK $t6_n" }
         if {[catch {set t6_verdict [::t6::run $t6_model $t6_results $t6_cols $t6_rows \
                 $t6_measure $t6_try_all]} t6_err]} {
             set t6_verdict [list FAIL "unexpected: $t6_err"]
