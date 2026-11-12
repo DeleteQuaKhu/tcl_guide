@@ -6,8 +6,10 @@
 # (T-002c), so a saved journal replays the model and the window grid in a fresh session and
 # no user library is involved (SPEC.md D2). Task T-007 wires the "Load Legend" block to
 # ::pis::legend (radio list + "on" + journal + busy guard); its HyperView seam is NOT
-# verified yet (SPEC Q3, T-002c adapter in place), so that module is partial on purpose. The
-# other four modules still log one explicit ERROR ("not wired yet"): no silent no-op.
+# verified yet (SPEC Q3, T-002c adapter in place), so that module is partial on purpose.
+# Task T-008 wires the "Load result" block to ::pis::result (radio list + the documented
+# contour call of docs/refs/HV_API.md section 11 with its two read-backs).
+# The other three modules still log one explicit ERROR ("not wired yet"): no silent no-op.
 # Module lists (Load result, Load Legend, Measures, Section Cut, Capture) are REAL radiobutton /
 # checkbutton rows in a scrolling canvas (not a text listbox), seeded at start by seed_modules.
 # Tcl 8.5 only: no tcllib, no try/finally, no package require beyond Tk.
@@ -16,7 +18,8 @@
 # `source <root>/01_scripts/_tcl_pis_99_workflow_gui.tcl` is the only command required.
 set _pis_dir [file dirname [file normalize [info script]]]
 foreach _pis_file {_tcl_pis_00_common.tcl _tcl_pis_10_hw.tcl _tcl_pis_11_hw_adapter.tcl \
-        _tcl_pis_01_load_model_results.tcl _tcl_pis_02_load_legend.tcl} {
+        _tcl_pis_01_load_model_results.tcl _tcl_pis_02_load_legend.tcl \
+        _tcl_pis_03_load_result.tcl} {
     set _pis_path [file join $_pis_dir $_pis_file]
     if {[catch {source $_pis_path} _pis_err]} {
         error "Cannot source $_pis_path: $_pis_err"
@@ -438,8 +441,9 @@ proc ::pis::gui::busy_guard {title} {
     return 0
 }
 
-# Run seam. "legend" is wired (T-007); the other four modules still report one explicit
-# ERROR naming the module, and an empty module is the WARN required by the SPEC states.
+# Run seam. "result" (T-008) and "legend" (T-007) are wired; the other three modules still
+# report one explicit ERROR naming the module, and an empty module is the WARN required by the
+# SPEC states.
 proc ::pis::gui::run_module {key scope} {
     variable S
     set title [dict get $S title $key]
@@ -447,6 +451,9 @@ proc ::pis::gui::run_module {key scope} {
         return 0
     }
     ::pis::gui::commit $key
+    if {$key eq "result"} {
+        return [::pis::gui::run_result $scope]
+    }
     if {$key eq "legend"} {
         return [::pis::gui::run_legend $scope]
     }
@@ -457,6 +464,63 @@ proc ::pis::gui::run_module {key scope} {
     ::pis::gui::log_line ERROR "module $title: execution is not wired yet (frame task T-003, scope $scope)"
     ::pis::gui::set_status "Error: $title not available yet" red
     return 0
+}
+
+# --- Load result wiring (task T-008) ----------------------------------------
+# Widgets -> a THROWAWAY cfg for one run: the typed list and the radio selection use the very
+# keys the ini keeps ([result] item1..itemN + selected), so a run reads the session exactly like
+# the start-up restore does and never writes the ini (the save-on-exit moment is T-013).
+proc ::pis::gui::result_cfg {} {
+    variable S
+    set cfg [::pis::gui::workflow_cfg]
+    set items [list]
+    if {[dict exists $S items result]} {
+        set items [dict get $S items result]
+    }
+    set sel -1
+    if {[dict exists $S sel result]} {
+        set sel [dict get $S sel result]
+    }
+    if {$sel < 0 || $sel >= [llength $items]} {
+        set stamp 0
+    } else {
+        set stamp [expr {$sel + 1}]
+    }
+    set sec [dict create count [llength $items] selected $stamp]
+    set i 1
+    foreach item $items {
+        dict set sec "item$i" $item
+        incr i
+    }
+    dict set cfg result $sec
+    return $cfg
+}
+
+# Load result for the active window or for every window of the layout. Same shape as
+# run_legend: build the cfg in memory, busy on, run, ALWAYS busy off, never save the ini.
+proc ::pis::gui::run_result {scope} {
+    set cfg [::pis::gui::result_cfg]
+    set root [dict get $cfg root]
+    ::pis::gui::set_busy 1
+    set code [catch {::pis::result::run $root $cfg $scope} res]
+    ::pis::gui::set_busy 0
+    if {$code} {
+        ::pis::gui::log_line ERROR "module [::pis::result::title]: $res"
+        ::pis::gui::set_status "Error: $res" red
+        return 0
+    }
+    if {$res == 0} {
+        # nothing selected: ::pis::result::run already logged the WARN.
+        ::pis::gui::set_status "Idle"
+        return 0
+    }
+    if {$scope eq "layout"} {
+        set msg "Load result: $res window(s) show the selection."
+    } else {
+        set msg "Load result: the active window shows the selection."
+    }
+    ::pis::gui::set_status $msg darkgreen
+    return $res
 }
 
 # --- Load Legend wiring (task T-007, partial: seam unverified) --------------
@@ -961,7 +1025,7 @@ proc ::pis::gui::build {} {
     dict set S log $log
     dict set S status $status
     ::pis::gui::lock $run
-    ::pis::gui::log_line INFO "BUILD $::pis::BUILD | Workflow GUI started (block 0 + Load Legend wired; tasks T-006, T-007; module lists = real radio/check buttons)"
+    ::pis::gui::log_line INFO "BUILD $::pis::BUILD | Workflow GUI started (block 0 + Load result + Load Legend wired; tasks T-006, T-007, T-008; module lists = real radio/check buttons)"
     ::pis::gui::set_status "Idle"
     ::pis::gui::fill_block0 [::pis::gui::fields_from_cfg [::pis::gui::workflow_cfg]]
     ::pis::gui::seed_modules
