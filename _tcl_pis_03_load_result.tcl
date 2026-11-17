@@ -13,7 +13,7 @@
 #          -> <client> Draw on the CLIENT OF THAT WINDOW (PROVEN pattern 2 of HV_API_REF.md)
 #   read : poIResultCtrl GetSubcaseList (S32) / GetDataTypeList (S30) / GetCurrentSubcase (S40) /
 #          GetNumberOfSubcases (S27), poIContourCtrl GetDataType (S29) / GetDimensionEnabled (S36) /
-#          GetDataComponent (S38)
+#          GetDataComponent (S38), poIPost GetDisplayOptions contour (S57, T-029)
 # "no error" proves NOTHING here: S28 says SetDataType ALWAYS answers success (the contour just
 # stays gray), and S35/S39 are silent no-ops on a build that ignores them. The step is judged by
 # the READ-BACKS only, and a window that accepted every command without changing is an ERROR.
@@ -38,6 +38,15 @@
 #   2  enable-first, state true   order UNVERIFIED-GUESS (the T-026 order), form DOC
 #   3  type-first,   state 1      both UNVERIFIED-GUESS (the doc prints true/false)
 #   4  enable-first, state 1      both UNVERIFIED-GUESS
+#   5  type-first,   state true   + ONE documented display line before Draw (T-029):
+#                                 `pisC SetDisplayOptions contour true` (poIPost S56), read back with
+#                                 `pisC GetDisplayOptions contour` (S57). Every part of V5 is DOC:
+#                                 the name `contour` and the state `true` are printed on S56.
+# T-029 STOP RULE: after 3 failed passes whose fix relied on UNVERIFIED-GUESS variants, no further
+# variant may be added before the owner returns evidence (a log, a state diff or a recorded macro).
+# T-008 is at that point, so V5 is the LAST variant until `src/02_working/t008_diff.txt` arrives; the
+# one exception is a form the supplier prints, which is exactly what V5 is.
+
 # The plan only enables the dimensions that do NOT already read true (S36), so an enabled
 # dimension is never touched; the doc prints no way to ask "does this model contain solids", so the
 # verdict requires AT LEAST ONE dimension true and prints the other two (a model without solids
@@ -60,6 +69,10 @@
 #   ::pis::result::match {labels name}              -> the file's own spelling of <name>, "" if absent
 #   ::pis::result::script {index tail {select}}     -> one hwi script: chain + tail + close
 #   ::pis::result::probe_script {index}             -> read-only chain answering the state probe
+#   ::pis::result::dump_calls {}                    -> every documented READ-ONLY getter, one call each
+#   ::pis::result::dump_script {index}              -> read-only chain filling ::pis::result::dumped
+#   ::pis::result::dump_dict {index}                -> {name value} pairs (T-029 STATE DUMP)
+#   ::pis::result::dump_window {cfg index}          -> ONE "STATE DUMP window k" log block
 #   ::pis::result::read_state {index}               -> dict of the read-backs, raises if none
 #   ::pis::result::verdict {st label}               -> {1 ""} when the window shows it, else {0 why}
 #   ::pis::result::build_script {index plan variant} -> one hwi script: the variant's own order
@@ -85,6 +98,8 @@ namespace eval ::pis::result {
     if {![info exists variant]} { set variant 0 }
     if {![info exists answer]} { set answer "" }
     if {![info exists failed]} { set failed 0 }
+    # T-029: the STATE DUMP answer (list of {name value} pairs), filled by dump_dict.
+    if {![info exists dumped]} { set dumped {} }
 }
 
 # The module title exactly as the GUI shows it: it goes into the journal comment and the
@@ -188,7 +203,9 @@ set pisRN ""
 catch {set pisRN [pisR GetNumberOfSubcases]}
 set pisRComp ""
 catch {set pisRComp [pisCt GetDataComponent shell]}
-set ::pis::result::answer [list $pisRIdx $pisRDt $pisRDims $pisRCur $pisRN $pisRComp $pisRSubs $pisRLabels]}
+set pisRDisp ""
+catch {set pisRDisp [pisC GetDisplayOptions contour]}
+set ::pis::result::answer [list $pisRIdx $pisRDt $pisRDims $pisRCur $pisRN $pisRComp $pisRSubs $pisRLabels $pisRDisp]}
     return [::pis::result::script $index $tail 0]
 }
 
@@ -207,10 +224,10 @@ proc ::pis::result::read_state {index} {
     if {[llength $got] < 8} {
         error "the result read-back answered nothing ('$got')"
     }
-    lassign $got win dtype dims cur n comp subs labels
+    lassign $got win dtype dims cur n comp subs labels disp
     set readback $dtype
     return [dict create win $win type $dtype dims $dims subcase $cur nsub $n \
-        component $comp subs $subs labels $labels]
+        component $comp subs $subs labels $labels display $disp]
 }
 
 # The file's own spelling of the typed name, or "" when the file does not hold it. An exact
@@ -418,7 +435,11 @@ proc ::pis::result::head_cut {text {n 70}} {
 #   - GetDataType (S29) must answer the label the file spells;
 #   - at least one dimension must read enabled (S36) WHEN this build answers S36 at all - a build
 #     that does not answer it is a NOTE in the log, not a pass and not a failure;
-#   - a current subcase (S40) must exist when GetNumberOfSubcases (S27) says the file has one.
+#   - a current subcase (S40) must exist when GetNumberOfSubcases (S27) says the file has one;
+#   - the window's CONTOUR DISPLAY OPTION (poIPost GetDisplayOptions contour, S57, T-029) must not
+#     answer a value that is not true WHEN THE BUILD ANSWERS IT AT ALL - a window whose display
+#     option is off shows nothing whatever GetDataType says, and a build that does not answer S57
+#     stays a NOTE (an empty value), never a pass and never a failure.
 proc ::pis::result::verdict {st label} {
     set why [list]
     set got [string trim [dict get $st type]]
@@ -445,6 +466,11 @@ proc ::pis::result::verdict {st label} {
             lappend why "GetCurrentSubcase (S40) answered '$cur' while the file holds $n subcase(s)"
         }
     }
+    set disp ""
+    if {[dict exists $st display]} { set disp [string trim [dict get $st display]] }
+    if {$disp ne "" && ![::pis::result::is_true $disp]} {
+        lappend why "the contour display option of this window is off (poIPost GetDisplayOptions contour, S57) answered '$disp'"
+    }
     if {[llength $why] == 0} {
         return [list 1 ""]
     }
@@ -455,7 +481,7 @@ proc ::pis::result::verdict {st label} {
 # S35's `state` are the ONLY two things the supplier does not pin down, so each combination is one
 # variant and the READ-BACK - never the order of this list - decides. Documented forms come first.
 proc ::pis::result::variants {} {
-    return [list 1 2 3 4]
+    return [list 1 2 3 4 5]
 }
 
 # One variant, in one dict:
@@ -463,27 +489,46 @@ proc ::pis::result::variants {} {
 #   order_src  DOC when the supplier prints the order, otherwise UNVERIFIED-GUESS + the reason
 #   state      the literal sent as S35's `state` argument ("true" or "1")
 #   state_src  DOC when the supplier's own words print that form, otherwise UNVERIFIED-GUESS
+#   display    1 when the variant also sends the documented display line (poIPost SetDisplayOptions
+#              contour true, S56), 0 otherwise
+#   display_src the src class of that line (DOC only; there is no guessed display line)
 # The order is UNKNOWN in every variant: S35 and S28 are two pages of the same class and neither
 # says which one must come first. Because a type change may reset state, "type-first" is preferred
 # and is variant 1; the T-026 order follows as variant 2. The literal `true`/`false` is what S35
 # prints ("True if enabled, false if not") and the supplier's own examples use (`SetIfMultipleLayer
 # true`), so a variant that sends `true` is DOC and the `1`/`0` form is UNVERIFIED-GUESS.
+# Variant 5 (T-029) is the only variant whose DISPLAY line is documented: S56 prints both the name
+# (`contour` is one of the listed display options) and the state ("true for on, or false for off"),
+# and S57 is its documented read-back. It reuses V1's order, so a pass of V5 also tells the owner
+# that order V1 works.
 proc ::pis::result::variant_info {v} {
     set doc_state {DOC S35 "True if enabled, false if not"}
     set guess_state {UNVERIFIED-GUESS the doc prints true/false, not 1/0}
     set doc_order {DOC the doc prints no order}
     set guess_order {UNVERIFIED-GUESS the doc prints no order; a type change may reset state}
+    set doc_display {DOC S56 "contour" + "true for on, or false for off"}
+    set info ""
     switch -- $v {
-        1 { return [dict create order type_first order_src $guess_order \
+        1 { set info [dict create order type_first order_src $guess_order \
                         state true state_src $doc_state] }
-        2 { return [dict create order enable_first order_src $guess_order \
+        2 { set info [dict create order enable_first order_src $guess_order \
                         state true state_src $doc_state] }
-        3 { return [dict create order type_first order_src $guess_order \
+        3 { set info [dict create order type_first order_src $guess_order \
                         state 1 state_src $guess_state] }
-        4 { return [dict create order enable_first order_src $guess_order \
+        4 { set info [dict create order enable_first order_src $guess_order \
                         state 1 state_src $guess_state] }
+        5 { set info [dict create order type_first order_src $guess_order \
+                        state true state_src $doc_state \
+                        display 1 display_src $doc_display] }
+        default {
+            error "::pis::result::variant_info: unknown variant '$v' (expected one of: [::pis::result::variants])"
+        }
     }
-    error "::pis::result::variant_info: unknown variant '$v' (expected one of: [::pis::result::variants])"
+    if {![dict exists $info display]} {
+        dict set info display 0
+        dict set info display_src {none - this variant sends no display line}
+    }
+    return $info
 }
 
 # "type-first, true" / "enable-first, 1": the short name a report line and the log use.
@@ -495,7 +540,11 @@ proc ::pis::result::variant_name {v} {
     } else {
         set ord "enable-first"
     }
-    return "$ord, [dict get $info state]"
+    set name "$ord, [dict get $info state]"
+    if {[dict get $info display]} {
+        set name "$name, contour display on"
+    }
+    return $name
 }
 
 # The {class method} pairs a variant sends. Before a variant runs, every pair is asked against the
@@ -503,7 +552,11 @@ proc ::pis::result::variant_name {v} {
 # sent again - not in this window, not in window 2..N - and a variant that needs it is skipped
 # instead of being counted as a failed attempt (T-027 / SPEC.md A10).
 proc ::pis::result::variant_needs {v} {
-    return [list [list poIContourCtrl SetDataType] [list poIContourCtrl SetDimensionEnabled]]
+    set out [list [list poIContourCtrl SetDataType] [list poIContourCtrl SetDimensionEnabled]]
+    if {[dict get [::pis::result::variant_info $v] display]} {
+        lappend out [list poIPost SetDisplayOptions]
+    }
+    return $out
 }
 
 # The apply script of one window: the chain of <index> + the state-changing lines of <variant> in
@@ -529,6 +582,11 @@ proc ::pis::result::build_script {index plan variant} {
     set sub [dict get $plan sub]
     if {$sub ne ""} {
         lappend lines "pisR SetCurrentSubcase $sub"
+    }
+    # T-029: the ONE documented display line (poIPost SetDisplayOptions, S56). Only V5 sends it; when
+    # the build says it does not have the method, the ABSENT-METHOD rule skips the whole variant.
+    if {[dict get $info display]} {
+        lappend lines "pisC SetDisplayOptions contour true"
     }
     lappend lines "pisC Draw"
     return [::pis::result::script $index [join $lines "\n"] 1]
@@ -556,8 +614,10 @@ proc ::pis::result::plan {st label} {
 #   4. on a pass: the failed variants before it are logged as INFO (a fallthrough stays visible),
 #      ONLY the passing script is journaled, and the answer is {window type};
 #   5. on no pass at all: every variant leaves ONE ERROR line in the log - its short name, the step
-#      it reached, the build's own text in full and every value read back - and the raised text (the
-#      status bar) keeps the first 70 characters of the FIRST of those lines + " (see log)".
+#      it reached, the build's own text in full and every value read back - the raised text (the
+#      status bar) keeps the first 70 characters of the FIRST of those lines + " (see log)", and
+#      window 1 additionally leaves ONE "STATE DUMP window 1" block (T-029) with every documented
+#      read-only getter of its contour control.
 proc ::pis::result::apply_to_window {cfg index name} {
     variable calls
     variable last_window
@@ -676,7 +736,99 @@ proc ::pis::result::apply_to_window {cfg index name} {
     foreach line $fails {
         ::pis::common::log $cfg ERROR $line
     }
+    # T-029 item 2: a window that accepted every command and still shows nothing now leaves the
+    # read-only getter dump behind it, so a normal GUI failure always carries evidence. Window 1 only
+    # per run (cheap) and never a setter: ::pis::result::dump_window reads.
+    if {$win == 1} {
+        set dt ""
+        if {[catch {::pis::result::dump_window $cfg $win} dt]} {
+            # A dump that cannot run must SAY so: a silent failure here is exactly the defect class
+            # T-029 is fixing.
+            catch {::pis::common::log $cfg WARN [format "STATE DUMP window %s failed: %s" \
+                $win [string trim $dt]]}
+        }
+    }
     error [::pis::result::head_cut $first]
+}
+
+# --- the STATE DUMP (T-029 item 2): evidence on every normal failure ---------------------------
+# The documented READ-ONLY getters of poIContourCtrl plus the result controller's subcase reads and
+# the window's own display option. One call per entry, each in its own catch; the answer is a list of
+# {name value} pairs where a raising getter answers "ERR <the build's own text>", never an empty
+# string. Getters only: there is no setter here, so running the dump can never change the session.
+# Left out on purpose (the doc prints no value space, or the argument is not a Tcl value):
+# GetEnabled (`pool`), GetMultipleLayerList (`hwStringList&`), GetValueList (needs a selection set),
+# GetValidResultsSystemsList (needs a data type + a component), GetLegendHandle (creates a handle).
+# docs/refs/HV_API.md section 12 has one row per method and the reason of each exclusion.
+proc ::pis::result::dump_calls {} {
+    set out [list]
+    foreach name {GetAverageColor GetAverageMode GetAverageModeList GetColoredByLayer
+                  GetCornerDataEnabled GetCurrentPlotStyle GetDataType GetDiscreteColor
+                  GetFeatureAngleAverage GetFeatureAngleAverageEnableState GetIgnoredFlippedNormal
+                  GetInterpolateColor GetLayer GetMultiplier GetResultSystem GetShellLayer
+                  GetShowMidsideNodeResults GetThresholdMaxEnableState GetValueFilterEnableState
+                  IsMultipleLayer} {
+        lappend out [list pisCt $name]
+    }
+    foreach d [::pis::result::dims] {
+        lappend out [list pisCt GetDimensionEnabled $d]
+    }
+    foreach d {node line shell solid} {
+        lappend out [list pisCt GetDataComponent $d]
+    }
+    lappend out [list pisR GetNumberOfSubcases Base]
+    lappend out [list pisR GetCurrentSubcase]
+    lappend out [list pisR GetSubcaseList Base]
+    lappend out [list pisC GetDisplayOptions contour]
+    return $out
+}
+
+# The read-only script of the dump: the same handle chain as the probe, then one caught getter per
+# call, then the close. Every line is ONE complete command (the adapter folds them into one journal
+# line), and the answer lands in ::pis::result::dumped because the close must stay the last command.
+proc ::pis::result::dump_script {index} {
+    set lines [list "pisR GetContourCtrlHandle pisCt"]
+    foreach call [::pis::result::dump_calls] {
+        set name [join [lrange $call 1 end] " "]
+        lappend lines [format {set pisDV ""; if {[catch {%s} pisDV]} { set pisDV "ERR $pisDV" }; lappend ::pis::result::dumped [list {%s} $pisDV]} \
+            $call $name]
+    }
+    set tail "set ::pis::result::dumped {}\n[join $lines "\n"]"
+    return [::pis::result::script $index $tail 0]
+}
+
+# The dump as {name value} pairs. Raises (with the build's own text) only when the chain itself
+# cannot be walked: then there is no window to dump and the caller prints that instead.
+proc ::pis::result::dump_dict {index} {
+    variable dumped
+    set dumped {}
+    if {[catch {::pis::hw::probe [::pis::result::dump_script $index]} why]} {
+        error [string trim $why]
+    }
+    return $dumped
+}
+
+# ONE log block for one window: a header, one "name = value" line per documented getter, the line
+# that says the simulation is NOT dumped, and an end line with the counts. Read-only; INFO level so a
+# wall of getters is not mistaken for a wall of errors.
+proc ::pis::result::dump_window {cfg index} {
+    ::pis::result::need_common
+    ::pis::result::need_hw
+    set pairs [list]
+    if {[catch {set pairs [::pis::result::dump_dict $index]} why]} {
+        set pairs [list [list probe "ERR [string trim $why]"]]
+    }
+    ::pis::common::log $cfg INFO [format "STATE DUMP window %s" $index]
+    set errors 0
+    foreach pair $pairs {
+        set value [lindex $pair 1]
+        if {[string first "ERR " $value] == 0} { incr errors }
+        ::pis::common::log $cfg INFO [format "  %s = %s" [lindex $pair 0] $value]
+    }
+    ::pis::common::log $cfg INFO "  simulation = NOT DUMPED (no documented no-argument getter; see docs/refs/HV_API.md section 12)"
+    ::pis::common::log $cfg INFO [format "STATE DUMP end window %s (%d getter(s), %d error(s))" \
+        $index [llength $pairs] $errors]
+    return $pairs
 }
 
 # The module entry point (SPEC.md A10). scope "layout" = every window Load All created, anything

@@ -211,8 +211,11 @@ namespace eval ::pis::hw {
 # adapter never derives it). The BUILD line and the GUI start line carry the FULL stamp; a DIAG
 # line carries the facts only (id/api/model/result), because the stamp plus 8 windows of 1/0
 # lists would not fit in the 80 characters a diag line is allowed.
+# T-029 (2026-11-16): the stamp names the whole src/01_scripts COPY the owner runs, not only this
+# file - T-029 changed _tcl_pis_03_load_result.tcl (V5 display option, STATE DUMP), and a report
+# whose stamp is still T8b cannot be told apart from the T-027 run. So it is bumped for that too.
 namespace eval ::pis {
-    variable BUILD "T8b-20261112-1638"
+    variable BUILD "T8c-20261116-1200"
 }
 
 # --- script builders: the hwi handle API is spelled once, here ------------------------
@@ -1935,7 +1938,7 @@ proc ::pis::hw::reset_state {} {
 
 # --- build stamp: ONE line, printed when this file is sourced -------------------------
 # The line answers the first question on a HyperView machine ("which copy is this?"):
-#   BUILD T8b-20261112-1638 | make_grid variants=1 | adapter lines=NNN | layouts=20
+#   BUILD T8c-20261116-1200 | make_grid variants=1 | adapter lines=NNN | layouts=20
 # The line count is measured from the file itself at source time (below), so it cannot go
 # stale the way a hand-written number would. "layouts=" is the size of the STATIC table, so a
 # copy without it shows up before the first Load All.
