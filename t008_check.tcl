@@ -1,57 +1,69 @@
 # src/spike/t008_check.tcl
-# T-008 / T-026 check as ONE FILE (owner, 2026-11-11: "I only use files, I do not run commands").
-#
-# Why this file exists: the owner's check 2 passed (a wrong result name is refused) but check 3
-# failed - the log said "applied" while the window's contour never changed. So the module now
-# proves the change by READING THE WINDOW BACK (data type, the three contour dimensions of
-# docs/refs/HV_API.md S36, the current subcase S40), and this file prints exactly those values
-# BEFORE and AFTER the module ran, per window. Nothing here trusts the log.
+# T-008 check, ONE FILE, reworked by T-029 after the owner's `T-008: fail 4` (a correct result name
+# still shows no contour) and after this file's own INPUT DEFECT (it died with `VERDICT: FAIL no
+# result name` on a machine where the app already knew the name, so it produced NO evidence).
 #
 # How to use it in HyperView - nothing to type:
 #   0. Copy the WHOLE src/01_scripts folder into the HyperView script path, then File > New.
 #   1. Load All as usual (the GUI button), so the windows hold the model and their result files.
-#      Without a loaded result there is nothing to display and the VERDICT says so instead of
-#      blaming the module.
 #   2. Source this file (File > Run Script, or drop it on the Tcl console).
-#   3. It writes ONE report file: src/02_working/t008_check.txt - send that back.
-#      The file holds the BUILD line, the CHECK lines, one BEFORE line and one AFTER line per
-#      window, the STEP line (what the module answered), the VARIANT line, the JOURNAL count and
-#      ONE VERDICT line. Read BUILD first: it must name the copy you just copied in.
+#   3. It writes ONE report file: src/02_working/t008_check.txt - send that back, ALL of it.
+#
+# INPUT RULES (T-029 item 0 - a check must never die on an input the app already knows):
+#   result name : t8_name at the top -> else the GUI's own [result] selection in the ini (read with
+#                 ::pis::common, the reader the GUI uses) -> else the FIRST type window 1 offers.
+#                 ONE line says which source won: "CHECK input: result name '<n>' from <source>".
+#   model file, result files, layout id : the ini first, a variable at the top only as an override,
+#                 one CHECK line per value taken.
+#   no model in window 1 -> "CHECK input: no model loaded in window 1: run Load All first", then the
+#                 read-only state of every window, then the file stops.
+#   nothing anywhere -> "VERDICT: FAIL input: ..." AFTER the types window 1 offers (first 20) and the
+#                 read-only state dump, so the report is never empty of evidence.
+#   The BUILD line is printed exactly ONCE (the adapter prints its own when it is sourced; that line
+#   is kept and this file does not print a second one).
 #
 # What it does, in this order (it never edits a file):
 #   BUILD   - which copy of the app this session runs
-#   CHECK   - the result name used and where it came from, plus the window count and the result
-#             file of each window, so the AFTER lines can be read without guessing
-#   BEFORE  - per window, what the window answers NOW: type=... enabled=line/shell/solid=...
-#             subcase=... component=... (? = that build did not answer that query)
+#   CHECK   - every input value and where it came from, the window count, each window's result file
+#   BEFORE  - per window, what the window answers NOW: type, the three dimensions, subcase, component
 #   STEP    - ::pis::result::run <scope>: the count it answered, or the ERROR text it raised
+#             (a failing window leaves one "variant v/n ..." line EACH plus ONE "STATE DUMP window 1"
+#             block in the report - the module writes them, this file only sinks the log into it)
 #   AFTER   - the same read-back as BEFORE, taken after the module ran
-#   CELL    - ONLY when MATRIX = 1 (top of this file): one line per diagnostic cell, on window 1
-#   MATRIX  - ONLY when MATRIX = 1: the best cell, and the state restored afterwards
-#   GETTER  - read-only getters of the contour control, so a diagnosis can see the pool state
-#   VARIANT - which apply variant was the one that passed (1 = type-first/true, 2 = enable-first/true,
-#             3 = type-first/1, 4 = enable-first/1; see docs/refs/HV_API.md section 11)
-#   VERDICT - PASS, or FAIL with one reason per window. It is judged from the AFTER read-back
-#             with the module's own verdict rule, never from the log line.
+#   CELL    - ONLY when MATRIX = 1: one line per diagnostic cell, window 1 only, each with the FULL
+#             read-only getter dump on the same line (name=value;...)
+#   MATRIX  - ONLY when MATRIX = 1: the best cell and the state restored afterwards
+#   VARIANT - which apply variant passed (1 type-first/true, 2 enable-first/true, 3 type-first/1,
+#             4 enable-first/1, 5 type-first/true + SetDisplayOptions contour true; HV_API.md s.11-12)
+#   VERDICT - PASS, or FAIL with one reason per window, judged from the AFTER read-back with the
+#             module's own verdict rule, never from a log line.
 # Tcl 8.5 only: no tcllib, no try/finally, no package require. Every HyperView call goes through
 # ::pis::hw - the same procs the GUI uses, so the journal looks the same.
 
 # --- the values to edit by hand -------------------------------------------------------
-# The result type to apply. Empty = whatever the GUI's radio list selected, read from
-# 00_config/pis_workflow_config.ini ([result] selected + item1..itemN), which is what the GUI
-# itself would use. Set it only to check a DIFFERENT type than the GUI last used.
-if {![info exists t8_name]} { set t8_name "" }
+# EVERY setting below is a GLOBAL (::t8_*) on purpose: the owner may source this file from a
+# proc in their own wrapper, and a bare `set` there would create a local the rest of the file
+# cannot see (T-029: that trap is what made the input-rules test run on defaults).
+# The result type to apply. Empty = the GUI's [result] selection, else the first type window 1
+# offers. Set it only to check a DIFFERENT type than the GUI last used.
+if {![info exists ::t8_name]} { set ::t8_name "" }
+# Model file and layout id: empty = take them from the ini ([session] model_file, [layout] id).
+# Set them only to check a value the ini does not hold.
+if {![info exists ::t8_model]} { set ::t8_model "" }
+if {![info exists ::t8_layout]} { set ::t8_layout "" }
 # Scope of the run: "layout" = every window Load All filled (the GUI's button), "active" = the
 # active window only. The BEFORE/AFTER lines always cover every window, so the difference is
 # visible either way.
-if {![info exists t8_scope]} { set t8_scope "layout" }
+if {![info exists ::t8_scope]} { set ::t8_scope "layout" }
 # Where the report goes. Empty = src/02_working next to this file (a test points it elsewhere).
-if {![info exists t8_report_dir]} { set t8_report_dir "" }
-# T-027 DIAGNOSTIC MATRIX: 0 = off, 1 = run the six cells below on WINDOW 1 ONLY, after Load All.
-# It changes ONLY the result data type and the dimension enable state of window 1, and RESTORES both
-# at the end (the last lines of the block print what was restored). Use it when step 1 of the owner
-# check still fails: "MATRIX BEST: cell n" says which order and which boolean literal work.
-if {![info exists t8_matrix]} { set t8_matrix 0 }
+if {![info exists ::t8_report_dir]} { set ::t8_report_dir "" }
+# T-029 DIAGNOSTIC MATRIX: 0 = off, 1 = run the nine cells below on WINDOW 1 ONLY, after Load All.
+# It changes ONLY the result data type, the dimension enable state and the contour display option of
+# window 1, and RESTORES type + dimensions at the end (the last lines print what was restored).
+# Which cells can change state: cells 1-9 all set the type and the dimensions of window 1; cell 9
+# also selects window 1 (SetActiveWindow). No other window is touched.
+if {![info exists ::t8_matrix]} { set ::t8_matrix 0 }
+
 
 
 # ======================================================================================
@@ -64,6 +76,9 @@ namespace eval ::t8 {
     variable got ""
     variable cells {}
     variable ok {}
+    # T-029: set as soon as a BUILD line reached the report (the adapter prints its own; the file
+    # must not print a second one).
+    variable saw_build 0
 }
 
 # One line: the console AND the report file. The report write uses 'chan puts' on the channel,
@@ -71,6 +86,7 @@ namespace eval ::t8 {
 proc ::t8::emit {text} {
     variable real
     variable fd
+    if {[string match "BUILD *" [string trim $text]]} { set ::t8::saw_build 1 }
     if {$real ne "" && [llength [info commands $real]]} {
         $real $text
     } else {
@@ -80,6 +96,24 @@ proc ::t8::emit {text} {
         catch {chan puts $fd $text}
     }
     return
+}
+
+# Did a BUILD line already reach the report? The adapter prints one when it is sourced, so the file
+# asks this instead of printing a second line (T-029 item 0d).
+proc ::t8::report_has_build {} {
+    variable saw_build
+    if {[info exists saw_build] && $saw_build} { return 1 }
+    return 0
+}
+
+# The data type labels a window answers (S30), first <n> of them, for the one line that must always
+# be in the report when no name could be resolved.
+proc ::t8::types_text {st {n 20}} {
+    set labels [list]
+    if {$st ne ""} { catch {set labels [dict get $st labels]} }
+    if {[llength $labels] == 0} { return "(none)" }
+    if {[llength $labels] > $n} { set labels [lrange $labels 0 [expr {$n - 1}]] }
+    return [join $labels ", "]
 }
 
 proc ::t8::capture_on {} {
@@ -105,11 +139,23 @@ proc ::t8::capture_off {} {
 }
 
 # The module reports through ::pis::common::log, which without the GUI writes to STDERR. Give it a
-# sink, but never replace the GUI's own sink (same trick as src/spike/t006_check.tcl).
+# sink that ALWAYS reaches this report: a sink that is already there (the GUI's log panel, a test)
+# is renamed and called first, so the panel keeps filling and the report gets every line as well.
+# T-029: without the chaining, a GUI session's report held no STATE DUMP at all - the dump went to
+# the panel and the evidence file, the one thing the owner sends back, stayed silent.
 proc ::t8::log_sink {} {
-    if {[llength [info commands ::pis::gui::log_line]] > 0} { return 0 }
+    variable sink_done
+    if {[info exists sink_done]} { return 0 }
+    set sink_done 1
     namespace eval ::pis::gui {}
+    if {[llength [info commands ::pis::gui::log_line]] > 0} {
+        catch {rename ::t8::log_line_prev {}}
+        catch {rename ::pis::gui::log_line ::t8::log_line_prev}
+    }
     proc ::pis::gui::log_line {level msg} {
+        if {[llength [info commands ::t8::log_line_prev]] > 0} {
+            catch {::t8::log_line_prev $level $msg}
+        }
         ::t8::emit [format "%-5s %s" [string toupper [string trim $level]] $msg]
     }
     return 1
@@ -310,7 +356,9 @@ proc ::t8::run {root cfg name scope} {
         foreach {k st} $before {
             if {$k == 1 && $st ne ""} { set btype [dict get $st type] }
         }
-        catch {::t8::matrix $btype}
+        if {[catch {::t8::matrix $btype} merr]} {
+            ::t8::emit [format "MATRIX INCOMPLETE: %s" [string trim $merr]]
+        }
     }
     catch {::t8::getters}
     set v $::pis::result::variant
@@ -340,12 +388,19 @@ proc ::t8::run {root cfg name scope} {
     return [list $state $why]
 }
 
-# --- the T-027 diagnostic matrix (window 1 only, restores what it changes) -------------
+# --- the T-029 diagnostic matrix (window 1 only, restores what it changes) -------------
 # One CELL: reset every dimension to false with the documented call, put the data type back to the
 # type window 1 had BEFORE, send the cell's own order and literal, Draw on window 1's client, let Tk
-# paint when the cell asks for it, then read everything back. Never raises: the build's own error
-# text is printed in full on the CELL line.
-proc ::t8::matrix_cell {n order state draw before} {
+# paint when the cell asks for it, then read EVERYTHING back - the module's five values AND the full
+# read-only getter dump of item 3 on the same line (`name=value;...`). Never raises: the build's own
+# error text is printed in full on the CELL line.
+# mode ""      : the plain cell (T-027 behaviour)
+# mode "wait"  : after the apply script, after 300 + update + a Draw through the same chain (timing)
+# mode "twice" : Draw called TWICE before the read
+# mode "active": window 1 is made the ACTIVE window first (the chain already selects it) and the
+#                data type is then read through the ACTIVE client as well, so a pass/fail difference
+#                between the two paths exposes a wrong or stale contour control (handle identity).
+proc ::t8::matrix_cell {n order state draw before {mode ""}} {
     set lines [list "pisR GetContourCtrlHandle pisCt"]
     foreach d [::pis::result::dims] {
         lappend lines [format "catch {pisCt SetDimensionEnabled %s false}" $d]
@@ -366,27 +421,87 @@ proc ::t8::matrix_cell {n order state draw before} {
         foreach line $en { lappend lines $line }
     }
     lappend lines "catch {pisC Draw}"
+    if {$mode eq "twice"} {
+        lappend lines "catch {pisC Draw}"
+    }
+    # mode active: read the type through BOTH paths, so the two contour controls can be compared.
+    set ::t8::type_win ""
+    set ::t8::type_active ""
+    set ::t8::active_idx ""
+    if {$mode eq "active"} {
+        lappend lines "catch {set ::t8::type_win \[pisCt GetDataType\]}"
+        lappend lines "pisPage SetActiveWindow 1"
+        lappend lines "pisPage GetWindowHandle pisWinA \[pisPage GetActiveWindow\]"
+        lappend lines "catch {set ::t8::active_idx \[pisPage GetActiveWindow\]}"
+        lappend lines "pisWinA GetClientHandle pisCA"
+        lappend lines "catch {set ::t8::active_model \[pisCA GetActiveModel\]}"
+        lappend lines "if {!\[string is integer -strict \$::t8::active_model\] || \$::t8::active_model <= 0} { error \"the active window has no model id\" }"
+        lappend lines "pisCA GetModelHandle pisMA \$::t8::active_model"
+        lappend lines "pisMA GetResultCtrlHandle pisRA"
+        lappend lines "pisRA GetContourCtrlHandle pisCtA"
+        lappend lines "catch {set ::t8::type_active \[pisCtA GetDataType\]}"
+    }
     set err "none"
     set e ""
     if {[catch {::pis::hw::exec_hwi [::pis::result::script 1 [join $lines "\n"] 1] -nojournal} e]} {
         set err [string trim $e]
     }
     if {$draw} { catch {::pis::hw::refresh} }
+    if {$mode eq "wait"} {
+        catch {after 300}
+        catch {update}
+        catch {::pis::hw::exec_hwi [::pis::result::script 1 "catch {pisC Draw}" 1] -nojournal}
+        catch {after 300}
+        catch {update}
+    }
     set st ""
     set why ""
+    set dump [::t8::dump_text 1]
     if {[catch {set st [::pis::result::read_state 1]} why]} {
-        ::t8::emit [format "CELL %s order=%s bool=%s draw_before_read=%s -> no read-back: %s | err=%s" \
-            $n $order $state $draw [string trim $why] $err]
+        ::t8::emit [format "CELL %s order=%s bool=%s draw_before_read=%s mode=%s -> no read-back: %s | err=%s | dump=%s" \
+            $n $order $state $draw [::t8::mode_name $mode] [string trim $why] $err $dump]
         return [list 0 $st]
     }
-    ::t8::emit [format "CELL %s order=%s bool=%s draw_before_read=%s -> type=%s enabled=%s err=%s" \
-        $n $order $state $draw [dict get $st type] [::pis::result::enabled_text $st] $err]
+    if {$mode eq "active"} {
+        ::t8::emit [format "CELL %s order=%s bool=%s draw_before_read=%s mode=%s -> type=%s enabled=%s err=%s | identity active_window=%s type_win=%s type_active=%s same=%s | dump=%s" \
+            $n $order $state $draw [::t8::mode_name $mode] [dict get $st type] \
+            [::pis::result::enabled_text $st] $err $::t8::active_idx \
+            $::t8::type_win $::t8::type_active \
+            [expr {$::t8::type_win eq $::t8::type_active ? 1 : 0}] $dump]
+        return [list [::pis::result::verdict $st $::t8_label] $st]
+    }
+    ::t8::emit [format "CELL %s order=%s bool=%s draw_before_read=%s mode=%s -> type=%s enabled=%s err=%s | dump=%s" \
+        $n $order $state $draw [::t8::mode_name $mode] [dict get $st type] \
+        [::pis::result::enabled_text $st] $err $dump]
     return [list [::pis::result::verdict $st $::t8_label] $st]
 }
 
-# The six cells, in the order T-027 item 5 asks for, then `MATRIX BEST` and the restore.
+# The cell's mode as one short word for the CELL line.
+proc ::t8::mode_name {mode} {
+    if {$mode eq ""} { return plain }
+    return $mode
+}
+
+# The full read-only getter dump of window 1 as ONE compact line: name=value;name=value;...
+# A getter that raises answers "ERR <text>" inside its own field, so one bad method cannot hide the
+# others. Read-only by construction (::pis::result::dump_calls holds getters only).
+proc ::t8::dump_text {win} {
+    set pairs [list]
+    if {[catch {set pairs [::pis::result::dump_dict $win]} why]} {
+        return "ERR [string trim $why]"
+    }
+    set out [list]
+    foreach pair $pairs {
+        lappend out [format "%s=%s" [lindex $pair 0] [lindex $pair 1]]
+    }
+    return [join $out ";"]
+}
+# The nine cells, in the order T-029 item 5 asks for: 1-4 = order x literal, 5-6 = the two best
+# cells repeated WITHOUT waiting for Tk to paint, 7 = the best cell with after+update+Draw before the
+# read (timing), 8 = the best cell with Draw twice, 9 = the best cell read through the ACTIVE client
+# (handle identity). Then `MATRIX BEST` and the restore of the ORIGINAL type and dimension states.
 proc ::t8::matrix {before} {
-    ::t8::emit [format "MATRIX on: window 1 only, cells 1-6. This changes ONLY the result data type and the dimension enable state of window 1 and restores both at the end."]
+    ::t8::emit "MATRIX on: window 1 only, cells 1-9. This changes ONLY the result data type, the dimension enable state and the contour display option of window 1 and restores type + dimensions at the end."
     set ::t8::cells {}
     set ::t8::ok {}
     set plans {
@@ -425,6 +540,30 @@ proc ::t8::matrix {before} {
             incr k
         }
     }
+    # Cells 7-9: the best cell's order and literal, with the three extra readings item 5 asks for.
+    set best_cell ""
+    foreach c $::t8::cells {
+        if {[dict get $c ok]} { set best_cell $c ; break }
+    }
+    if {$best_cell eq "" && [llength $::t8::cells] > 0} { set best_cell [lindex $::t8::cells 0] }
+    set extra {wait twice active}
+    set k 7
+    foreach mode $extra {
+        set order "type_first"
+        set state "true"
+        if {$best_cell ne ""} {
+            set order [dict get $best_cell order]
+            set state [dict get $best_cell state]
+        }
+        lassign [::t8::matrix_cell $k $order $state 1 $before $mode] v st
+        lappend ::t8::cells [dict create n $k order $order state $state draw 1 \
+            mode $mode ok [lindex $v 0] st $st]
+        incr k
+    }
+    # Item 5c: the SetEnableState cell exists ONLY if the supplier documents it as a display switch.
+    # S53 says "Sets the auto load/unload contour data state", so there is no such cell - and this
+    # line says so instead of silently dropping it.
+    ::t8::emit "CELL 10 skipped: poIContourCtrl SetEnableState is documented as the auto load/unload contour data state (S53), not a display switch, so no cell sends it"
     set best "none"
     foreach c $::t8::cells {
         if {[dict get $c ok]} { set best "cell [dict get $c n]" ; break }
@@ -454,40 +593,125 @@ proc ::t8::matrix {before} {
     return
 }
 
-# Read-only probe: getters that the supplier's class page prints with NO arguments, so nothing here
-# can change the session. Setters and getters whose arguments have no printed value space
-# (GetEnabled needs a `pool`, GetDataComponent needs a dimension) are skipped on purpose.
-proc ::t8::probe_value {lines} {
-    set scr "[::pis::result::script 1 [join $lines "\n"] 0]\nset ::t8::got"
-    set ::t8::got ""
-    set e ""
-    if {[catch {::pis::hw::probe $scr} e]} {
-        return "error: [string trim $e]"
-    }
-    return [string trim $::t8::got]
+# The read-only getter dump, printed once as its own line (MATRIX = 0 keeps one line of evidence even
+# when no cell runs). Getters only - ::pis::result::dump_calls cannot send a setter.
+proc ::t8::getters {} {
+    ::t8::emit [format "GETTERS window 1 %s" [::t8::dump_text 1]]
+    return
 }
 
-proc ::t8::getters {} {
-    foreach name {GetLayer GetShellLayer GetShowMidsideNodeResults} {
-        set tail [list "pisR GetContourCtrlHandle pisCt"]
-        lappend tail [format "if {[catch {pisCt %s} ::t8::got]} { set ::t8::got \"error: \$::t8::got\" }" $name]
-        ::t8::emit [format "GETTER %s -> %s" $name [::t8::probe_value $tail]]
+# --- the run itself: every input resolved the way item 0 of T-029 asks -------------------------
+# Answers {PASS|FAIL <reason>}; it never raises for an input problem, because a report that ends
+# with "FAIL input" AND the read-only state is evidence, while a report that dies on a missing name
+# is not (that was the owner's `t008_check: input defect`, cause AGENT).
+proc ::t8::main {root ini scope} {
+    set cfg ""
+    catch {set cfg [::pis::common::load_config $root]}
+    if {$cfg eq ""} {
+        ::t8::emit [format "CHECK input: cannot read the app folder %s" $root]
+        return [list FAIL [format "cannot read the app folder %s" $root]]
     }
-    return
+    if {![file isfile $ini]} {
+        ::t8::emit [format "CHECK input: %s not found - every ini value falls back" [file tail $ini]]
+    }
+    # --- item 0b: the values the app already knows, one CHECK line per value taken -----------
+    if {[string trim $::t8_model] ne ""} {
+        ::t8::emit [format "CHECK input: model file '%s' from the top of this file" [string trim $::t8_model]]
+    } else {
+        set model ""
+        catch {set model [::pis::common::get $cfg session model_file ""]}
+        if {[string trim $model] eq ""} {
+            ::t8::emit "CHECK input: model file '-' (the ini names none; Load All decides)"
+        } else {
+            ::t8::emit [format "CHECK input: model file '%s' from %s \[session\] model_file" \
+                $model [file tail $ini]]
+        }
+    }
+    set files ""
+    catch {set files [::pis::common::get $cfg session result_files ""]}
+    set nfiles 0
+    foreach line [split $files "\n"] {
+        if {[string trim $line] ne ""} { incr nfiles }
+    }
+    ::t8::emit [format "CHECK input: %d result file(s) from %s \[session\] result_files" \
+        $nfiles [file tail $ini]]
+    if {[string trim $::t8_layout] ne ""} {
+        ::t8::emit [format "CHECK input: layout id '%s' from the top of this file" [string trim $::t8_layout]]
+    } else {
+        set layout ""
+        catch {set layout [::pis::common::get $cfg layout id ""]}
+        if {[string trim $layout] eq ""} {
+            ::t8::emit "CHECK input: layout id '-' (the ini names none)"
+        } else {
+            ::t8::emit [format "CHECK input: layout id '%s' from %s \[layout\] id" \
+                $layout [file tail $ini]]
+        }
+    }
+    # --- item 0c: is anything loaded at all? -------------------------------------------------
+    set ob [::pis::hw::observe_dict]
+    set api [dict get $ob api]
+    if {![string is integer -strict $api] || $api < 1} {
+        ::t8::emit [format "CHECK input: the page did not answer a window count (%s)" [dict get $ob line]]
+        return [list FAIL [format "the page did not answer a window count (%s)" [dict get $ob line]]]
+    }
+    set first ""
+    set ferr ""
+    if {[catch {set first [::pis::result::read_state 1]} ferr]} { set first "" }
+    if {$first eq ""} {
+        ::t8::emit "CHECK input: no model loaded in window 1: run Load All first"
+        ::t8::emit [format "CHECK there are %d window(s) on the page" $api]
+        ::t8::print_states BEFORE $cfg [::t8::read_all $api]
+        catch {::pis::result::dump_window $cfg 1}
+        return [list FAIL [format "no model loaded in window 1: run Load All first (%s)" \
+            [string trim $ferr]]]
+    }
+    # --- item 0a: the result name, in the order (1) file (2) ini (3) first type of window 1 ---
+    set name ""
+    if {[string trim $::t8_name] ne ""} {
+        set name [string trim $::t8_name]
+        ::t8::emit [format "CHECK input: result name '%s' from the top of this file (t8_name)" $name]
+    } else {
+        catch {set name [::pis::result::selected_item $cfg]}
+        if {$name ne ""} {
+            ::t8::emit [format "CHECK input: result name '%s' from %s \[result\] selected" \
+                $name [file tail $ini]]
+        }
+    }
+    if {$name eq ""} {
+        set name [lindex [dict get $first labels] 0]
+        if {$name ne ""} {
+            ::t8::emit [format "CHECK input: no name given, using the first type offered by window 1: '%s' (edit t8_name to test another)" $name]
+        } else {
+            ::t8::emit [format "CHECK input: window 1 offers no data type (first 20): %s" \
+                [::t8::types_text $first 20]]
+        }
+    }
+    if {$name eq ""} {
+        ::t8::emit [format "CHECK input: %d window(s) on the page, read-only state below" $api]
+        ::t8::print_states BEFORE $cfg [::t8::read_all $api]
+        catch {::pis::result::dump_window $cfg 1}
+        return [list FAIL "input: no result name anywhere - select one in the GUI (\[result\] item), edit t8_name at the top of this file, or load a result file into window 1 with Load All"]
+    }
+    # The module takes its item from the ini; a name taken from the top of this file, or from the
+    # first type window 1 offers, is handed to it as the only item - the T-027 behaviour, kept.
+    if {[string trim $::t8_name] ne "" || [::pis::result::selected_item $cfg] eq ""} {
+        dict set cfg result [dict create count 1 selected 1 item1 $name]
+    }
+    return [::t8::run $root $cfg $name $scope]
 }
 
 set t8_dir [file dirname [file normalize [info script]]]
 set t8_scripts [file normalize [file join $t8_dir .. 01_scripts]]
-# A test may preset t8_root (the app folder); otherwise the folder above src/ is used.
-if {![info exists t8_root]} {
-    set t8_root [file normalize [file join $t8_dir .. ..]]
+# A test may preset ::t8_root (the app folder); otherwise the folder above src/ is used.
+if {![info exists ::t8_root]} {
+    set ::t8_root [file normalize [file join $t8_dir .. ..]]
 }
-# A test may preset t8_ini / t8_report_dir; otherwise the app's own files are used.
-if {![info exists t8_ini]} {
-    set t8_ini [file join $t8_root 00_config pis_workflow_config.ini]
+# A test may preset ::t8_ini / ::t8_report_dir; otherwise the app's own files are used.
+if {![info exists ::t8_ini]} {
+    set ::t8_ini [file join $::t8_root 00_config pis_workflow_config.ini]
 }
-if {[string trim $t8_report_dir] ne ""} {
-    set t8_out $t8_report_dir
+if {[string trim $::t8_report_dir] ne ""} {
+    set t8_out $::t8_report_dir
 } else {
     set t8_out [file normalize [file join $t8_dir .. 02_working]]
 }
@@ -509,36 +733,14 @@ if {$t8_fd eq ""} {
         set t8_verdict [list FAIL "the app did not load (see STEP line)"]
     } else {
         ::t8::log_sink
-        ::t8::emit [::pis::hw::build_line]
-        set t8_cfg ""
-        catch {set t8_cfg [::pis::common::load_config $t8_root]}
-        if {$t8_cfg eq ""} {
-            set t8_verdict [list FAIL [format "cannot read the app folder %s" $t8_root]]
-            ::t8::emit [format "CHECK %s" [lindex $t8_verdict 1]]
-        } else {
-            # The result name: the file's own value, else the GUI's radio selection in the ini.
-            set t8_use [string trim $t8_name]
-            if {$t8_use ne ""} {
-                ::t8::emit [format "CHECK result name '%s' from the top of this file" $t8_use]
-                dict set t8_cfg result [dict create count 1 selected 1 item1 $t8_use]
-            } else {
-                set t8_use [::pis::result::selected_item $t8_cfg]
-                if {$t8_use ne ""} {
-                    ::t8::emit [format "CHECK result name '%s' from %s \[result\]" \
-                        $t8_use [file tail $t8_ini]]
-                }
-            }
-            if {$t8_use eq ""} {
-                set t8_verdict [list FAIL "no result name: select one in the GUI, or set t8_name at the top of this file"]
-                ::t8::emit [format "CHECK %s" [lindex $t8_verdict 1]]
-            } elseif {![file isfile $t8_ini]} {
-                ::t8::emit [format "CHECK %s not found - the window names stay '-'" [file tail $t8_ini]]
-            }
-            if {$t8_use ne ""} {
-                if {[catch {set t8_verdict [::t8::run $t8_root $t8_cfg $t8_use $t8_scope]} t8_err]} {
-                    set t8_verdict [list FAIL "unexpected: $t8_err"]
-                }
-            }
+        # T-029 item 0d: the adapter prints its own BUILD line when it is sourced, and that line
+        # is already in the report. Print one ONLY when nothing reached the report.
+        if {![::t8::report_has_build]} {
+            ::t8::emit [::pis::hw::build_line]
+        }
+        if {[catch {set t8_verdict [::t8::main $::t8_root $::t8_ini $::t8_scope]} t8_err]} {
+            ::t8::emit "STEP unexpected: $t8_err"
+            set t8_verdict [list FAIL "unexpected: $t8_err"]
         }
     }
     lassign $t8_verdict t8_state t8_reason
@@ -548,6 +750,8 @@ if {$t8_fd eq ""} {
     catch {close $t8_fd}
     ::t8::capture_off
     # A second run in the same session must read the file's values again, never a stale copy.
-    catch {unset -nocomplain t8_name t8_scope}
+    # These four are the hand-edited ones; ::t8_root / ::t8_ini / ::t8_report_dir stay as the
+    # caller set them (the owner's app folder is not something a run may forget).
+    catch {unset -nocomplain ::t8_name ::t8_model ::t8_layout ::t8_scope}
     puts "DONE"
 }
