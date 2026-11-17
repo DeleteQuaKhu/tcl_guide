@@ -214,8 +214,11 @@ namespace eval ::pis::hw {
 # T-029 (2026-11-16): the stamp names the whole src/01_scripts COPY the owner runs, not only this
 # file - T-029 changed _tcl_pis_03_load_result.tcl (V5 display option, STATE DUMP), and a report
 # whose stamp is still T8b cannot be told apart from the T-027 run. So it is bumped for that too.
+# T-030 (2026-11-17): bumped again - _tcl_pis_03_load_result.tcl gained the TRACE/NOCHANGE/LATE
+# evidence, the snap/diff API and variant V6, and _tcl_pis_99_workflow_gui.tcl now wraps the log
+# pane (-wrap char). Same rule: the stamp names the whole src/01_scripts copy.
 namespace eval ::pis {
-    variable BUILD "T8c-20261116-1200"
+    variable BUILD "T8d-20261117-0900"
 }
 
 # --- script builders: the hwi handle API is spelled once, here ------------------------
@@ -253,8 +256,8 @@ catch {@p@Win ReleaseHandle}}
 
 # The LAST step of a run that changed what a window DISPLAYS (T-026). Every window was already
 # drawn by its own script (`<client> Draw` on the client OF THAT WINDOW, PROVEN pattern 2 of
-# docs/refs/HV_API_REF.md, the same form the legend module uses), so this proc only lets Tk paint
-# the redraws it was handed: ONE `update idletasks`, never a substitute for a Draw and never a
+# docs/refs/HV_API.md section 11, the same form the legend module uses), so this proc only lets Tk
+# paint the redraws it was handed: ONE `update idletasks`, never a substitute for a Draw and never a
 # HyperView call. When Tk is absent (a batch run) the call is skipped instead of raising, because
 # a missing paint must never turn a proven step into a failure.
 proc ::pis::hw::refresh {} {
@@ -1938,7 +1941,7 @@ proc ::pis::hw::reset_state {} {
 
 # --- build stamp: ONE line, printed when this file is sourced -------------------------
 # The line answers the first question on a HyperView machine ("which copy is this?"):
-#   BUILD T8c-20261116-1200 | make_grid variants=1 | adapter lines=NNN | layouts=20
+#   BUILD T8d-20261117-0900 | make_grid variants=1 | adapter lines=NNN | layouts=20
 # The line count is measured from the file itself at source time (below), so it cannot go
 # stale the way a hand-written number would. "layouts=" is the size of the STATIC table, so a
 # copy without it shows up before the first Load All.

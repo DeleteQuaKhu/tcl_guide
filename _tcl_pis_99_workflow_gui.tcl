@@ -1014,7 +1014,12 @@ proc ::pis::gui::build {} {
     grid $lf -row 1 -column 0 -sticky nsew -pady {4 0}
     grid rowconfigure $lf 0 -weight 1
     grid columnconfigure $lf 0 -weight 1
-    set log [text $lf.text -wrap none -height 20 -state disabled -font TkFixedFont -background white]
+    # T-030: -wrap char. The log pane used -wrap none, so every line wider than the pane was CUT at
+    # the right edge and only reachable through the horizontal scrollbar - the owner read that as a
+    # truncated log. Nothing in the text changes here (a Save/log parser still sees the same single
+    # line); the pane simply shows all of it, wrapped where it does not fit. The horizontal scrollbar
+    # stays for the wide lines that a paste into another editor may need.
+    set log [text $lf.text -wrap char -height 20 -state disabled -font TkFixedFont -background white]
     set ysb [ttk::scrollbar $lf.yscroll -orient vertical -command [list $log yview]]
     set xsb [ttk::scrollbar $lf.xscroll -orient horizontal -command [list $log xview]]
     $log configure -yscrollcommand [list $ysb set] -xscrollcommand [list $xsb set]
