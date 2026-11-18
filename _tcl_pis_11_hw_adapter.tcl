@@ -238,7 +238,7 @@ namespace eval ::pis::hw {
 # only thing the variants apply to, every ReleaseHandle on session/project/page/window/client is
 # gone from the generated scripts, and `[capture] on_view_unavailable` can capture the current view.
 namespace eval ::pis {
-    variable BUILD "T33a-20261118-1930"
+    variable BUILD "T34a-20261118-2100"
 }
 
 # --- script builders: the hwi handle API is spelled once, here ------------------------
@@ -274,6 +274,30 @@ proc ::pis::hw::window_open {p win} {
 proc ::pis::hw::window_close {p} {
     # Nothing to release (see page_close): the handles die with the stack.
     return [::pis::hw::page_close $p]
+}
+
+# --- handle names: ONE scheme, because the build refuses a live duplicate (F15, T-034) -------
+# Owner fact F15 (2026-11-18, build T33a-20261118-1930): inside ONE open stack (`hwi OpenStack`
+# .. `hwi CloseStack`) creating a handle whose name is still alive raises, verbatim,
+# "<name>: object with this name already exists." - and Load All died on it, because the
+# window/page walks of T-033 reused ONE fixed name (`pisWin`, `pisPage`) for every iteration.
+# A name is freed by `ReleaseHandle` on that handle or by `CloseStack`; nothing else.
+# The PROVEN way round it, read off the owner's own scripts (see TASKLOG T-034 item 2):
+#   conrod/_tmp_hv/batchImportOdb.tcl:81-86 - the walk names every handle with the loop index
+#     (`page_$i`, `window_$::Import::numberOfWindows`, `client_$::Import::numberOfWindows`),
+#   conrod/_tmp_hv/training.tcl:179-184 - `pg${i}$t` per page AND a per-iteration ReleaseHandle,
+#   conrod/tcl_guide/hv_model_loader.tcl:2073-2132 - session/project/page once outside the loop,
+#     `mlWin`/`mlClient` per window freed at the end of EVERY iteration,
+#   conrod/_tmp_hv/hvTest.tcl:124-175 - handles created once and reused by the loop.
+# This project uses the FIRST of those (a per-iteration NAME), because it never depends on a
+# release being accepted by the build and keeps the journal line replayable as it was sent.
+# This proc is the only place that spelling lives: `hname pisWin` is the plain name for a handle
+# created once per stack, `hname pisWin 3` is `pisWin_3`. A builder that writes script TEXT
+# passes the variable REFERENCE, e.g. `[hname pisWin {$pisWi}]` -> "pisWin_$pisWi", which the
+# sent script then fills with the iteration number.
+proc ::pis::hw::hname {base {k ""}} {
+    if {[string trim $k] eq ""} { return $base }
+    return "${base}_$k"
 }
 
 # The LAST step of a run that changed what a window DISPLAYS (T-026). Every window was already
@@ -559,7 +583,10 @@ proc ::pis::hw::check_models_on_page {} {
     set s {set @p@NW [@p@Page GetNumberOfWindows]
 if {![string is integer -strict $@p@NW]} {set @p@NW [llength $@p@NW]}
 set @p@Sum 0
-for {set @p@Wi 1} {$@p@Wi <= $@p@NW} {incr @p@Wi} {catch {@p@Page GetWindowHandle @p@Win $@p@Wi}; catch {@p@Win GetClientHandle @p@C}; if {![catch {@p@C GetModelList} @p@Ml]} {incr @p@Sum [llength $@p@Ml]}}}
+for {set @p@Wi 1} {$@p@Wi <= $@p@NW} {incr @p@Wi} {catch {@p@Page GetWindowHandle @W@ $@p@Wi}; catch {@W@ GetClientHandle @C@}; if {![catch {@C@ GetModelList} @p@Ml]} {incr @p@Sum [llength $@p@Ml]}}}
+    # F15 (T-034): the walk's handles carry the iteration number (::pis::hw::hname).
+    set s [string map [list @W@ [::pis::hw::hname @p@Win {$@p@Wi}] \
+                            @C@ [::pis::hw::hname @p@C {$@p@Wi}]] $s]
     return "[::pis::hw::stack_open psi]\n[string map [list @p@ psi] $s]\n[::pis::hw::page_close psi]\nset psiSum"
 }
 
@@ -764,9 +791,9 @@ if {![string is integer -strict $@p@A]} {set @p@A [llength $@p@A]}
 set @p@H 0
 set @p@Ct 0
 for {set @p@I 1} {$@p@I <= $@p@A} {incr @p@I} {
-    if {![catch {@p@Page GetWindowHandle @p@Win $@p@I}]} {
+    if {![catch {@p@Page GetWindowHandle @W@ $@p@I}]} {
         incr @p@H
-        if {![catch {@p@Win GetClientHandle @p@C}]} {incr @p@Ct}
+        if {![catch {@W@ GetClientHandle @C@}]} {incr @p@Ct}
     }
 }
 set @p@L -
@@ -775,6 +802,10 @@ if {![catch {set @p@L [@p@Page GetLayout]}]} {
     if {$@p@L eq ""} {set @p@L -}
 }
 set @p@Out [list $@p@A $@p@H $@p@Ct $@p@L]}
+    # F15 (T-034): per-iteration handle names - one fixed name per iteration raised
+    # "pisWin: object with this name already exists." on the owner's build.
+    set s [string map [list @W@ [::pis::hw::hname @p@Win {$@p@I}] \
+                            @C@ [::pis::hw::hname @p@C {$@p@I}]] $s]
     return "[::pis::hw::stack_open psi]\n[string map [list @p@ psi] $s]\n[::pis::hw::page_close psi]\nset psiOut"
 }
 
@@ -838,17 +869,17 @@ set @p@H 0
 set @p@Ct 0
 set @p@Bad 0
 for {set @p@I 1} {$@p@I <= $@p@A} {incr @p@I} {
-    if {[catch {@p@Page GetWindowHandle @p@Win $@p@I}]} {
+    if {[catch {@p@Page GetWindowHandle @W@ $@p@I}]} {
         if {!$@p@Bad} { set @p@Bad $@p@I }
         continue
     }
     incr @p@H
-    if {[catch {@p@Win GetClientHandle @p@C}]} {
+    if {[catch {@W@ GetClientHandle @C@}]} {
         if {!$@p@Bad} { set @p@Bad $@p@I }
         continue
     }
     incr @p@Ct
-    if {[catch {@p@C GetModelList}]} {
+    if {[catch {@C@ GetModelList}]} {
         error "make_grid: window $@p@I is not a HyperView window (client type plot)"
     }
 }
@@ -859,6 +890,9 @@ if {$@p@A != @p@Want || $@p@H != $@p@A || $@p@Ct != $@p@A} {
     error "grid: api=$@p@A handles=$@p@H clients=$@p@Ct wanted=@p@Want"
 }
 set @p@Got @p@Want}
+    # F15 (T-034): EVERY window of the read-back has its OWN handle name.
+    set s [string map [list @W@ [::pis::hw::hname @p@Win {$@p@I}] \
+                            @C@ [::pis::hw::hname @p@C {$@p@I}]] $s]
     set s [string map [list @p@Want $count] $s]
     return "[::pis::hw::stack_open psi]\n[string map [list @p@ psi] $s]\n[::pis::hw::page_close psi]\nset psiGot"
 }
@@ -878,17 +912,17 @@ set @p@H 0
 set @p@Ct 0
 set @p@Bad 0
 for {set @p@I 1} {$@p@I <= $@p@A} {incr @p@I} {
-    if {[catch {@p@Page GetWindowHandle @p@Win $@p@I}]} {
+    if {[catch {@p@Page GetWindowHandle @W@ $@p@I}]} {
         if {!$@p@Bad} { set @p@Bad $@p@I }
         continue
     }
     incr @p@H
-    if {[catch {@p@Win GetClientHandle @p@C}]} {
+    if {[catch {@W@ GetClientHandle @C@}]} {
         if {!$@p@Bad} { set @p@Bad $@p@I }
         continue
     }
     incr @p@Ct
-    if {[catch {@p@C GetModelList}]} {
+    if {[catch {@C@ GetModelList}]} {
         error "make_grid: window $@p@I is not a HyperView window (client type plot)"
     }
 }
@@ -902,6 +936,9 @@ if {$@p@H != $@p@A || $@p@Ct != $@p@A} {
     error "grid: api=$@p@A handles=$@p@H clients=$@p@Ct wanted=@p@Want"
 }
 set @p@Got "$@p@L:$@p@A"}
+    # F15 (T-034): per-iteration handle names (see ::pis::hw::hname).
+    set s [string map [list @W@ [::pis::hw::hname @p@Win {$@p@I}] \
+                            @C@ [::pis::hw::hname @p@C {$@p@I}]] $s]
     set s [string map [list @p@Id $id @p@Want $count @p@ psi] $s]
     return "[::pis::hw::stack_open psi]\n[string map [list @p@ psi] $s]\n[::pis::hw::page_close psi]\nset psiGot"
 }
@@ -952,9 +989,12 @@ if {![string is integer -strict $@p@Mid] || $@p@Mid <= 0} {
 @p@C GetModelHandle @p@M $@p@Mid
 for {set @p@T 1} {$@p@T <= $@p@K} {incr @p@T} {
     set @p@Why ""
-    if {![catch {@p@M GetResultCtrlHandle @p@R} @p@Why]} {
+    # F15 (T-034): the result handle carries the attempt number (::pis::hw::hname). A second
+    # attempt under the same name is what the owner's build refuses: "psiR: object with this
+    # name already exists." - the retry would then never see a result.
+    if {![catch {@p@M GetResultCtrlHandle @R@} @p@Why]} {
         set @p@Sub 0
-        if {[catch {set @p@Sub [@p@R GetNumberOfSubcases]} @p@Why]} {set @p@Sub 0}
+        if {[catch {set @p@Sub [@R@ GetNumberOfSubcases]} @p@Why]} {set @p@Sub 0}
         if {[string is integer -strict $@p@Sub] && $@p@Sub > 0} {
             set @p@Ok 1
             break
@@ -970,6 +1010,7 @@ if {!$@p@Ok} {
     error "window @win@: no result after $@p@K read-back attempt(s): [string trim $@p@Why]"
 }
 set @p@Ok}
+    set s [string map [list @R@ [::pis::hw::hname @p@R {$@p@T}]] $s]
     set s [string map [list @p@ psi @win@ $win] $s]
     return "[::pis::hw::window_open psi $win]\n$s\n[::pis::hw::window_close psi]\nset psiOk"
 }
@@ -1003,14 +1044,17 @@ if {![string is integer -strict $@p@N]} {set @p@N [llength $@p@N]}
 set @p@Out {}
 for {set @p@I 1} {$@p@I <= $@p@N} {incr @p@I} {
     set @p@T ?
-    if {![catch {@p@Page GetWindowHandle @p@Win $@p@I}]} {
-        if {![catch {@p@Win GetClientHandle @p@C}]} {
-            if {![catch {@p@C GetModelList}]} {set @p@T H} else {set @p@T P}
+    if {![catch {@p@Page GetWindowHandle @W@ $@p@I}]} {
+        if {![catch {@W@ GetClientHandle @C@}]} {
+            if {![catch {@C@ GetModelList}]} {set @p@T H} else {set @p@T P}
         }
     }
     lappend @p@Out $@p@T
 }
 set @p@Out}
+    # F15 (T-034): per-iteration handle names (see ::pis::hw::hname).
+    set s [string map [list @W@ [::pis::hw::hname @p@Win {$@p@I}] \
+                            @C@ [::pis::hw::hname @p@C {$@p@I}]] $s]
     return "[::pis::hw::stack_open psi]\n[string map [list @p@ psi] $s]\n[::pis::hw::page_close psi]\nset psiOut"
 }
 
@@ -1047,13 +1091,15 @@ set @p@W [@p@Page GetNumberOfWindows]
 if {![string is integer -strict $@p@W]} {set @p@W [llength $@p@W]}
 set @p@Open {}
 for {set @p@I 1} {$@p@I <= $@p@W} {incr @p@I} {
-    if {![catch {@p@Page GetWindowHandle @p@Win $@p@I}]} {
+    if {![catch {@p@Page GetWindowHandle @W@ $@p@I}]} {
         lappend @p@Open $@p@I
     }
 }
 set @p@Op [join $@p@Open ,]
 if {$@p@Op eq ""} {set @p@Op -}
 set @p@Out "page=$@p@PgI pages=$@p@Pages layout='$@p@Lay' wins=$@p@W open=$@p@Op"}
+    # F15 (T-034): per-iteration handle names (see ::pis::hw::hname).
+    set s [string map [list @W@ [::pis::hw::hname @p@Win {$@p@I}]] $s]
     return "[::pis::hw::stack_open psi]\n[string map [list @p@ psi] $s]\n[::pis::hw::page_close psi]\nset psiOut"
 }
 
@@ -1077,9 +1123,12 @@ proc ::pis::hw::page_info {} {
 # ::pis::hw::fill. Every call is caught on purpose: the walk must not be the judge, the read-back
 # (::pis::hw::check_grid) is.
 proc ::pis::hw::grid_walk {} {
-    return {
-for {set pisWi 1} {$pisWi <= %count} {incr pisWi} {catch {pisPage GetWindowHandle pisWin $pisWi}; catch {pisWin GetClientHandle pisC}}
+    set s {
+for {set pisWi 1} {$pisWi <= %count} {incr pisWi} {catch {pisPage GetWindowHandle @W@ $pisWi}; catch {@W@ GetClientHandle @C@}}
 }
+    # F15 (T-034): handle names carry the loop index (batchImportOdb.tcl:81-86).
+    return [string map [list @W@ [::pis::hw::hname pisWin {$pisWi}] \
+                           @C@ [::pis::hw::hname pisC {$pisWi}]] $s]
 }
 
 
@@ -1198,7 +1247,22 @@ pisC Draw}
 set pisCapRet}
     # The call fragment is spliced in AFTER the fill: it already holds real values, and a path
     # that happens to contain "%width" must never be rewritten by a second pass.
-    set script [::pis::hw::fill [join [list $head [join $mid "\n"] $tail] "\n"] $values]
+    set filled [::pis::hw::fill [join [list $head [join $mid "\n"] $tail] "\n"] $values]
+    # F15 (T-034): ONE stack, ONE creation per name. The view fragment and the draw fragment both
+    # open `pisWin` (and `pisC` for the client receiver), which the owner's build refuses:
+    # "pisWin: object with this name already exists." An IDENTICAL line is therefore emitted ONCE,
+    # at the position it was first written - the replay keeps working and no handle is created
+    # twice. The comparison is made AFTER the fill, because a caller may hand in an already
+    # filled view fragment (::pis::hw::capture_image does) and `pisWin 1` must equal `pisWin %index`.
+    set lines [list]
+    set seen [dict create]
+    foreach line [split $filled "\n"] {
+        set l [string trim $line]
+        if {$l eq "" || [dict exists $seen $l]} { continue }
+        dict set seen $l 1
+        lappend lines $l
+    }
+    set script [join $lines "\n"]
     return [string map [list "@@CAPCALL@@" "set pisCapRet \[$callcmd\]"] $script]
 }
 
@@ -1343,18 +1407,28 @@ proc ::pis::hw::table {} {
     # active page is this adapter's extension and the read-back is what judges it.
     set reset_remove {
 set pisNW [pisPage GetNumberOfWindows]
-for {set pisWi 1} {$pisWi <= $pisNW} {incr pisWi} {pisPage GetWindowHandle pisWin $pisWi; pisWin GetClientHandle pisC; pisC RemoveAllModels}
+for {set pisWi 1} {$pisWi <= $pisNW} {incr pisWi} {pisPage GetWindowHandle @W@ $pisWi; @W@ GetClientHandle @C@; @C@ RemoveAllModels}
 }
     # reset_page / reset_all: the fallback walk. The walk is sourced
     # (conrod/_tmp_hv/batchImportOdb.tcl:79-88); the DeleteModel verb is NOT.
     set reset_page {
 set pisNW [pisPage GetNumberOfWindows]
-for {set pisWi 1} {$pisWi <= $pisNW} {incr pisWi} {pisPage GetWindowHandle pisWin $pisWi; pisWin GetClientHandle pisC; foreach pisMi [pisC GetModelList] {if {[string is integer -strict $pisMi] && $pisMi > 0} {pisC DeleteModel $pisMi}}}
+for {set pisWi 1} {$pisWi <= $pisNW} {incr pisWi} {pisPage GetWindowHandle @W@ $pisWi; @W@ GetClientHandle @C@; foreach pisMi [@C@ GetModelList] {if {[string is integer -strict $pisMi] && $pisMi > 0} {@C@ DeleteModel $pisMi}}}
 }
     set reset_all {
 set pisNP [pisP GetNumberOfPages]
-for {set pisPi 1} {$pisPi <= $pisNP} {incr pisPi} {pisP GetPageHandle pisPage $pisPi; set pisNW [pisPage GetNumberOfWindows]; for {set pisWi 1} {$pisWi <= $pisNW} {incr pisWi} {pisPage GetWindowHandle pisWin $pisWi; pisWin GetClientHandle pisC; foreach pisMi [pisC GetModelList] {if {[string is integer -strict $pisMi] && $pisMi > 0} {pisC DeleteModel $pisMi}}}}
+for {set pisPi 1} {$pisPi <= $pisNP} {incr pisPi} {pisP GetPageHandle @P@ $pisPi; set pisNW [@P@ GetNumberOfWindows]; for {set pisWi 1} {$pisWi <= $pisNW} {incr pisWi} {@P@ GetWindowHandle @W@ $pisWi; @W@ GetClientHandle @C@; foreach pisMi [@C@ GetModelList] {if {[string is integer -strict $pisMi] && $pisMi > 0} {@C@ DeleteModel $pisMi}}}}
 }
+    # F15 (T-034): ONE handle name per iteration, the proven walk's way
+    # (batchImportOdb.tcl:81-86 names every handle with the loop index). Reusing `pisWin` for
+    # window 2 is what the owner's build refused: "pisWin: object with this name already exists."
+    foreach body {reset_remove reset_page} {
+        set $body [string map [list @W@ [::pis::hw::hname pisWin {$pisWi}] \
+                                    @C@ [::pis::hw::hname pisC {$pisWi}]] [set $body]]
+    }
+    set reset_all [string map [list @P@ [::pis::hw::hname pisPage {$pisPi}] \
+                                    @W@ [::pis::hw::hname pisWin {$pisWi}] \
+                                    @C@ [::pis::hw::hname pisC {$pisWi}]] $reset_all]
     # The result step (T-019) is built by ::pis::hw::result_cmd, which ::pis::hw::load_result_in_window
     # re-builds per window so the OPTIONAL wait chosen by ::pis::hw::wait_decide is in it. The table
     # entry below therefore carries NO wait: the documented read-back alone has to pass.
