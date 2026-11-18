@@ -209,6 +209,15 @@ namespace eval ::pis::hw {
     # impatient owner) may set these to 1 / 0 on the console; they are always re-validated.
     if {![info exists retry_tries]} { set retry_tries 4 }
     if {![info exists retry_delay]} { set retry_delay 250 }
+    # T-033: the VIEW receiver this session accepted (one name of ::pis::hw::view_table, "" = none
+    # yet). Cached on purpose: the owner's log names the handle kind once, and windows 2..N start
+    # with it instead of walking the whole list again (F14 b: a failing step was retried 5 times).
+    if {![info exists adapt_view]} { set adapt_view "" }
+    # T-033 item 7: the CAPTURE variant this run accepted (0 = none yet). Windows 2..N start with
+    # it instead of re-trying a call this build already refused.
+    if {![info exists adapt_capture]} { set adapt_capture 0 }
+    # Has this RUN already said "no getter for the active view or the camera"? One line per run.
+    if {![info exists view_note]} { set view_note 0 }
 }
 
 # The build stamp: short code + yyyymmdd-hhmm, written BY HAND when this file changes (the
@@ -224,8 +233,12 @@ namespace eval ::pis::hw {
 # T-032 (2026-11-18): bumped for the Capture fix after the owner's `T-011: fail 1` - the adapter's
 # capture op is now a four-step image (select/view/draw/call) with a per-step trace, the variant
 # order is PROVEN-first, and _tcl_pis_06_capture.tcl names files `{result}_{view}.png`.
+# T-033 (2026-11-18): bumped for `T-011: fail 2` - the view step is its OWN step with its own
+# receiver list (the documented poI3DViewCtrl first, ::pis::hw::set_view), the capture call is the
+# only thing the variants apply to, every ReleaseHandle on session/project/page/window/client is
+# gone from the generated scripts, and `[capture] on_view_unavailable` can capture the current view.
 namespace eval ::pis {
-    variable BUILD "T32a-20261118-1530"
+    variable BUILD "T33a-20261118-1930"
 }
 
 # --- script builders: the hwi handle API is spelled once, here ------------------------
@@ -243,10 +256,13 @@ set @p@PgI [@p@P GetActivePage]
 }
 
 proc ::pis::hw::page_close {p} {
-    set s {catch {@p@Page ReleaseHandle}
-catch {@p@P ReleaseHandle}
-catch {@p@S ReleaseHandle}
-hwi CloseStack}
+    # T-033 / F14 c: NO ReleaseHandle here. PROVEN rule (docs/refs/HV_API_REF.md Misc, T-020 item
+    # 2): ReleaseHandle is never called on session, project, page, window, view, post, model or
+    # result handles - only on measure / iterator / query / node set / legend handles. The owner's
+    # `fail 2` (F14 c) found `catch {pisPage ReleaseHandle}` in every capture script; `CloseStack`
+    # is what the owner's own scripts use (S02/S03/S06/S07 all end with it), so that is the only
+    # closing command left.
+    set s {hwi CloseStack}
     return [string map [list @p@ $p] $s]
 }
 proc ::pis::hw::window_open {p win} {
@@ -256,9 +272,8 @@ proc ::pis::hw::window_open {p win} {
 }
 
 proc ::pis::hw::window_close {p} {
-    set s {catch {@p@C ReleaseHandle}
-catch {@p@Win ReleaseHandle}}
-    return "[string map [list @p@ $p] $s]\n[::pis::hw::page_close $p]"
+    # Nothing to release (see page_close): the handles die with the stack.
+    return [::pis::hw::page_close $p]
 }
 
 # The LAST step of a run that changed what a window DISPLAYS (T-026). Every window was already
@@ -416,7 +431,6 @@ if {![catch {@p@S GetClientManagerHandle @p@Mgr animation}]} {
     if {![catch {set @p@A [@p@Mgr GetAsyncMode]}]} {
         if {[string is boolean -strict $@p@A]} {set @p@A [expr {$@p@A ? 1 : 0}]} else {set @p@A -}
     }
-    catch {@p@Mgr ReleaseHandle}
 }
 set @p@A}
     return "[::pis::hw::stack_open psi]\n[string map [list @p@ psi] $s]\n[::pis::hw::page_close psi]\nset psiA"
@@ -505,6 +519,19 @@ proc ::pis::hw::begin_run {} {
     return
 }
 
+# Called once by each Capture run (T-033): the VIEW receiver is re-discovered and the one-per-run
+# view notes are re-armed, so a second run logs the accepted receiver again instead of silently
+# reusing a name from a build state nobody saw.
+proc ::pis::hw::begin_capture {} {
+    variable adapt_view
+    variable adapt_capture
+    variable view_note
+    set adapt_view ""
+    set adapt_capture 0
+    set view_note 0
+    return
+}
+
 # The session's post-SetResult condition of the window that just ran (T-019 pass 12). A NOTE, not
 # a verdict: F7 says this build writes "(poIPost::GetResultList)" there while the result really is
 # attached, so only ::pis::hw::check_result_attached may fail a step. Written by result_cmd,
@@ -532,7 +559,7 @@ proc ::pis::hw::check_models_on_page {} {
     set s {set @p@NW [@p@Page GetNumberOfWindows]
 if {![string is integer -strict $@p@NW]} {set @p@NW [llength $@p@NW]}
 set @p@Sum 0
-for {set @p@Wi 1} {$@p@Wi <= $@p@NW} {incr @p@Wi} {catch {@p@Page GetWindowHandle @p@Win $@p@Wi}; catch {@p@Win GetClientHandle @p@C}; if {![catch {@p@C GetModelList} @p@Ml]} {incr @p@Sum [llength $@p@Ml]}; catch {@p@C ReleaseHandle}; catch {@p@Win ReleaseHandle}}}
+for {set @p@Wi 1} {$@p@Wi <= $@p@NW} {incr @p@Wi} {catch {@p@Page GetWindowHandle @p@Win $@p@Wi}; catch {@p@Win GetClientHandle @p@C}; if {![catch {@p@C GetModelList} @p@Ml]} {incr @p@Sum [llength $@p@Ml]}}}
     return "[::pis::hw::stack_open psi]\n[string map [list @p@ psi] $s]\n[::pis::hw::page_close psi]\nset psiSum"
 }
 
@@ -740,8 +767,6 @@ for {set @p@I 1} {$@p@I <= $@p@A} {incr @p@I} {
     if {![catch {@p@Page GetWindowHandle @p@Win $@p@I}]} {
         incr @p@H
         if {![catch {@p@Win GetClientHandle @p@C}]} {incr @p@Ct}
-        catch {@p@C ReleaseHandle}
-        catch {@p@Win ReleaseHandle}
     }
 }
 set @p@L -
@@ -820,17 +845,12 @@ for {set @p@I 1} {$@p@I <= $@p@A} {incr @p@I} {
     incr @p@H
     if {[catch {@p@Win GetClientHandle @p@C}]} {
         if {!$@p@Bad} { set @p@Bad $@p@I }
-        catch {@p@Win ReleaseHandle}
         continue
     }
     incr @p@Ct
     if {[catch {@p@C GetModelList}]} {
-        catch {@p@C ReleaseHandle}
-        catch {@p@Win ReleaseHandle}
         error "make_grid: window $@p@I is not a HyperView window (client type plot)"
     }
-    catch {@p@C ReleaseHandle}
-    catch {@p@Win ReleaseHandle}
 }
 if {$@p@A != @p@Want || $@p@H != $@p@A || $@p@Ct != $@p@A} {
     if {$@p@Bad} {
@@ -865,17 +885,12 @@ for {set @p@I 1} {$@p@I <= $@p@A} {incr @p@I} {
     incr @p@H
     if {[catch {@p@Win GetClientHandle @p@C}]} {
         if {!$@p@Bad} { set @p@Bad $@p@I }
-        catch {@p@Win ReleaseHandle}
         continue
     }
     incr @p@Ct
     if {[catch {@p@C GetModelList}]} {
-        catch {@p@C ReleaseHandle}
-        catch {@p@Win ReleaseHandle}
         error "make_grid: window $@p@I is not a HyperView window (client type plot)"
     }
-    catch {@p@C ReleaseHandle}
-    catch {@p@Win ReleaseHandle}
 }
 if {$@p@L ne "@p@Id" || $@p@A != @p@Want} {
     error "layout: GetLayout=$@p@L windows=$@p@A wanted id=@p@Id with @p@Want window(s)"
@@ -940,7 +955,6 @@ for {set @p@T 1} {$@p@T <= $@p@K} {incr @p@T} {
     if {![catch {@p@M GetResultCtrlHandle @p@R} @p@Why]} {
         set @p@Sub 0
         if {[catch {set @p@Sub [@p@R GetNumberOfSubcases]} @p@Why]} {set @p@Sub 0}
-        catch {@p@R ReleaseHandle}
         if {[string is integer -strict $@p@Sub] && $@p@Sub > 0} {
             set @p@Ok 1
             break
@@ -952,7 +966,6 @@ for {set @p@T 1} {$@p@T <= $@p@K} {incr @p@T} {
         catch {update}
     }
 }
-catch {@p@M ReleaseHandle}
 if {!$@p@Ok} {
     error "window @win@: no result after $@p@K read-back attempt(s): [string trim $@p@Why]"
 }
@@ -971,10 +984,8 @@ if {$@p@N == 1} {
     set @p@Mid [@p@C GetActiveModel]
     @p@C GetModelHandle @p@M $@p@Mid
     if {![catch {@p@M GetResultCtrlHandle @p@R}]} {
-        catch {@p@R ReleaseHandle}
         set @p@Ctrl 1
     }
-    catch {@p@M ReleaseHandle}
 }
 set @p@Ready "$@p@N:$@p@Ctrl"}
     return "[::pis::hw::window_open psi $win]\n[string map [list @p@ psi] $s]\n[::pis::hw::window_close psi]\nset psiReady"
@@ -995,9 +1006,7 @@ for {set @p@I 1} {$@p@I <= $@p@N} {incr @p@I} {
     if {![catch {@p@Page GetWindowHandle @p@Win $@p@I}]} {
         if {![catch {@p@Win GetClientHandle @p@C}]} {
             if {![catch {@p@C GetModelList}]} {set @p@T H} else {set @p@T P}
-            catch {@p@C ReleaseHandle}
         }
-        catch {@p@Win ReleaseHandle}
     }
     lappend @p@Out $@p@T
 }
@@ -1040,7 +1049,6 @@ set @p@Open {}
 for {set @p@I 1} {$@p@I <= $@p@W} {incr @p@I} {
     if {![catch {@p@Page GetWindowHandle @p@Win $@p@I}]} {
         lappend @p@Open $@p@I
-        catch {@p@Win ReleaseHandle}
     }
 }
 set @p@Op [join $@p@Open ,]
@@ -1070,7 +1078,7 @@ proc ::pis::hw::page_info {} {
 # (::pis::hw::check_grid) is.
 proc ::pis::hw::grid_walk {} {
     return {
-for {set pisWi 1} {$pisWi <= %count} {incr pisWi} {catch {pisPage GetWindowHandle pisWin $pisWi}; catch {pisWin GetClientHandle pisC}; catch {pisC ReleaseHandle}; catch {pisWin ReleaseHandle}}
+for {set pisWi 1} {$pisWi <= %count} {incr pisWi} {catch {pisPage GetWindowHandle pisWin $pisWi}; catch {pisWin GetClientHandle pisC}}
 }
 }
 
@@ -1112,36 +1120,38 @@ set ::pis::hw::wait_error ""
 catch {
 @wait@
 } ::pis::hw::wait_error
-catch {pisS GetError}
-catch {pisM ReleaseHandle}}
+catch {pisS GetError}}
     set body [string map [list @idx@ $idx @path@ $path @wait@ $wait] $s]
     return "[::pis::hw::window_open pis $idx]\n$body\n[::pis::hw::window_close pis]"
 }
 
-# --- ONE capture is a SEQUENCE of steps (T-032, owner fail F13 on T-011) -----------------
-# The owner's report split one image into four steps and asked to see each of them in the log:
+# --- ONE capture is a SEQUENCE of steps (T-032; the view split out in T-033) -------------
+# The owner's report split one image into steps and asked to see each of them in the log:
 # select the window, activate the VIEW the ticked row names, let the window redraw, and only
-# then grab the image. A step is ONE complete `hwi` script while the trace is on, and the SAME
-# step texts joined into ONE stack are what lands in the journal - so the journal holds exactly
-# one replayable line per image whether the trace is on or off (the split is a log concern).
+# then grab the image. T-033 (owner `T-011: fail 2`, F14) separates them for good:
+#   * the CAPTURE CALL is the only thing a variant list applies to;
+#   * the VIEW step has its OWN receiver list (::pis::hw::view_table) and is executed ONCE per
+#     image, before the draw, so a failing view can never be retried five times (F14 b);
+#   * a failing view stops the image ONCE, with `capture call not attempted` in the message.
+# Every step is ONE complete `hwi` script sent on its own (so its own STEP line and its own raw
+# answer exist); the journal keeps ONE replayable line per image, built from the SAME step texts.
 #
-# Sources, PROVEN first (docs/refs/HV_OWNER_capture_hits.txt holds the mined scripts):
+# Sources (docs/refs/HV_OWNER_capture_hits.txt holds the mined scripts; HV_API.md sec.6 the docs):
 #   select : conrod/tcl_guide/hv_model_loader.tcl:2101-2102 (`mlPage SetActiveWindow $w`,
 #            best effort in the owner's own loader) + conrod/_tmp_hv/ppt2.tcl:185
-#   view   : owner report F13c - HIS working call is `SetActiveView true "View 1"`. The CLASS is
-#            NOT documented: the 2024 method indexes of hwIPage / hwIWindow / hwISession /
-#            hwIViewControl (fetched 2026-11-18, HV_API.md S93-S96) list no SetActiveView, and
-#            no script on this machine calls it. The PAGE handle is the assumption, written down
-#            in HV_API.md section 6 and in the log (UNVERIFIED-GUESS for the class only).
+#   view   : poI3DViewCtrl SetActiveView (HV_API.md S99, 2024 AND 2026 help: syntax
+#            `poI3DViewCtrl_handle SetActiveView active name`, example `view_handle SetActiveView
+#            true "View 1"` on the handle `<window> GetViewControlHandle` hands out). The owner's
+#            literal `SetActiveView true "View 1"` is kept verbatim; his `fail 2` proved the PAGE
+#            is not the receiver (hwIPage has no such method).
 #   draw   : docs/refs/HV_API_REF.md section 4 patterns 5/6 (S06:241-252 / 255-262: `Draw` and
 #            then `CaptureScreenToSize`) + conrod/tcl_guide/hv_model_loader.tcl:2120-2121
-#
-# The four step texts. The `call` step is the capture fragment of the variant that is running,
-# so the same skeleton serves every variant of the table.
 proc ::pis::hw::capture_frag {step} {
     switch -- $step {
         select { return {pisPage SetActiveWindow %index} }
-        view   { return {pisPage SetActiveView true %view} }
+        view   { return {pisPage GetWindowHandle pisWin %index
+pisWin GetViewControlHandle pisV
+pisV SetActiveView true %view} }
         draw   { return {pisC Draw} }
     }
     error "::pis::hw::capture_frag: unknown capture step '$step' (expected select, view or draw)"
@@ -1158,14 +1168,20 @@ proc ::pis::hw::capture_step_script {step values {callcmd ""}} {
     if {$step eq "draw"} {
         return "[::pis::hw::fill [::pis::hw::window_open pis %index] $values]\n[::pis::hw::capture_frag draw]\n[::pis::hw::window_close pis]"
     }
-    set body [::pis::hw::capture_frag $step]
-    return [::pis::hw::fill "[::pis::hw::stack_open pis]\n$body\n[::pis::hw::page_close pis]" $values]
+    if {$step eq "view"} {
+        # The view step of the FIRST receiver (the documented one). ::pis::hw::set_view sends the
+        # receiver that is really used; this text is only what a plain `view` step looks like.
+        return [::pis::hw::fill "[::pis::hw::stack_open pis]\n[::pis::hw::capture_frag view]\n[::pis::hw::page_close pis]" $values]
+    }
+    return [::pis::hw::fill "[::pis::hw::stack_open pis]\n[::pis::hw::capture_frag $step]\n[::pis::hw::page_close pis]" $values]
 }
 
 # The WHOLE image as ONE replayable script: the steps in order inside a single stack, exactly
 # what the journal keeps. `layout` 0 leaves the page's active window alone (the [Capture] button
 # already captures the active window); 1 makes window %index active first ([Apply all layout]).
-proc ::pis::hw::capture_full_script {layout values callcmd} {
+# `viewfrag` is the view step of the receiver that was ACCEPTED ("" = the view step was skipped
+# by `[capture] on_view_unavailable = capture_current`), so the replay asks the same handle kind.
+proc ::pis::hw::capture_full_script {layout values callcmd {viewfrag ""}} {
     set head {hwi OpenStack
 hwi GetSessionHandle pisS
 pisS GetProjectHandle pisP
@@ -1173,17 +1189,12 @@ set pisPgI [pisP GetActivePage]
 pisP GetPageHandle pisPage $pisPgI}
     set mid [list]
     if {$layout} { lappend mid [::pis::hw::capture_frag select] }
-    lappend mid [::pis::hw::capture_frag view]
+    if {[string trim $viewfrag] ne ""} { lappend mid $viewfrag }
     lappend mid {pisPage GetWindowHandle pisWin %index
 pisWin GetClientHandle pisC
 pisC Draw}
     lappend mid "@@CAPCALL@@"
-    set tail {catch {pisC ReleaseHandle}
-catch {pisWin ReleaseHandle}
-catch {pisPage ReleaseHandle}
-catch {pisP ReleaseHandle}
-catch {pisS ReleaseHandle}
-hwi CloseStack
+    set tail {hwi CloseStack
 set pisCapRet}
     # The call fragment is spliced in AFTER the fill: it already holds real values, and a path
     # that happens to contain "%width" must never be rewritten by a second pass.
@@ -1191,29 +1202,107 @@ set pisCapRet}
     return [string map [list "@@CAPCALL@@" "set pisCapRet \[$callcmd\]"] $script]
 }
 
-# The read-back of the ACTIVE VIEW. No fetched page names one (2024: hwIPage / hwIWindow /
-# hwISession / hwIViewControl, see HV_API.md S93-S96; also no page in conrod/ or test/ calls
-# GetActiveView), so the getter is EMPTY and nothing is sent: inventing a method would only
-# produce a build error on the owner's machine. A future documented getter is one line here,
-# and ::pis::hw::set_view already compares its answer with the requested name.
+# --- the VIEW step and its receivers (T-033, HV_API.md S99-S104) -------------------------
+# The receiver list, in the order T-033 item 3 fixes. The DOCUMENTED receiver comes first: the
+# 3D view control handle of window k, because `poI3DViewCtrl SetActiveView active name` is
+# documented (2024 and 2026) with exactly the owner's literal, and the supplier's own example
+# gets that handle with `<window> GetViewControlHandle view_handle`. The other three are
+# UNVERIFIED-GUESS receivers: the owner's literal tried on a documented handle kind, only until
+# the first one answers without an error, each one's `type` being the build's own name.
+# Fields: n, rec (short name), type (handle type the build names), open (the getter lines),
+# handle (the variable the call is sent to), src.
+proc ::pis::hw::view_table {} {
+    return [list \
+        [dict create n 1 rec viewctrl type poI3DViewCtrl handle pisV \
+            open {pisPage GetWindowHandle pisWin %index
+pisWin GetViewControlHandle pisV} \
+            src {docs S99 poI3DViewCtrl SetActiveView (2024+2026 help; the supplier's own example is `view_handle SetActiveView true "View 1"`) + S103 hwIWindow GetViewControlHandle}] \
+        [dict create n 2 rec window type hwIWindow handle pisWin \
+            open {pisPage GetWindowHandle pisWin %index} \
+            src {UNVERIFIED-GUESS (receiver; literal from owner)}] \
+        [dict create n 3 rec client type poIPost handle pisC \
+            open {pisPage GetWindowHandle pisWin %index
+pisWin GetClientHandle pisC} \
+            src {UNVERIFIED-GUESS (receiver; literal from owner)}] \
+        [dict create n 4 rec session type hwISession handle pisS \
+            open {} \
+            src {UNVERIFIED-GUESS (receiver; literal from owner)}]]
+}
+
+# The view step as ONE script for ONE receiver: its own stack, the getter lines of that receiver,
+# then the owner's literal with the name as ONE argument (spaces and dots intact, no `[` in it).
+proc ::pis::hw::view_step_script {rec values} {
+    set open [dict get $rec open]
+    set h [dict get $rec handle]
+    set body "$h SetActiveView true %view"
+    if {[string trim $open] ne ""} { set body "$open\n$body" }
+    return [::pis::hw::fill "[::pis::hw::stack_open pis]\n$body\n[::pis::hw::page_close pis]" $values]
+}
+
+# The view step text as it goes into the journal line of an image.
+proc ::pis::hw::view_frag {rec} {
+    set open [dict get $rec open]
+    set body "[dict get $rec handle] SetActiveView true %view"
+    if {[string trim $open] ne ""} { return "$open\n$body" }
+    return $body
+}
+
+# The read-back of the ACTIVE VIEW - DOCUMENTED since T-033 (S100: `<viewctrl> GetActiveView`
+# answers the name of the view marked active, "Current View" when none is, and "Whatever is
+# currently displayed in the window will always be the same as the active view"). It replaces the
+# empty getter of T-032, which existed only because no page had been fetched yet.
 proc ::pis::hw::view_getter {} {
-    return ""
+    return {psiPage GetWindowHandle psiWin %index
+psiWin GetViewControlHandle psiV
+set psiRB [psiV GetActiveView]}
 }
 
-# The documented getter of the page's VIEW LIST - same answer and same reason.
+# The documented VIEW LIST of one window (S101: `<viewctrl> GetViewList <list var>` answers every
+# memorized view of the active window; it RAISES when the list is empty). Used to refuse a name the
+# window does not offer BEFORE anything is sent to the session.
 proc ::pis::hw::view_list_getter {} {
-    return ""
+    return {psiPage GetWindowHandle psiWin %index
+psiWin GetViewControlHandle psiV
+set psiRB {}
+psiV GetViewList psiRB}
 }
 
-proc ::pis::hw::active_view {} {
-    set script [::pis::hw::view_getter]
-    if {[string trim $script] eq ""} { return "" }
-    return [string trim [::pis::hw::probe $script]]
+# The camera of one window (S104: `GetViewMatrix`), the EVIDENCE getter used only when the build
+# has no GetActiveView: a SetActiveView that changes the camera did something, one that does not
+# may have been a no-op - and the image is the only judge either way.
+proc ::pis::hw::camera_getter {} {
+    return {psiPage GetWindowHandle psiWin %index
+psiWin GetViewControlHandle psiV
+set psiRB [psiV GetViewMatrix]}
+}
+
+# The answer of one getter template for window `index`; "" when the template is empty or cannot be
+# asked (a build without the method, no wrapper, no HyperView) - a read-back never raises.
+# Every template ends by storing its answer in `psiRB` (the other read-back scripts keep `psiGot`
+# for themselves), so this proc returns exactly that variable after the stack is closed.
+proc ::pis::hw::read_back {template index} {
+    set t [string trim $template]
+    if {$t eq ""} { return "" }
+    if {[llength [info commands ::pis::hw::probe]] == 0} { return "" }
+    set script [::pis::hw::fill \
+        "[::pis::hw::stack_open psi]\n$t\n[::pis::hw::page_close psi]\nset psiRB" \
+        [dict create %index $index]]
+    set got ""
+    if {[catch {::pis::hw::probe $script} got]} { return "" }
+    return [string trim $got]
+}
+
+proc ::pis::hw::active_view {index} {
+    return [::pis::hw::read_back [::pis::hw::view_getter] $index]
+}
+
+proc ::pis::hw::camera_view {index} {
+    return [::pis::hw::read_back [::pis::hw::camera_getter] $index]
 }
 
 # The `now:` half of a STEP log line: a read-only question about the session, never journaled.
-# `select` is the only step whose effect can be read (poIPage GetActiveWindow, S33); the view
-# cannot be read without a documented getter, and draw/call have no state of their own.
+# `select` asks the page for its active window (S33), `view` asks the view control for the name of
+# the active view (S100) - a wrong view is visible in the STEP line itself; draw/call have no state.
 proc ::pis::hw::capture_now {step index} {
     if {$step eq "select"} {
         set body {set psiAW [psiPage GetActiveWindow]}
@@ -1225,8 +1314,9 @@ proc ::pis::hw::capture_now {step index} {
         return [format "active window %s" [string trim $got]]
     }
     if {$step eq "view"} {
-        if {[string trim [::pis::hw::view_getter]] eq ""} { return "active view ? (no getter documented)" }
-        set got [::pis::hw::active_view]
+        if {[::pis::hw::absent_has "" GetActiveView]} { return "active view ? (GetActiveView absent)" }
+        set got [::pis::hw::active_view $index]
+        if {$got eq ""} { return "active view ? (the view control did not answer)" }
         return [format "active view '%s'" $got]
     }
     return "-"
@@ -1253,17 +1343,17 @@ proc ::pis::hw::table {} {
     # active page is this adapter's extension and the read-back is what judges it.
     set reset_remove {
 set pisNW [pisPage GetNumberOfWindows]
-for {set pisWi 1} {$pisWi <= $pisNW} {incr pisWi} {pisPage GetWindowHandle pisWin $pisWi; pisWin GetClientHandle pisC; pisC RemoveAllModels; catch {pisC ReleaseHandle}; catch {pisWin ReleaseHandle}}
+for {set pisWi 1} {$pisWi <= $pisNW} {incr pisWi} {pisPage GetWindowHandle pisWin $pisWi; pisWin GetClientHandle pisC; pisC RemoveAllModels}
 }
     # reset_page / reset_all: the fallback walk. The walk is sourced
     # (conrod/_tmp_hv/batchImportOdb.tcl:79-88); the DeleteModel verb is NOT.
     set reset_page {
 set pisNW [pisPage GetNumberOfWindows]
-for {set pisWi 1} {$pisWi <= $pisNW} {incr pisWi} {pisPage GetWindowHandle pisWin $pisWi; pisWin GetClientHandle pisC; foreach pisMi [pisC GetModelList] {if {[string is integer -strict $pisMi] && $pisMi > 0} {pisC DeleteModel $pisMi}}; catch {pisC ReleaseHandle}; catch {pisWin ReleaseHandle}}
+for {set pisWi 1} {$pisWi <= $pisNW} {incr pisWi} {pisPage GetWindowHandle pisWin $pisWi; pisWin GetClientHandle pisC; foreach pisMi [pisC GetModelList] {if {[string is integer -strict $pisMi] && $pisMi > 0} {pisC DeleteModel $pisMi}}}
 }
     set reset_all {
 set pisNP [pisP GetNumberOfPages]
-for {set pisPi 1} {$pisPi <= $pisNP} {incr pisPi} {pisP GetPageHandle pisPage $pisPi; set pisNW [pisPage GetNumberOfWindows]; for {set pisWi 1} {$pisWi <= $pisNW} {incr pisWi} {pisPage GetWindowHandle pisWin $pisWi; pisWin GetClientHandle pisC; foreach pisMi [pisC GetModelList] {if {[string is integer -strict $pisMi] && $pisMi > 0} {pisC DeleteModel $pisMi}}; catch {pisC ReleaseHandle}; catch {pisWin ReleaseHandle}}; catch {pisPage ReleaseHandle}}
+for {set pisPi 1} {$pisPi <= $pisNP} {incr pisPi} {pisP GetPageHandle pisPage $pisPi; set pisNW [pisPage GetNumberOfWindows]; for {set pisWi 1} {$pisWi <= $pisNW} {incr pisWi} {pisPage GetWindowHandle pisWin $pisWi; pisWin GetClientHandle pisC; foreach pisMi [pisC GetModelList] {if {[string is integer -strict $pisMi] && $pisMi > 0} {pisC DeleteModel $pisMi}}}}
 }
     # The result step (T-019) is built by ::pis::hw::result_cmd, which ::pis::hw::load_result_in_window
     # re-builds per window so the OPTIONAL wait chosen by ::pis::hw::wait_decide is in it. The table
@@ -1338,8 +1428,7 @@ for {set pisPi 1} {$pisPi <= $pisNP} {incr pisPi} {pisP GetPageHandle pisPage $p
             src {docs/refs/HV_API.md sec.5 S16 (poIPost WaitForResults, 2024) - type "scalar" is one of the documented values} \
             note {the client waits for the scalar results before the read-back runs}] \
         [dict create n 2 via hwi frag 1 cmd {pisS GetClientManagerHandle pisMgr animation
-pisMgr WaitForResults scalar
-catch {pisMgr ReleaseHandle}} \
+pisMgr WaitForResults scalar} \
             src {docs/refs/HV_API.md sec.5 S17 (poIPostManager WaitForResults) + S20 (GetClientManagerHandle, name "animation" from the supplier example)} \
             note {same wait through the session manager instead of the window client}] \
         [dict create n 3 via hwi frag 1 cmd {} \
@@ -2063,57 +2152,144 @@ proc ::pis::hw::import_legend {path} {
     return [::pis::hw::run import_legend [dict create %path $p]]
 }
 
-# The view of ONE window (T-032): the ONE place `<page> SetActiveView true "<name>"` is spelled.
-# It is the owner's own working call (F13c: `SetActiveView true "View 1"`) - the LITERAL comes
-# from him; the CLASS (the page handle) is an assumption, because no fetched page documents the
-# method (see ::pis::hw::view_getter). The name is passed as ONE argument through
-# ::pis::hw::quote, so `View 1` and `a.b c` survive.
-# After the call the window is redrawn (Draw on ITS client) and Tk is allowed to paint - the
-# refresh the owner's scripts do before a capture. Nothing is journaled here: the capture
-# journals the whole image as ONE line, and this proc returns the script it sent so a caller can
-# log it verbatim.
+# The view of ONE window (T-032; receiver discovery in T-033). The ONE place
+# `SetActiveView true "<name>"` is spelled, and the ONE place the receiver is decided.
+#
+# T-033 item 3 (bounded discovery): the owner's literal is tried on the handle kinds of
+# ::pis::hw::view_table, the DOCUMENTED 3D view control first. The first receiver that raises
+# nothing is CACHED for the session and logged ONCE (`VIEW window k: receiver <type> accepted`);
+# a receiver whose error proves the method absent (`could not find requested method`) goes into the
+# session absent list with ONE `method absent on this build: <type> SetActiveView` line and is
+# never tried again, for any window or row. ANY other error (a view name not found, for example)
+# means the method EXISTS: discovery stops and the raw text is reported.
+#
+# Item 4 (read-back): `GetActiveView` (S100) is read after the call. A different name fails the
+# image with `view '<name>' not active in window k (read: <v>)` BEFORE any capture call runs. When
+# that getter is absent, the CAMERA (S104 GetViewMatrix) is read before and after as EVIDENCE
+# (WARN unchanged / INFO changed); with neither getter one line per run says so.
+#
+# Nothing is journaled here (the image is journaled as ONE line); the proc returns
+# {script rec} - the script it sent and the receiver dict - so ::pis::hw::capture_image can put
+# the SAME view text into the journal line. It does NOT redraw: `draw` is its own step.
 proc ::pis::hw::set_view {index name} {
+    variable adapt_view
+    variable view_note
     ::pis::hw::need_exec
     if {![string is integer -strict $index] || $index < 1} {
         error "::pis::hw::set_view: window index must be a positive integer, got: '$index'"
     }
     set n [string trim $name]
     if {$n eq ""} { error "::pis::hw::set_view: empty view name" }
-    # A documented list getter would let us refuse a name the page does not offer BEFORE anything
-    # is sent. None is documented (view_list_getter answers ""), so this branch is dormant.
-    set listScript [::pis::hw::view_list_getter]
-    if {[string trim $listScript] ne ""} {
-        set names [string trim [::pis::hw::probe $listScript]]
-        if {[lsearch -exact $names $n] < 0} {
-            error "view '$n' not found in window $index"
+    set values [dict create %index $index %view $n]
+    # The receivers still worth trying: the cached one FIRST (windows 2..N), then the table in
+    # order, minus every type this build already proved has no SetActiveView.
+    set table [::pis::hw::view_table]
+    set list [list]
+    if {$adapt_view ne ""} {
+        foreach rec $table {
+            if {[dict get $rec rec] eq $adapt_view} { lappend list [dict get $rec rec] }
         }
     }
-    set values [dict create %index $index %view $n]
-    set script [::pis::hw::capture_step_script view $values]
-    set code [catch {::pis::hw::exec_hwi $script -nojournal} res]
-    if {$code} {
-        error "::pis::hw::set_view: window $index: [string trim $res] (sent: [::pis::hw::one_line $script])"
+    foreach rec $table {
+        set rn [dict get $rec rec]
+        if {$rn eq $adapt_view} { continue }
+        if {[::pis::hw::absent_has [dict get $rec type] SetActiveView]} { continue }
+        lappend list $rn
     }
-    set draw [::pis::hw::capture_step_script draw $values]
-    set code [catch {::pis::hw::exec_hwi $draw -nojournal} res]
-    ::pis::hw::refresh
-    if {$code} {
-        error "::pis::hw::set_view: window $index: the redraw after the view change failed: [string trim $res]"
+    if {[llength $list] == 0} {
+        error "view step failed for all receivers, capture call not attempted: every receiver of SetActiveView is recorded absent on this build"
     }
-    set got [::pis::hw::active_view]
-    if {$got ne "" && $got ne $n} {
-        error "view '$n' not active in window $index (read: $got)"
+    # The read-back is taken BEFORE the view step too (item 4: read before and after). When the
+    # active-view getter does not answer, the CAMERA is read instead - as evidence, not a verdict.
+    set got0 [::pis::hw::active_view $index]
+    set cam0 ""
+    set camwanted 0
+    if {$got0 eq ""} {
+        set cam0 [::pis::hw::camera_view $index]
+        set camwanted [expr {$cam0 ne "" ? 1 : 0}]
     }
-    return $script
+    set tried [list]
+    foreach rn $list {
+        set rec ""
+        foreach cand $table {
+            if {[dict get $cand rec] eq $rn} { set rec $cand }
+        }
+        if {$rec eq ""} { continue }
+        set script [::pis::hw::view_step_script $rec $values]
+        set code [catch {::pis::hw::exec_hwi $script -nojournal} res]
+        if {!$code} {
+            # The receiver answered. Cache it, and say it ONCE per run (not once per image).
+            set first [expr {$adapt_view ne [dict get $rec rec]}]
+            set adapt_view [dict get $rec rec]
+            if {$first} {
+                ::pis::hw::note INFO [format \
+                    "VIEW window %d: receiver %s accepted SetActiveView true '%s'" \
+                    $index [dict get $rec type] $n]
+            }
+            set got [::pis::hw::active_view $index]
+            if {$got ne "" && $got ne $n} {
+                error "view '$n' not active in window $index (read: $got)"
+            }
+            if {$got eq ""} {
+                if {$camwanted} {
+                    set cam1 [::pis::hw::camera_view $index]
+                    if {$cam1 eq ""} {
+                        if {!$view_note} {
+                            set view_note 1
+                            ::pis::hw::note INFO "view: no read-back for the active view on this build (neither GetActiveView nor GetViewMatrix answered) - the image is the only proof of the view"
+                        }
+                    } elseif {$cam0 eq $cam1} {
+                        ::pis::hw::note WARN [format \
+                            "view window %d: camera unchanged after SetActiveView '%s' (already that view, or the call had no effect) - look at the image" \
+                            $index $n]
+                    } else {
+                        ::pis::hw::note INFO [format "view window %d: camera changed" $index]
+                    }
+                } elseif {!$view_note} {
+                    set view_note 1
+                    ::pis::hw::note INFO "view: no read-back for the active view on this build (neither GetActiveView nor GetViewMatrix answered) - the image is the only proof of the view"
+                }
+            }
+            return [list $script $rec]
+        }
+        set raw [string trim $res]
+        lappend tried [format "%s (%s)" [dict get $rec type] [::pis::hw::clip $raw 90]]
+        # Proof of absence: the build's own text names the method. The arguments are the owner's
+        # documented literal, so the method name alone decides here (T-033 item 2).
+        set parsed [::pis::hw::absent_parse $raw]
+        if {[llength $parsed] >= 3} {
+            lassign $parsed class mname ambiguous
+            if {$mname eq "SetActiveView"} {
+                if {$class eq ""} { set class [dict get $rec type] }
+                set key [::pis::hw::absent_add $class SetActiveView]
+                if {$key ne ""} {
+                    ::pis::hw::note INFO [format "method absent on this build: %s SetActiveView" $class]
+                }
+                if {$adapt_view eq [dict get $rec rec]} { set adapt_view "" }
+                continue
+            }
+        }
+        # Any other error text means the method EXISTS on that handle: stop the discovery and
+        # report the build's own words in full - never record it absent.
+        error [format "view step failed, capture call not attempted: receiver %s said: %s" \
+            [dict get $rec type] $raw]
+    }
+    error [format "view step failed for all receivers, capture call not attempted (tried %s)" \
+        [join $tried {, }]]
 }
 
-# ONE image, step by step (T-032). `values` holds %index %path %view %unit %width %height %type;
-# `layout` 1 makes window %index active first, 0 leaves the page's active window alone; `trace` 1
-# sends every step as its OWN hwi script and logs one STEP line per step, 0 sends the joined
-# script - the journal text is the SAME (one line per image) in both modes.
+# ONE image, step by step (T-032; the view step separated in T-033).
+# `values` holds %index %path %view %unit %width %height %type; `layout` 1 makes window %index
+# active first, 0 leaves the page's active window alone; `trace` 1 logs one STEP line per step
+# (the steps are ALWAYS sent as their own hwi scripts, so a failing step has its own raw answer
+# and one image can never repeat another step's trace block); `viewstep` 0 skips the view step
+# (`[capture] on_view_unavailable = capture_current`).
+# The variants of the table apply to the CAPTURE CALL only: select / view / draw run ONCE, before
+# the first variant is tried (F14 b: a failing view was retried five times).
 # The proof is the FILE: exists and size > 0. A call that answered 0 and wrote nothing fails,
 # with both facts in the message. `row` is a log label only (0 = not a module row).
-proc ::pis::hw::capture_image {values layout trace row} {
+proc ::pis::hw::capture_image {values layout trace row {viewstep 1}} {
+    variable adapt_capture
     ::pis::hw::need_exec
     set index [dict get $values %index]
     set path [dict get $values %path]
@@ -2121,11 +2297,57 @@ proc ::pis::hw::capture_image {values layout trace row} {
     set list [::pis::hw::variants capture_window]
     set total [llength $list]
     set start [::pis::hw::at capture_window]
+    if {$adapt_capture > 0 && $adapt_capture <= $total} { set start $adapt_capture }
     if {![string is integer -strict $start] || $start < 1 || $start > $total} { set start 1 }
     set steps [list]
     if {$layout} { lappend steps select }
-    lappend steps view draw call
-    set tried {}
+    if {$viewstep} { lappend steps view }
+    lappend steps draw
+    # The journal text of the view step that was really sent ("" = no view line in the journal).
+    set viewfrag ""
+    # --- the steps BEFORE the capture call: once each, no variant applies ---------------------
+    foreach step $steps {
+        if {$step eq "view"} {
+            set res [list]
+            set code [catch {::pis::hw::set_view $index $view} res]
+            if {$code} {
+                set errtext [string trim $res]
+                if {$trace} {
+                    ::pis::hw::note ERROR [format "STEP capture window %d row %d view: %s" \
+                        $index $row $errtext]
+                }
+                error $errtext
+            }
+            set script [lindex $res 0]
+            set rec [lindex $res 1]
+            set viewfrag [::pis::hw::fill [::pis::hw::view_frag $rec] $values]
+            if {$trace} {
+                set now [::pis::hw::capture_now view $index]
+                ::pis::hw::note INFO [format \
+                    "STEP capture window %d row %d view: sent %s -> ret=(accepted by %s) | now: %s" \
+                    $index $row [::pis::hw::fold_script $script] [dict get $rec type] $now]
+            }
+            continue
+        }
+        set script [::pis::hw::capture_step_script $step $values]
+        set code [catch {::pis::hw::exec_hwi $script -nojournal} res]
+        set raw [string trim $res]
+        if {$code} {
+            if {$trace} {
+                ::pis::hw::note ERROR [format "STEP capture window %d row %d %s: sent %s -> ERR %s" \
+                    $index $row $step [::pis::hw::fold_script $script] $raw]
+            }
+            error [format "%s step failed, capture call not attempted: %s" $step $raw]
+        }
+        if {$trace} {
+            set now [::pis::hw::capture_now $step $index]
+            if {$raw eq ""} { set raw "(empty)" }
+            ::pis::hw::note INFO [format "STEP capture window %d row %d %s: sent %s -> ret=%s | now: %s" \
+                $index $row $step [::pis::hw::fold_script $script] $raw $now]
+        }
+    }
+    ::pis::hw::refresh
+    # --- the capture call: the ONLY thing a variant applies to ------------------------------
     set firsterr ""
     set lasterr ""
     set n $start
@@ -2140,76 +2362,36 @@ proc ::pis::hw::capture_image {values layout trace row} {
             continue
         }
         set callcmd [::pis::hw::fill [dict get $v cmd] $values]
-        set full [::pis::hw::capture_full_script $layout $values $callcmd]
-        set failedstep ""
-        set errtext ""
+        set full [::pis::hw::capture_full_script $layout $values $callcmd $viewfrag]
+        set script [::pis::hw::capture_step_script call $values $callcmd]
         set res ""
         set code 0
-        # Split the steps when the trace is on - and ALSO when this build documents a getter for
-        # the active view, because then the view has to be read back BEFORE the capture call runs
-        # (a wrong view must cost 0 capture calls). No build documents one, so the usual second
-        # run is a single joined script.
-        set split [expr {$trace || [string trim [::pis::hw::view_getter]] ne "" ? 1 : 0}]
-        if {$split} {
-            foreach step $steps {
-                if {$step eq "call" && $trace} {
-                    ::pis::hw::note INFO [format "CAPTURE ctx window %d row %d view '%s' call %s" \
-                        $index $row $view $call]
-                }
-                set script [::pis::hw::capture_step_script $step $values $callcmd]
-                set code [catch {::pis::hw::exec_hwi $script -nojournal} res]
+        if {$trace} {
+            ::pis::hw::note INFO [format "CAPTURE ctx window %d row %d view '%s' call %s" \
+                $index $row $view $call]
+        }
+        set code [catch {::pis::hw::exec_hwi $script -nojournal} res]
+        # The log shows the LITERAL script that was sent (folded, no display transform of
+        # brackets or braces): a truncated "hwi OpenStack ..." would hide the very call the
+        # owner has to recognise (F13 asked for per-step evidence, not a summary).
+        if {$trace} {
+            set literal [::pis::hw::fold_script $script]
+            if {$code} {
+                ::pis::hw::note ERROR [format "STEP capture window %d row %d call: sent %s -> ERR %s" \
+                    $index $row $literal [string trim $res]]
+            } else {
                 set raw [string trim $res]
-                # The log shows the LITERAL script that was sent (folded, no display transform of
-                # brackets or braces): a truncated "hwi OpenStack ..." would hide the very call the
-                # owner has to recognise (F13 asked for per-step evidence, not a summary).
-                set literal [::pis::hw::fold_script $script]
-                if {$code} {
-                    set failedstep $step
-                    set errtext $raw
-                    if {$trace} {
-                        ::pis::hw::note ERROR [format "STEP capture window %d row %d %s: sent %s -> ERR %s" \
-                            $index $row $step $literal $errtext]
-                    }
-                    break
-                }
-                if {$trace} {
-                    set now [::pis::hw::capture_now $step $index]
-                    if {$raw eq ""} { set raw "(empty)" }
-                    ::pis::hw::note INFO [format "STEP capture window %d row %d %s: sent %s -> ret=%s | now: %s" \
-                        $index $row $step $literal $raw $now]
-                }
-                # The documented read-back of the view, when this build has one: a view that is
-                # not the requested one is an ERROR naming both, and the capture call never runs.
-                if {$step eq "view" && [string trim [::pis::hw::view_getter]] ne ""} {
-                    set got [::pis::hw::active_view]
-                    if {$got ne "" && $got ne $view} {
-                        set failedstep view
-                        set errtext "view '$view' not active in window $index (read: $got)"
-                        set code 1
-                        set res $errtext
-                        if {$trace} {
-                            ::pis::hw::note ERROR [format \
-                                "STEP capture window %d row %d view: sent %s -> ERR %s" \
-                                $index $row $literal $errtext]
-                        }
-                        break
-                    }
-                }
+                if {$raw eq ""} { set raw "(empty)" }
+                ::pis::hw::note INFO [format \
+                    "STEP capture window %d row %d call: sent %s -> ret=%s | now: -" \
+                    $index $row $literal $raw]
             }
-            if {!$code} { ::pis::hw::refresh }
-        } else {
-            set code [catch {::pis::hw::exec_hwi $full -nojournal} res]
-            if {!$code} { ::pis::hw::refresh }
         }
         # The documented answer is an INTEGER: 0 = success, anything else = an error code that
         # fails the variant by its own number. An empty answer is left to the file check.
         set say ""
         if {$code} {
-            if {$failedstep ne ""} {
-                set say "step $failedstep: $errtext"
-            } else {
-                set say "step (joined script): [string trim $res]"
-            }
+            set say "call: [string trim $res]"
         } elseif {[string is integer -strict [string trim $res]] && [string trim $res] != 0} {
             set say "call $call answered error code [string trim $res]"
         } elseif {![file exists $path]} {
@@ -2221,6 +2403,7 @@ proc ::pis::hw::capture_image {values layout trace row} {
             set bytes [file size $path]
             set line ""
             catch {set line [::pis::hw::journal_run $full]}
+            set adapt_capture $n
             ::pis::hw::record [::pis::hw::used_key capture_window $values] $n
             set tail "variant $n/$total used and confirmed by the file ($bytes bytes, src: [dict get $v src])"
             if {$n == $start} {
@@ -2230,6 +2413,7 @@ proc ::pis::hw::capture_image {values layout trace row} {
                     "capture_window window %d: %s; keep it with: ::pis::hw::use capture_window %d" \
                     $index $tail $n]
             }
+            ::pis::hw::note OK [format "CAPTURE ok window %d variant %d/%d %s" $index $n $total $call]
             return [dict create path $path bytes $bytes variant $n call $call \
                 view $view script $line]
         }
@@ -2284,11 +2468,12 @@ proc ::pis::hw::capture_window {index path view unit width height args} {
         }
     }
     if {[llength $args] % 2 != 0} {
-        error "::pis::hw::capture_window: options come in pairs (-row <r> -layout <0|1> -trace <0|1>)"
+        error "::pis::hw::capture_window: options come in pairs (-row <r> -layout <0|1> -trace <0|1> -viewstep <0|1>)"
     }
     set layout 0
     set trace 1
     set row 0
+    set viewstep 1
     foreach {opt val} $args {
         switch -- $opt {
             -row {
@@ -2303,8 +2488,13 @@ proc ::pis::hw::capture_window {index path view unit width height args} {
             -trace {
                 set trace [expr {($val eq "1" || $val eq "true") ? 1 : 0}]
             }
+            -viewstep {
+                # T-033: 0 = do not touch the view at all (`[capture] on_view_unavailable =
+                # capture_current`). The row's view name still names the file and the log.
+                set viewstep [expr {($val eq "1" || $val eq "true") ? 1 : 0}]
+            }
             default {
-                error "::pis::hw::capture_window: unknown option '$opt' (expected -row, -layout, -trace)"
+                error "::pis::hw::capture_window: unknown option '$opt' (expected -row, -layout, -trace, -viewstep)"
             }
         }
     }
@@ -2314,7 +2504,7 @@ proc ::pis::hw::capture_window {index path view unit width height args} {
     if {$type eq ""} { set type png }
     set values [dict create %index $index %path $p %view $vw %unit $u \
         %width $width %height $height %type $type]
-    return [::pis::hw::capture_image $values $layout $trace $row]
+    return [::pis::hw::capture_image $values $layout $trace $row $viewstep]
 }
 
 # Print the whole table, the current variant per op and the one-line way to change it.

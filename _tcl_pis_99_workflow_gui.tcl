@@ -606,13 +606,14 @@ proc ::pis::gui::run_legend {scope} {
     return $res
 }
 
-# --- Capture wiring (task T-011, T-032) -------------------------------------
+# --- Capture wiring (task T-011, T-032, T-033) -------------------------------
 # Widgets -> a THROWAWAY cfg for one run: the typed view list and its ticks use the very keys the
 # ini keeps ([capture] item1..itemN + checked, SPEC.md data model "0 1 1"), so a run reads the
 # session exactly like the start-up restore does and never writes the ini (T-013 owns that write).
 # T-032: the ini's OTHER [capture] keys (image_type, image_width/image_height, unit/width/height)
 # are kept - the widgets do not edit them, so replacing the whole section would silently drop the
-# owner's size settings.
+# owner's size settings. T-033 adds `on_view_unavailable` to that list: it is read from the ini by
+# ::pis::capture::view_policy and the GUI never invents a value for it.
 proc ::pis::gui::capture_cfg {} {
     variable S
     set cfg [::pis::gui::workflow_cfg]

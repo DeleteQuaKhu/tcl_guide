@@ -1,5 +1,5 @@
 # src/01_scripts/_tcl_pis_06_capture.tcl
-# ::pis::capture - the "Capture" module (task T-011, fixed by T-032).
+# ::pis::capture - the "Capture" module (task T-011; fixed by T-032, view step fixed by T-033).
 # SPEC_gui.txt s.6.5: "List of views (View 1..n). Apply: for each checked view, set the view and
 # capture an image. Image name: {result_file_name}_{view}.png so files never overwrite each
 # other. Capture only captures; it does not trigger other modules."
@@ -11,6 +11,11 @@
 #   2. the capture call order follows the source precedence PROVEN > DOC (owner scripts first,
 #      `hwISession CaptureWindow` S91 last) - see the adapter's capture_window table;
 #   3. the name is `{result_file_name}_{view}.png`: the model is dropped (owner's order).
+# T-033 (owner `T-011: fail 2`, F14) added what the module itself owns:
+#   4. the view step has its own receiver list and its own failure (adapter view_table/set_view),
+#      so the capture variants never run when the view could not be activated (F14 b);
+#   5. `[capture] on_view_unavailable` (stop | capture_current): under `capture_current` ONE WARN
+#      switches the rest of the run to the CURRENT view, the owner's way to test the call alone.
 # Tcl/Tk 8.5 compatible, no tcllib, no network, no package require, no Tk.
 # Sourcing this file defines procs only: it never calls HyperView.
 #
@@ -26,6 +31,7 @@
 #   ::pis::capture::image_type {cfg}          -> the image type (only png, the frozen extension)
 #   ::pis::capture::trace_spec {cfg}          -> 1 = one STEP log line per step (default)
 #   ::pis::capture::continue_on_error {cfg}   -> [log] continue_on_error as 0/1
+#   ::pis::capture::view_policy {cfg}         -> [capture] on_view_unavailable: stop|capture_current
 #   ::pis::capture::output_dir {root cfg}     -> absolute folder for the images (created if needed)
 #   ::pis::capture::file_base {cfg k view}    -> {result}_{view}, sanitized, no extension
 #   ::pis::capture::file_name {cfg k view}    -> that base plus ".png"
@@ -220,6 +226,23 @@ proc ::pis::capture::continue_on_error {cfg} {
     return [::pis::common::to_bool $raw "log continue_on_error"]
 }
 
+# What to do when the build cannot activate the view of a row (T-033 item 6):
+#   `[capture] on_view_unavailable = stop`           -> the image fails, nothing written or journaled
+#   `[capture] on_view_unavailable = capture_current` -> ONE WARN, then the current view of every
+#                                                       window is captured (file names keep the row's
+#                                                       view name, so the images may show another view)
+# The default is `stop`: an image that silently shows a different view than its name promises is
+# worse than a failure the owner can read. An unknown value is refused by name.
+proc ::pis::capture::view_policy {cfg} {
+    ::pis::capture::need_common
+    set raw [string tolower [string trim [::pis::common::get $cfg capture on_view_unavailable stop]]]
+    if {$raw eq ""} { set raw stop }
+    if {$raw ne "stop" && $raw ne "capture_current"} {
+        error "capture: \[capture\] on_view_unavailable must be stop or capture_current, got: '$raw'"
+    }
+    return $raw
+}
+
 # The folder the images go into: `[folders] working_dir` (default 02_working, resolved against the
 # workflow root) - the place SPEC.md D4 reserves for runtime artifacts. It is created when missing
 # and refused when it cannot be used, NAMING the path, before the first capture is attempted, so a
@@ -387,45 +410,70 @@ proc ::pis::capture::run {root cfg scope} {
         $title \
         [expr {$scope eq "layout" ? "select/view/draw/capture/file" : "view/draw/capture/file"}] \
         [expr {$trace ? "on" : "off"}]]
-    # Does this build document a getter for the ACTIVE VIEW? None does (adapter view_getter), so
-    # the usual answer is "no": the windows stay on the last captured view and that is said ONCE.
-    set restore [expr {[string trim [::pis::hw::view_getter]] ne "" ? 1 : 0}]
+    # T-033 item 6: what to do when the build cannot activate a view. `stop` fails the image (the
+    # adapter says `view step failed for all receivers, capture call not attempted`); the first
+    # such failure under `capture_current` switches the WHOLE run to "capture the current view",
+    # with ONE WARN, and the image that hit it is retried without the view step.
+    set policy [::pis::capture::view_policy $cfg]
+    set viewstep 1
+    set warned 0
+    # The receiver of the view step is discovered again for this run (one INFO line when it is
+    # accepted), so the log of every run names the handle kind that worked.
+    if {[llength [info commands ::pis::hw::begin_capture]] > 0} { catch {::pis::hw::begin_capture} }
     set captured 0
     set done 0
-    set lastwin 0
-    set orig ""
     set stopped ""
     foreach step $plan {
         set k [lindex $step 0]
         set row [lindex $step 1]
         set view [lindex $step 2]
         set path [lindex $step 3]
-        if {$restore} {
-            if {$k != $lastwin} {
-                if {$lastwin != 0 && $orig ne ""} {
-                    ::pis::capture::restore_view $cfg $lastwin $orig
-                }
-                set lastwin $k
-                set orig ""
-                catch {set orig [::pis::hw::active_view]}
-            }
-        }
         incr done
         incr calls
         ::pis::capture::status [format "Capture %d/%d running..." $done $total]
         ::pis::hw::context $title $view
         set code [catch {
             ::pis::hw::capture_window $k $path $view $unit $width $height \
-                -row $row -layout [expr {$scope eq "layout" ? 1 : 0}] -trace $trace
+                -row $row -layout [expr {$scope eq "layout" ? 1 : 0}] -trace $trace -viewstep $viewstep
         } res]
+        # The owner's way to test the capture call alone: the view could not be activated, so from
+        # here on every image is taken from whatever view the window shows. ONE WARN, then the same
+        # image is retried without the view step (nothing was written, so the retry is safe).
+        if {$code && $viewstep && $policy eq "capture_current" && \
+                [string first "view step failed" [string trim $res]] >= 0} {
+            if {!$warned} {
+                set warned 1
+                ::pis::common::log $cfg WARN \
+                    "capture: view activation unavailable on this build - capturing the CURRENT view of each window, the file names still carry the row's view name (images may show another view)"
+            }
+            set viewstep 0
+            set code [catch {
+                ::pis::hw::capture_window $k $path $view $unit $width $height \
+                    -row $row -layout [expr {$scope eq "layout" ? 1 : 0}] -trace $trace -viewstep 0
+            } res]
+        }
         if {$code} {
-            set msg "capture window $k row $row view '$view' failed: [string trim $res] | output: $path"
+            # Log hygiene (T-033 item 8): with the trace on, the RAW text already stands in the
+            # failing STEP line, so this line points there instead of printing it a second time.
+            # With the trace off there is no STEP line, so the raw text belongs here.
+            set raw [string trim $res]
+            if {$trace} {
+                set detail "$raw (see the STEP line above)"
+                if {[string length $detail] > 220} {
+                    set detail "[string range $raw 0 180].. (see the STEP line above)"
+                }
+            } else {
+                set detail $raw
+            }
+            set msg "capture window $k row $row view '$view' failed: $detail | output: $path"
             set later [::pis::capture::not_attempted $plan $k]
             if {$later ne ""} { append msg " | $later" }
             ::pis::common::log $cfg ERROR $msg
             ::pis::capture::status "Error: capture window $k failed (see log)"
             if {$cont} { continue }
-            set stopped $msg
+            # The raised text is SHORT on purpose: the GUI logs it once more, and the whole raw
+            # answer must not appear a third time.
+            set stopped "capture window $k row $row view '$view' failed (see the log)"
             break
         }
         # The adapter proved the file; the module reads the size it reports (the same two facts,
@@ -445,12 +493,9 @@ proc ::pis::capture::run {root cfg scope} {
         ::pis::common::log $cfg OK [format "capture window %d '%s' row %d: %s (%d bytes)" \
             $k $view $row $path $bytes]
     }
-    if {$restore && $lastwin != 0 && $orig ne ""} {
-        ::pis::capture::restore_view $cfg $lastwin $orig
-    }
-    if {!$restore} {
+    if {$warned} {
         ::pis::common::log $cfg INFO \
-            "capture: no getter for the active view, windows stay on the last captured view"
+            "capture: the images show the CURRENT view of each window, not the row's view (see the WARN above)"
     }
     set last_dir $dir
     if {$captured == $total} {
@@ -474,18 +519,6 @@ proc ::pis::capture::not_attempted {plan k} {
     if {[llength $later] == 0} { return "" }
     set later [lsort -unique -integer $later]
     return [format "windows %d..%d not attempted" [lindex $later 0] [lindex $later end]]
-}
-
-# Set a window back to the view it had before the run. Only reachable when the build documents a
-# getter for the active view (none does), and a refusal is a WARN - the image is already written.
-proc ::pis::capture::restore_view {cfg k name} {
-    if {[catch {::pis::hw::set_view $k $name} err]} {
-        ::pis::common::log $cfg WARN [format \
-            "capture: window %d could not be set back to view '%s': %s" $k $name [string trim $err]]
-        return 0
-    }
-    ::pis::common::log $cfg INFO [format "capture: window %d restored to view '%s'" $k $name]
-    return 1
 }
 
 # Counters back to zero; used by tests/tcl/test_capture.tcl between cases.
