@@ -145,7 +145,7 @@ proc ::pis::gui::chosen {key} {
 # file path would only produce a "file not found" at run time.
 proc ::pis::gui::default_items {} {
     return [dict create \
-        result {SF MS AS CPRESS} \
+        result {{1.  Endure_SF_A} {1.  Mean Stress} {1. Stres Ampl.} CPRESS} \
         legend {} \
         measures {{Measures 1} {Measures 2} {Measures 3}} \
         section {section1 section2 section3} \
