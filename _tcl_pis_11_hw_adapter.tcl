@@ -238,7 +238,7 @@ namespace eval ::pis::hw {
 # only thing the variants apply to, every ReleaseHandle on session/project/page/window/client is
 # gone from the generated scripts, and `[capture] on_view_unavailable` can capture the current view.
 namespace eval ::pis {
-    variable BUILD "T34a-20261118-2100"
+    variable BUILD "T35a-20261118-2200"
 }
 
 # --- script builders: the hwi handle API is spelled once, here ------------------------
@@ -553,6 +553,18 @@ proc ::pis::hw::begin_capture {} {
     set adapt_view ""
     set adapt_capture 0
     set view_note 0
+    return
+}
+
+# Called once by each Load Legend run (T-035): the variant that worked last time is forgotten (the
+# PROVEN form is tried first again) and the one-per-run `... must be checked by eye` note is armed.
+# The build's own answer about `GetDisplayOptions legend` is NOT forgotten: it is a property of the
+# session, like the absent-method list (T-027).
+proc ::pis::hw::begin_legend {} {
+    variable adapt_legend
+    variable adapt_legend_eye
+    set adapt_legend 0
+    set adapt_legend_eye 0
     return
 }
 
@@ -1530,6 +1542,25 @@ pisMgr WaitForResults scalar} \
         [dict create n 3 via hwc cmd {result legend import %path} \
             check {} want {} src {UNVERIFIED-GUESS} \
             note {result verb without scalar}]]
+    # --- the legend VISIBILITY of ONE window (T-035: F17 show/hide, F16 receiver) --------------
+    # PROVEN > DOC > UNVERIFIED-GUESS:
+    #   V1 `hwc show legends` / `hwc hide legends` - the owner's OWN scripts
+    #      (docs/refs/HV_API_REF.md Legend: S02:18 `catch {hwc show legends}`, S06:243 show /
+    #      S06:257 hide, S07:461 hide / S07:559 show) and PROVEN pattern 11 (import ->
+    #      GetActiveClientHandle -> `hwc show legends` -> Draw -> update idletasks).
+    #   V2 `poIPost SetDisplayOptions legend true|false` - DOC: docs/refs/HV_API.md sec.12 S56, whose
+    #      documented `name` list holds "legend"; the read-back is S57 `GetDisplayOptions legend`.
+    # `%mode` is show|hide and `%flag` is true|false. No `check` field: the getter judges BOTH
+    # variants the same way, and a build without it must not fail a step (::pis::hw::legend_now).
+    dict set t legend_visibility [list \
+        [dict create n 1 via hwc cmd {%mode legends} \
+            check {} want {} \
+            src {docs/refs/HV_API_REF.md Legend S02:18, S06:243/257, S07:461/559 (PROVEN) + PROVEN pattern 11} \
+            note {the ACTIVE window shows/hides its legend; the journal gets the one hwc line}] \
+        [dict create n 2 via hwi frag 1 cmd {pisC SetDisplayOptions legend %flag} \
+            check {} want {} \
+            src {docs/refs/HV_API.md sec.12 S56 (poIPost SetDisplayOptions; the name list contains legend)} \
+            note {the documented per-window display switch; read back with GetDisplayOptions legend (S57)}]]
     # --- ONE capture of one window (T-032: the owner's proven call first) ------------------
     # The owner's fail (T-011 F13, 2026-11-18): the DOC call `hwISession CaptureWindow` (S91) was
     # tried FIRST although his own scripts and the PROVEN digest hold working capture calls. The
@@ -2224,6 +2255,318 @@ proc ::pis::hw::import_legend {path} {
     if {$p eq ""} { error "::pis::hw::import_legend: empty legend path" }
     if {![file isfile $p]} { error "::pis::hw::import_legend: legend file not found: $p" }
     return [::pis::hw::run import_legend [dict create %path $p]]
+}
+
+# --- the legend VISIBILITY of one window (T-035, F16 + F17) --------------------------------
+# The owner's two facts:
+#   F16 - the legend module reached the page through a CLIENT handle and the build refused it
+#         (`Object named: pis_legend_client_... (of type poIPost) could not find requested method:
+#         GetPageHandle ...`). Nothing here walks the page from a client: the window is selected by
+#         the PROVEN `::pis::hw::select_window` (project handle -> page -> SetActiveWindow k) and the
+#         client is only ever the receiver of `Draw` / `SetDisplayOptions` / `GetDisplayOptions`.
+#   F17 - `on` is the Display Control > Legend toggle: show it in every window, or hide it in every
+#         window. One window per call, one hwi/hwc sequence, one journal line for the state change.
+#
+# Deferred journal (the ONE hwc call that is not sent by ::pis::hw::exec):
+#   a variant must not reach a saved journal when the read-back refuses it, and ::pis::hw::exec has
+#   no -nojournal mode. `hwc_defer` runs the command with no journal line and `hwc_journal` writes
+#   the SAME text `exec` writes (same quoting, same timestamp comment) only after the read-back
+#   agreed. This is the only caller of both procs.
+namespace eval ::pis::hw {
+    # "-" = GetDisplayOptions legend not asked yet, 1 = it answers, 0 = this build lacks it.
+    if {![info exists adapt_legend_getter]} { set adapt_legend_getter "-" }
+    # Has THIS run already written its one "checked by eye" line?
+    if {![info exists adapt_legend_eye]} { set adapt_legend_eye 0 }
+    # Variant that worked last time, so windows 2..N start with it (like adapt_capture).
+    if {![info exists adapt_legend]} { set adapt_legend 0 }
+}
+
+# "show" / "hide" from the caller's word, with one clear message naming the offending value.
+proc ::pis::hw::legend_word {show} {
+    set w [string tolower [string trim $show]]
+    if {$w eq "show" || $w eq "hide"} { return $w }
+    error "::pis::hw::legend_visibility: mode must be show or hide, got: '$show'"
+}
+
+# The documented boolean of S56 (`state`: "true for on, or false for off.").
+proc ::pis::hw::legend_flag {mode} {
+    if {$mode eq "show"} { return true }
+    return false
+}
+
+# What a GetDisplayOptions legend answer means: show / hide / "" (not an answer).
+# S57 says "Returns true if the given display option is on; false if it is not.", and a build may
+# spell a boolean as 1/0 or yes/on, so both documented words and the usual spellings are read.
+proc ::pis::hw::legend_state {raw} {
+    set t [string tolower [string trim $raw]]
+    foreach v {1 true on yes} { if {$t eq $v} { return show } }
+    foreach v {0 false off no} { if {$t eq $v} { return hide } }
+    return ""
+}
+
+# Read-only: what the window answers for `GetDisplayOptions legend` (S57). "" = no documented
+# getter on this build (the absent-method text is the proof, T-027 rule) or no answer at all.
+# Any OTHER error is the build's own words and is raised in full - never swallowed.
+proc ::pis::hw::legend_now {index} {
+    variable adapt_legend_getter
+    if {$adapt_legend_getter eq "0"} { return "" }
+    set body {set psiLV [psiC GetDisplayOptions legend]}
+    set script "[::pis::hw::window_open psi $index]\n$body\n[::pis::hw::window_close psi]\nset psiLV"
+    set got ""
+    if {[catch {::pis::hw::probe $script} got]} {
+        set raw [string trim $got]
+        set parsed [::pis::hw::absent_parse $raw]
+        if {[llength $parsed] >= 3} {
+            lassign $parsed class mname ambiguous
+            if {$mname eq "GetDisplayOptions"} {
+                set adapt_legend_getter 0
+                return ""
+            }
+        }
+        error $raw
+    }
+    set adapt_legend_getter 1
+    return [string trim $got]
+}
+
+# The literal `select_window` sends for window k: the START variant of that op, filled and folded,
+# so a STEP line prints exactly the script the proven helper sends.
+proc ::pis::hw::legend_select_text {index} {
+    set v [::pis::hw::variant_of select_window [::pis::hw::at select_window]]
+    set cmd [::pis::hw::fill [dict get $v cmd] \
+        [dict create %index $index %zindex [expr {$index - 1}]]]
+    return [::pis::hw::fold_script $cmd]
+}
+
+# The journal text of one hwc command, built exactly as ::pis::hw::exec builds it.
+proc ::pis::hw::hwc_line {words} {
+    set parts [list hwc]
+    foreach a $words {
+        lappend parts [::pis::journal::quote_arg $a]
+    }
+    return [join $parts " "]
+}
+
+# ONE hwc command with NO journal line (see the deferred-journal note above). Raises like the
+# build: the caller's `catch` keeps the build's own text.
+proc ::pis::hw::hwc_defer {words} {
+    if {[llength $words] == 0} {
+        error "::pis::hw::hwc_defer: no HyperView command given"
+    }
+    if {[llength [info commands hwc]] == 0} {
+        error "::pis::hw::hwc_defer: the hwc command is not available (run inside HyperView)"
+    }
+    return [hwc {*}$words]
+}
+
+# Journal one hwc command that is ALREADY proven (same comment + line as ::pis::hw::exec).
+proc ::pis::hw::hwc_journal {words} {
+    set line [::pis::hw::hwc_line $words]
+    set mod ""
+    set item ""
+    if {[info exists ::pis::hw::cur_module]} { set mod $::pis::hw::cur_module }
+    if {[info exists ::pis::hw::cur_item]} { set item $::pis::hw::cur_item }
+    set stamp [clock format [clock seconds] -format "%Y-%m-%d %H:%M:%S"]
+    ::pis::journal::add [format "%s | %s | %s" $stamp $mod $item] $line
+    return $line
+}
+
+# The `now:` half of a STEP line: the read-only state of window k's legend.
+proc ::pis::hw::legend_now_text {index} {
+    set got ""
+    if {[catch {::pis::hw::legend_now $index} got]} {
+        return [format "legend ? (%s)" [::pis::hw::clip [string trim $got] 120]]
+    }
+    set st [::pis::hw::legend_state $got]
+    if {$st eq ""} { return "legend ? (no answer from GetDisplayOptions legend)" }
+    return "legend visible $st"
+}
+
+# Step 1 of the legend path on its own: window k becomes the ACTIVE one through the PROVEN
+# ::pis::hw::select_window helper (project handle -> page -> SetActiveWindow k, ONE journaled
+# `hwi ...` line) and the STEP line is written. The module calls this once per window and then
+# imports, so `legend_visibility` is invoked with do_select 0 and the window is selected exactly
+# one time per window.
+proc ::pis::hw::legend_select {index {trace 1}} {
+    set code [catch {::pis::hw::select_window $index} res]
+    set raw [string trim $res]
+    set lit [::pis::hw::legend_select_text $index]
+    if {$code} {
+        if {$trace} {
+            ::pis::hw::note ERROR [format "STEP legend window %d select: sent %s -> ERR %s" \
+                $index $lit $raw]
+        }
+        error $raw
+    }
+    if {$trace} {
+        ::pis::hw::note INFO [format "STEP legend window %d select: sent %s -> ret=(empty) | now: %s" \
+            $index $lit [::pis::hw::legend_now_text $index]]
+    }
+    return
+}
+
+# Show or hide the legend of ONE window (T-035). Steps, in this order:
+#   1) select window k through the proven helper (ONE journaled hwi line) unless the caller already
+#      did it (`do_select` 0 - the module selects once, imports, then calls this);
+#   2) the variant list of op `legend_visibility`, each variant judged by the documented getter
+#      `GetDisplayOptions legend` (S57); the journal line is written only for the variant that
+#      passed, and a build without the getter is delivered as UNVERIFIED-GUESS with ONE INFO line;
+#   3) `Draw` on the client OF window k (PROVEN pattern 2) and ONE `::pis::hw::refresh`.
+# `trace` 1 logs one STEP line per step plus the `LEGEND ok window k shown|hidden variant n` line.
+# Returns {variant mode line unverified}; raises the build's own text when a step raises.
+proc ::pis::hw::legend_visibility {index show {do_select 1} {trace 1}} {
+    variable adapt_legend
+    variable adapt_legend_eye
+    ::pis::hw::need_exec
+    if {![string is integer -strict $index] || $index < 1} {
+        error "::pis::hw::legend_visibility: window index must be a positive integer, got: '$index'"
+    }
+    set mode [::pis::hw::legend_word $show]
+    set values [dict create %index $index %mode $mode %flag [::pis::hw::legend_flag $mode]]
+    set list [::pis::hw::variants legend_visibility]
+    set total [llength $list]
+    set start [::pis::hw::at legend_visibility]
+    if {$adapt_legend > 0 && $adapt_legend <= $total} { set start $adapt_legend }
+    if {![string is integer -strict $start] || $start < 1 || $start > $total} { set start 1 }
+    # --- step 1: window k becomes the ACTIVE one (ONE journaled hwi line) ---------------------
+    if {$do_select} {
+        ::pis::hw::legend_select $index $trace
+    }
+    # --- step 2: the visibility call, variant by variant --------------------------------------
+    set firsterr ""
+    set lasterr ""
+    set tried [list]
+    set won 0
+    set winvariant 0
+    set unverified 0
+    set line ""
+    set n $start
+    while {$n <= $total} {
+        set v [lindex $list [expr {$n - 1}]]
+        set via hwi
+        if {[dict exists $v via]} { set via [dict get $v via] }
+        set cmd [::pis::hw::fill [dict get $v cmd] $values]
+        if {$via eq "hwc"} {
+            set script $cmd
+        } else {
+            set script "[::pis::hw::window_open pis $index]\n$cmd\n[::pis::hw::window_close pis]"
+        }
+        set literal [::pis::hw::fold_script $script]
+        if {$via eq "hwc"} { set literal [::pis::hw::hwc_line $cmd] }
+        ::pis::hw::note INFO [format "legend_visibility window %d: variant %d/%d <%s> (%s)" \
+            $index $n $total $literal [dict get $v src]]
+        set code 0
+        if {$via eq "hwc"} {
+            set code [catch {::pis::hw::hwc_defer $cmd} res]
+        } else {
+            set code [catch {::pis::hw::exec_hwi $script -nojournal} res]
+        }
+        set raw [string trim $res]
+        set why ""
+        if {!$code} {
+            set got ""
+            set gcode [catch {::pis::hw::legend_now $index} got]
+            if {$gcode} {
+                set code 1
+                set why "the read-back itself failed: [string trim $got]"
+            } elseif {$got eq ""} {
+                # no documented getter on this build: the variant is delivered, marked unverified
+                set unverified 1
+            } else {
+                set gotstate [::pis::hw::legend_state $got]
+                if {$gotstate ne $mode} {
+                    set code 1
+                    set why [format \
+                        "HyperView did not change: GetDisplayOptions legend answered '%s', expected '%s'" \
+                        $got $mode]
+                }
+            }
+        }
+        if {$code && $why eq ""} { set why [string trim $raw] }
+        if {$why eq ""} { set why "the call raised no error" }
+        if {$trace} {
+            if {$code} {
+                ::pis::hw::note WARN [format \
+                    "STEP legend window %d visibility (variant %d/%d): sent %s -> ERR %s | now: %s" \
+                    $index $n $total $literal $why [::pis::hw::legend_now_text $index]]
+            } else {
+                set shown "(empty)"
+                if {$raw ne ""} { set shown $raw }
+                ::pis::hw::note INFO [format \
+                    "STEP legend window %d visibility: sent %s -> ret=%s | now: %s" \
+                    $index $literal $shown [::pis::hw::legend_now_text $index]]
+            }
+        }
+    # @@LEGEND_TAIL@@
+        if {!$code} {
+            if {$via eq "hwc"} {
+                catch {set line [::pis::hw::hwc_journal $cmd]}
+            } else {
+                catch {set line [::pis::hw::journal_run $script]}
+            }
+            set adapt_legend $n
+            ::pis::hw::record [::pis::hw::used_key legend_visibility $values] $n
+            set word shown
+            if {$mode eq "hide"} { set word hidden }
+            ::pis::hw::note OK [format "LEGEND ok window %d %s variant %d/%d" \
+                $index $word $n $total]
+            set won 1
+            set winvariant $n
+            break
+        }
+        lappend tried [format "%d/%d failed" $n $total]
+        set lasterr $why
+        if {$firsterr eq ""} { set firsterr $why }
+        if {$n < $total} {
+            ::pis::hw::note WARN [format \
+                "legend_visibility window %d: variant %d/%d failed (%s); trying the next one" \
+                $index $n $total $why]
+        } else {
+            ::pis::hw::note WARN [format \
+                "legend_visibility window %d: variant %d/%d failed (%s); that was the last variant" \
+                $index $n $total $why]
+        }
+        incr n
+    }
+    if {!$won} {
+        ::pis::hw::record [::pis::hw::used_key legend_visibility $values] 0
+        ::pis::hw::status [format "Error: legend window %d - no variant worked (%d/%d)" \
+            $index $total $total]
+        set detail $firsterr
+        if {$detail eq ""} { set detail $lasterr }
+        if {[llength $tried] > 1} {
+            append detail [format " (tried %s)" [join $tried {, }]]
+        }
+        error [format \
+            "legend_visibility window %d variant %d/%d failed: %s | pick another variant with: ::pis::hw::use legend_visibility <n>" \
+            $index $total $total $detail]
+    }
+    if {$unverified && !$adapt_legend_eye} {
+        set adapt_legend_eye 1
+        ::pis::hw::note INFO [format \
+            "legend visibility: no documented getter, window %d must be checked by eye" $index]
+    }
+    # --- step 3: repaint window k (PROVEN pattern 2), then let Tk paint ----------------------
+    # NOT journaled: the journal's own `hwc show legends` / `hwc hide legends` is the state change,
+    # and a replay repaints by itself. Same rule as the select step of a capture.
+    set dscript "[::pis::hw::window_open pis $index]\npisC Draw\n[::pis::hw::window_close pis]"
+    set dcode [catch {::pis::hw::exec_hwi $dscript -nojournal} dres]
+    set draw [string trim $dres]
+    if {$dcode} {
+        if {$trace} {
+            ::pis::hw::note ERROR [format "STEP legend window %d draw: sent %s -> ERR %s" \
+                $index [::pis::hw::fold_script $dscript] $draw]
+        }
+        error $draw
+    }
+    if {$trace} {
+        set shown "(empty)"
+        if {$draw ne ""} { set shown $draw }
+        ::pis::hw::note INFO [format "STEP legend window %d draw: sent %s -> ret=%s | now: %s" \
+            $index [::pis::hw::fold_script $dscript] $shown [::pis::hw::legend_now_text $index]]
+    }
+    ::pis::hw::refresh
+    return [dict create variant $winvariant mode $mode line $line unverified $unverified]
 }
 
 # The view of ONE window (T-032; receiver discovery in T-033). The ONE place

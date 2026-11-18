@@ -1,28 +1,47 @@
 # src/01_scripts/_tcl_pis_02_load_legend.tcl
-# ::pis::legend - the "Load Legend" module (task T-007, PARTIAL: the seam is not verified
-# inside HyperView yet, the T-002 spike / SPEC Q3 is still open).
+# ::pis::legend - the "Load Legend" module (task T-007; T-035 after the owner's `fail`, F16 + F17).
 # Tcl/Tk 8.5 compatible, no tcllib, no network, no package require.
 # Sourcing this file defines procs only: it never calls HyperView.
 #
-# The ONE seam: ::pis::legend::apply_to_window {index path}
-#   - the only place that selects a window, the only place that calls hwc
-#     (through ::pis::hw::exec, so every import lands in the journal);
-#   - marked ASSUMPTION-Q3/U2: "import acts on the ACTIVE window; window k is selected
-#     with <page> SetActiveWindow k". Change that one proc when the spike answers arrive.
+# WHAT THE OWNER MEASURED (2026-11-18):
+#   F16 - Apply all always ended with `Object named: pis_legend_client_... (of type poIPost) could
+#         not find requested method: GetPageHandle ...`. The module used to reach the page through a
+#         CLIENT handle; in the proven chain the PROJECT handle is the one that answers
+#         `GetPageHandle` (docs/refs/HV_API.md sec.1, S14). That call is GONE: every window is
+#         selected through ::pis::hw::select_window (project handle -> page -> SetActiveWindow k),
+#         the same helper Load result and Capture use.
+#   F17 - `on` is the Display Control > Legend toggle: ticked + [Apply all layout] SHOWS the legend
+#         in every window, unticked HIDES it in every window. Unticked is an action, not a skip.
+#
+# The order per window k (docs/SPEC.md "Load Legend"):
+#   1) select window k            - ::pis::hw::select_window (ONE journaled hwi line, S5)
+#   2) `on` ticked + a file       - ::pis::hw::import_legend (the PROVEN hwc form, T-021 rules)
+#   3) show or hide               - ::pis::hw::legend_visibility (V1 PROVEN hwc show/hide legends,
+#                                   V2 DOC poIPost SetDisplayOptions legend, read back with
+#                                   GetDisplayOptions legend S57)
+# A failing window stops the run unless [log] continue_on_error is set.
 #
 # Public procs:
-#   ::pis::legend::run {root cfg scope}      -> imported window count (0 = skipped)
-#   ::pis::legend::apply_to_window {index path} -> the seam (-1 = leave the active window)
-#   ::pis::legend::targets {cfg scope}       -> list of window indexes to import into
-#   ::pis::legend::selected_item {cfg}       -> [legend] item<selected>, "" when none
-#   ::pis::legend::reset_state {}            -> counters back to 0 (tests)
-# Namespace variables: applied (last run), calls, last_window, last_path, clicks
+#   ::pis::legend::run {root cfg scope}                 -> number of windows shown/hidden
+#   ::pis::legend::apply_to_window {index path on trace} -> one window (the ONE seam)
+#   ::pis::legend::targets {cfg scope}                  -> window indexes to act on
+#   ::pis::legend::selected_item {cfg}                  -> [legend] item<selected>, "" when none
+#   ::pis::legend::trace_on {cfg}                       -> 1 when [debug] legend_trace (default 1)
+#   ::pis::legend::handle_name {tag}                    -> unique name of the ONE handle this
+#                                                          module may create (import fallback)
+#   ::pis::legend::reset_state {}                       -> counters back to 0 (tests)
+# Namespace variables: applied, shown, hidden, failed, calls, last_window, last_path,
+#                      last_variant, clicks
 
 namespace eval ::pis::legend {
     if {![info exists applied]} { set applied 0 }
+    if {![info exists shown]} { set shown 0 }
+    if {![info exists hidden]} { set hidden 0 }
+    if {![info exists failed]} { set failed 0 }
     if {![info exists calls]} { set calls 0 }
     if {![info exists last_window]} { set last_window "" }
     if {![info exists last_path]} { set last_path "" }
+    if {![info exists last_variant]} { set last_variant 0 }
     if {![info exists clicks]} { set clicks 0 }
 }
 
@@ -42,73 +61,88 @@ proc ::pis::legend::need_common {} {
     return
 }
 
-# Every HyperView handle gets a unique name, so a stale handle from an earlier run can
-# never be reused by accident (SPEC_load_legend HARD CONSTRAINTS).
+# Every HyperView call of this module goes through the adapter (SPEC.md D2). Without it a run must
+# stop HERE, naming the missing file, instead of failing halfway through window 1.
+proc ::pis::legend::need_hw {} {
+    foreach p {select_window import_legend legend_visibility active_window begin_legend} {
+        if {[llength [info commands ::pis::hw::$p]] == 0} {
+            error "::pis::legend: source _tcl_pis_11_hw_adapter.tcl first (missing ::pis::hw::$p)"
+        }
+    }
+    return
+}
+
+# Unique name of the ONE handle this module may create (the legend handle of the
+# ::hwp::GetContourLegend import fallback, SPEC_load_legend FILE 3). A stale handle from an earlier
+# run can never be reused by accident (SPEC_load_legend HARD CONSTRAINTS).
 proc ::pis::legend::handle_name {tag} {
     variable clicks
     incr clicks
     return "pis_legend_${tag}_[pid]_$clicks"
 }
 
-# --- THE SEAM (ASSUMPTION-Q3/U2) --------------------------------------------
-# Window selection and the hwc import live HERE and nowhere else.
-#
-# ASSUMPTION-Q3/U2 (SPEC Q3 open, T-002 spike not answered):
-#   * `hwc result scalar legend import` acts on the window that is ACTIVE.
-#   * window k of a CxR layout is selected with `<page> SetActiveWindow k`
-#     (windows are numbered from 1 in row-major layout order).
-#   * `hwi OpenStack` is safe to call when the stack is already open.
-# index < 0 means "leave the active window alone" (the [Apply active] button path).
-# When the spike answers differ, this proc is the ONLY thing to change: it is the single
-# place that selects a window and the single place that calls hwc.
-proc ::pis::legend::apply_to_window {index path} {
+
+# --- THE SEAM: ONE window (T-035) ----------------------------------------------------------
+# The only place of this module that changes a window, in the order docs/SPEC.md fixes:
+#   select window k -> (on + a file) import -> show | hide.
+# Nothing here walks the page: that walk is ::pis::hw::select_window, which uses the PROJECT handle
+# for `GetPageHandle` (F16: a poIPost handle refuses that method).
+# `on` follows F17: 1 = show (import first), 0 = hide. `trace` is the adapter's step trace.
+# Returns the adapter's answer dict ({variant mode line unverified}).
+proc ::pis::legend::apply_to_window {index path on trace} {
     variable calls
     variable last_window
     variable last_path
-    if {[string trim $path] eq ""} {
-        error "::pis::legend::apply_to_window: empty legend path"
+    variable last_variant
+    variable shown
+    variable hidden
+    if {![string is integer -strict $index] || $index < 1} {
+        error "::pis::legend::apply_to_window: window index must be a positive integer, got: $index"
     }
-    if {![string is integer -strict $index]} {
-        error "::pis::legend::apply_to_window: window index must be an integer, got: $index"
-    }
-    if {[llength [info commands hwi]] == 0} {
-        error "::pis::legend::apply_to_window: the hwi command is not available (run inside HyperView)"
-    }
-    set client [::pis::legend::handle_name client]
-    set page [::pis::legend::handle_name page]
-    set stack 0
-    set code [catch {
-        hwi OpenStack
-        set stack 1
-        hwi GetActiveClientHandle $client
-        $client GetPageHandle $page
-        if {$index >= 0} {
-            $page SetActiveWindow $index
-        }
-        ::pis::hw::context [::pis::legend::title] [file tail $path]
-        ::pis::hw::exec result scalar legend import $path
-        $client Draw
-        if {[llength [info commands update]] > 0} {
-            update idletasks
-        }
-    } res opts]
-    # HARD CONSTRAINT: release every handle and the stack on the error path too. A failing
-    # release never hides the original error (it is kept in $opts).
-    foreach h [list $page $client] {
-        if {[llength [info commands $h]] > 0} {
-            catch {$h ReleaseHandle}
+    set mode show
+    if {![::pis::common::to_bool $on "legend on"]} { set mode hide }
+    set p ""
+    if {$mode eq "show"} {
+        # An EMPTY path is legal under F17: showing needs no file (nothing is imported).
+        set p [string trim $path]
+        # Refused BEFORE any HyperView call: a missing file must leave the journal untouched.
+        if {$p ne "" && ![file isfile $p]} {
+            error "Legend file not found: $p"
         }
     }
-    if {$stack} {
-        catch {hwi CloseStack}
+    # The journal comment of every line this window writes (module + the file's own name).
+    if {$p eq ""} {
+        ::pis::hw::context [::pis::legend::title] $mode
+    } else {
+        ::pis::hw::context [::pis::legend::title] [file tail $p]
     }
-    if {$code} {
-        return -options $opts $res
+    # 1) window k becomes the active one - ONE journaled `hwi ... SetActiveWindow k` line.
+    ::pis::hw::legend_select $index $trace
+    # 2) ticked WITH a file: import it into THAT window (PROVEN hwc form, T-021 texts unchanged).
+    if {$mode eq "show" && $p ne ""} {
+        ::pis::hw::import_legend $p
     }
+    # 3) show it, or hide it (the adapter's job; it does not select the window a second time).
+    set res [::pis::hw::legend_visibility $index $mode 0 $trace]
     incr calls
     set last_window $index
-    set last_path $path
+    set last_path $p
+    set last_variant [dict get $res variant]
+    if {$mode eq "show"} {
+        incr shown
+    } else {
+        incr hidden
+    }
     return $res
+}
+
+# Is the [debug] legend_trace step trace on? Default 1 until the owner writes `accepted`; an ini
+# value of 0 turns it off and the JOURNAL text stays identical either way (docs/SPEC.md).
+proc ::pis::legend::trace_on {cfg} {
+    set v 1
+    catch {set v [::pis::common::get $cfg debug legend_trace 1]}
+    if {[catch {set on [::pis::common::to_bool $v "debug legend_trace"]}]} { set on 1 }
+    return $on
 }
 
 # The radio selection of [legend]: index 1..count in the ini, "" when nothing is selected.
@@ -125,12 +159,13 @@ proc ::pis::legend::selected_item {cfg} {
     return [string trim [dict get [dict get $cfg legend] $key]]
 }
 
-# Windows a run must import into. scope "layout" = every window created by Load All
-# (1..N in layout order); anything else = the active window only (-1 = do not select).
-# The per-window numbering is the ASSUMPTION-Q3/U2 above: index 1 is the first window.
+# Windows a run must act on (T-035). scope "layout" = every window created by Load All (1..N in
+# layout order, F1/Q1); anything else = the ACTIVE window only - asked with the documented
+# `hwIPage GetActiveWindow` (S33, read-only, never journaled), so the module button touches one
+# window and the log names which one (docs/refs/SPEC_gui.txt s.5, quoted in docs/SPEC.md).
 proc ::pis::legend::targets {cfg scope} {
     if {$scope ne "layout"} {
-        return [list -1]
+        return [list [::pis::hw::active_window]]
     }
     set loaded 0
     if {[info exists ::pis::step01::loaded]} {
@@ -155,58 +190,95 @@ proc ::pis::legend::targets {cfg scope} {
     return $out
 }
 
-# Run the module once. SPEC_gui s.6.2 order: "on" first (unchecked = skip everything), then
-# the selected legend file, then one import per targeted window. Any failure raises, so the
-# GUI shows one ERROR and the journal keeps only the commands that really ran.
+# Run the module once. F17 order: read `on` first (it is the DISPLAY toggle now, not a skip), then
+# the selected legend file - a missing one is refused before any HyperView call - then one window at
+# a time: select -> import (ticked only) -> show | hide. A failing window stops the run unless
+# [log] continue_on_error is set (docs/refs/SPEC_gui.txt s.7). The final line always says how many
+# of how many windows were done.
 proc ::pis::legend::run {root cfg scope} {
     variable applied
+    variable shown
+    variable hidden
+    variable failed
     ::pis::legend::need_common
+    ::pis::legend::need_hw
     if {$scope ne "layout" && $scope ne "active"} {
         error "::pis::legend::run: unknown scope '$scope' (expected active or layout)"
     }
+    set applied 0
+    set shown 0
+    set hidden 0
+    set failed 0
+    # A new run forgets which methods this build lacks (T-027) and re-arms the adapter's own
+    # one-per-run legend notes (T-035).
+    catch {::pis::hw::absent_reset}
+    catch {::pis::hw::begin_legend}
     set on [::pis::common::to_bool [::pis::common::get $cfg legend on 0] "legend on"]
-    if {!$on} {
-        set applied 0
-        ::pis::common::log $cfg INFO "module [::pis::legend::title]: on is unchecked, nothing run"
-        return 0
-    }
-    set item [::pis::legend::selected_item $cfg]
-    if {$item eq ""} {
-        set applied 0
-        ::pis::common::log $cfg WARN "module [::pis::legend::title]: no item selected, nothing run"
-        return 0
-    }
-    set path [::pis::common::resolve_path $root $item]
-    if {![file isfile $path]} {
-        error "Legend file not found: $path"
-    }
-    set windows [::pis::legend::targets $cfg $scope]
-    set n 0
-    foreach index $windows {
-        ::pis::legend::apply_to_window $index $path
-        incr n
-        if {$index >= 0} {
-            ::pis::common::log $cfg INFO "[::pis::legend::title]: window $index <- $path"
+    set path ""
+    if {$on} {
+        set item [::pis::legend::selected_item $cfg]
+        if {$item eq ""} {
+            # F17: the checkbox is an ACTION - showing a legend needs no file. ONE INFO says why
+            # nothing was imported, so an empty row is still not a silent no-op.
+            ::pis::common::log $cfg INFO \
+                "module [::pis::legend::title]: no legend file selected, showing the legend only"
         } else {
-            ::pis::common::log $cfg INFO "[::pis::legend::title]: active window <- $path"
+            set path [::pis::common::resolve_path $root $item]
+            if {![file isfile $path]} {
+                error "Legend file not found: $path"
+            }
         }
     }
+    set windows [::pis::legend::targets $cfg $scope]
+    set total [llength $windows]
+    set trace [::pis::legend::trace_on $cfg]
+    set cont 0
+    catch {set cont [::pis::common::to_bool \
+        [::pis::common::get $cfg log continue_on_error 0] "log continue_on_error"]}
+    set n 0
+    foreach index $windows {
+        set code [catch {::pis::legend::apply_to_window $index $path $on $trace} res]
+        if {$code} {
+            if {!$cont} {
+                error [string trim $res]
+            }
+            ::pis::common::log $cfg ERROR "[::pis::legend::title]: [string trim $res]"
+            incr failed
+            continue
+        }
+        incr n
+    }
     set applied $n
-    ::pis::common::log $cfg OK "[::pis::legend::title]: $n window(s) <- $path"
+    set word shown
+    if {!$on} { set word hidden }
+    set tail ""
+    if {$failed > 0} { set tail [format ", %d failed" $failed] }
+    set lvl OK
+    if {$failed > 0} { set lvl WARN }
+    ::pis::common::log $cfg $lvl [format "%s: %d of %d window(s) %s%s" \
+        [::pis::legend::title] $n $total $word $tail]
     return $n
 }
 
 # Counters back to zero; used by tests/tcl/test_legend.tcl between cases.
 proc ::pis::legend::reset_state {} {
     variable applied
+    variable shown
+    variable hidden
+    variable failed
     variable calls
     variable last_window
     variable last_path
+    variable last_variant
     variable clicks
     set applied 0
+    set shown 0
+    set hidden 0
+    set failed 0
     set calls 0
     set last_window ""
     set last_path ""
+    set last_variant 0
     set clicks 0
     return
 }

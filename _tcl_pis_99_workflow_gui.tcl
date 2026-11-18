@@ -542,7 +542,9 @@ proc ::pis::gui::run_result {scope} {
     return $res
 }
 
-# --- Load Legend wiring (task T-007, partial: seam unverified) --------------
+# --- Load Legend wiring (task T-007; T-035 after the owner's `fail`, F16 + F17) -----
+# The "on" checkbutton is the Display Control > Legend toggle (F17): ticked = show in every
+# window, unticked = hide in every window. It is never a skip any more.
 # The "on" checkbutton state; widgets absent (offline tests) = on.
 proc ::pis::gui::legend_on {} {
     if {[info exists ::pis::gui::on_legend]} {
@@ -593,14 +595,19 @@ proc ::pis::gui::run_legend {scope} {
         return 0
     }
     if {$res == 0} {
-        # on unchecked or nothing selected: ::pis::legend::run already logged INFO/WARN.
-        ::pis::gui::set_status "Idle"
+        # Every window failed with [log] continue_on_error on: the log carries the reasons, and
+        # "Idle" would pretend nothing was attempted.
+        ::pis::gui::set_status "Load Legend: nothing changed (see the log)" red
         return 0
     }
+    # F17: the status says WHICH way the toggle went, because "imported" is no longer the whole
+    # story (unticked hides the legend and imports nothing).
+    set word shown
+    if {![::pis::gui::legend_on]} { set word hidden }
     if {$scope eq "layout"} {
-        set msg "Load Legend: $res window(s) imported."
+        set msg "Load Legend: $res window(s) $word."
     } else {
-        set msg "Load Legend: active window imported."
+        set msg "Load Legend: the active window's legend is $word."
     }
     ::pis::gui::set_status $msg darkgreen
     return $res
