@@ -33,7 +33,13 @@
 #       characters of the FIRST variant's line plus " (see log)".
 #
 # VARIANT TABLE (production). Each variant is the same read-back and the same verdict; they differ
-# only in ORDER and in the boolean literal of SetDimensionEnabled's `state`:
+# only in ORDER, in the boolean literal of SetDimensionEnabled's `state`, and in whether they send the
+# dimension enable at all:
+#   0  type-first,   state true   NO dimension enable, `SetEnableState true` after the type (T-031).
+#                                 PROVEN: the owner's own working macro (docs/refs/HV_OWNER_contour_hits.txt,
+#                                 source lines 44 + 55-60) - it never calls SetDimensionEnabled, which is
+#                                 the one call this module adds and the one read-back that never moves on
+#                                 that build. Tried FIRST because it is the form recorded in use.
 #   1  type-first,   state true   order UNVERIFIED-GUESS (the doc prints none), form DOC
 #                                 (S35: "True if enabled, false if not")
 #   2  enable-first, state true   order UNVERIFIED-GUESS (the T-026 order), form DOC
@@ -78,6 +84,30 @@
 #       answered, and an OWNER CHECK line that says what to look at on screen. `snap`/`snaps_text`/
 #       `diff` write the same evidence on demand from the console. The log PANE no longer clips a
 #       long line: it wraps it (-wrap char), and the message itself is never cut.
+#
+# T-031 (owner's `T-008: fail 6`: six variants, every one NOCHANGE, the log showed one `sent:` line
+# per variant with no per-step return, and `GetDimensionEnabled` -- OUR criterion -- never reads
+# true). Four changes, and none of them is a guess:
+#   (a) LITERAL TEXT: every `sent:` / `TRACE` / `STEP` text is the command as it sits in the script
+#       that is executed, quoting included (`pisCt SetDataType {1. Endure_SF_A}`). Nothing in this
+#       file (or in the adapter or the GUI) rewrites `[ ]`/`{ }`/`( )`. `::pis::hw::quote` keeps a
+#       name with blanks or dots ONE word; the module never builds one with square brackets.
+#   (b) STEP TRACE: with [debug] result_trace = 1 (default 1 until the owner writes `accepted`)
+#       every setter of a variant is its OWN hwi script and leaves ONE `STEP ...` line with the
+#       literal command, the build's own return (`ret=`) or its full error, and the read-only state
+#       after it. Non-trace mode keeps one script per window and one journal line, with identical
+#       journal text.
+#   (c) THREE-STATE VERDICT: APPLIED (as before), APPLIED-UNCONFIRMED (type + display option on +
+#       subcase + nothing raised + no dimension reads true) and FAILED. GetDimensionEnabled is
+#       UNVERIFIED as display evidence on this build, so it can no longer make a window failed on
+#       its own (SPEC.md, "Verdict, step trace and literal sent text (T-031)").
+#   (d) V0: the owner's proven macro (docs/refs/HV_OWNER_contour_hits.txt, source lines 34-96)
+#       differs from what this module sends - it never calls SetDimensionEnabled and it uses the
+#       active window instead of selecting one - so its decision-relevant calls are variant 0,
+#       FIRST in the list: `SetDataType` (S28) -> `SetEnableState true` (S53) -> `Draw`. The calls
+#       whose argument is only valid for that macro's own data type are not copied (SetDataComponent
+#       Mises, SetAverageMode simple, SetAvgAcrossPartsEnable enable); the comparison table is in
+#       docs/TASKLOG.md (T-031).
 
 # The plan only enables the dimensions that do NOT already read true (S36), so an enabled
 # dimension is never touched; the doc prints no way to ask "does this model contain solids", so the
@@ -106,9 +136,19 @@
 #   ::pis::result::dump_dict {index}                -> {name value} pairs (T-029 STATE DUMP)
 #   ::pis::result::dump_window {cfg index}          -> ONE "STATE DUMP window k" log block
 #   ::pis::result::read_state {index}               -> dict of the read-backs, raises if none
-#   ::pis::result::verdict {st label}               -> {1 ""} when the window shows it, else {0 why}
+#   ::pis::result::verdict {st label}               -> {1 ""} when APPLIED, else {0 why}
+#   ::pis::result::verdict3 {st label {raised}}     -> {APPLIED|UNCONFIRMED|FAILED why} (T-031)
 #   ::pis::result::build_script {index plan variant} -> one hwi script: the variant's own order
+#   ::pis::result::step_list {plan variant}         -> {step name -> literal command} pairs (T-031)
+#   ::pis::result::step_script {index command}      -> one hwi script whose LAST line is the return
 #   ::pis::result::plan {st label}                  -> what one window's script needs (label/enable/sub)
+#   ::pis::result::display_options {}               -> every display option name S56 prints (T-031)
+#   ::pis::result::opts_text {st}                   -> "tracing=..,contour=..,..." (T-031)
+#   ::pis::result::ident_text {win st}              -> the IDENT line (T-031)
+#   ::pis::result::legend_line {index}              -> the LEGEND line, read-only (T-031)
+#   ::pis::result::snap_values {st}                 -> the wider values `snap`/`diff` keep (T-031)
+#   ::pis::result::trace_on {cfg}                   -> 1 when [debug] result_trace (default 1)
+#   ::pis::result::try_all_on {cfg trace}           -> 1 when V2..Vn still run
 #   ::pis::result::variants {}                      -> the variant numbers, documented forms first
 #   ::pis::result::variant_info {v}                 -> order/state + the src class of each part
 #   ::pis::result::variant_name {v}                 -> "type-first, true" (report text)
@@ -143,6 +183,12 @@ namespace eval ::pis::result {
     # ::pis::result::snap {tag -> dict of window -> {values dump}}.
     if {![info exists owner]} { set owner "" }
     if {![info exists snaps]} { set snaps [dict create] }
+    # T-031: how many windows of the last run ended APPLIED-UNCONFIRMED (the GUI turns this into the
+    # amber status text), and whether the ONE `NOTE type already ...` line of the run was written.
+    if {![info exists unconfirmed]} { set unconfirmed 0 }
+    if {![info exists noted]} { set noted 0 }
+    # T-031: the answer of the legend probe (::hwp::GetContourLegend), used by legend_line only.
+    if {![info exists legend]} { set legend "" }
 }
 
 # The module title exactly as the GUI shows it: it goes into the journal comment and the
@@ -248,7 +294,15 @@ set pisRComp ""
 catch {set pisRComp [pisCt GetDataComponent shell]}
 set pisRDisp ""
 catch {set pisRDisp [pisC GetDisplayOptions contour]}
-set ::pis::result::answer [list $pisRIdx $pisRDt $pisRDims $pisRCur $pisRN $pisRComp $pisRSubs $pisRLabels $pisRDisp]}
+set pisROpts ""
+foreach pisRO {tracing tracking contour isovalue tensor vector legend {section cut} measure notes axisymmetry perspective} { set pisRV ""; catch {set pisRV [pisC GetDisplayOptions $pisRO]}; lappend pisROpts [list $pisRO $pisRV] }
+set pisREn ""
+catch {set pisREn [pisCt GetEnableState]}
+set pisRModels ""
+catch {set pisRModels [pisC GetModelList]}
+set pisRAct ""
+catch {set pisRAct [pisC GetActiveModel]}
+set ::pis::result::answer [list $pisRIdx $pisRDt $pisRDims $pisRCur $pisRN $pisRComp $pisRSubs $pisRLabels $pisRDisp $pisROpts $pisREn $pisRModels $pisRAct]}
     return [::pis::result::script $index $tail 0]
 }
 
@@ -267,10 +321,11 @@ proc ::pis::result::read_state {index} {
     if {[llength $got] < 8} {
         error "the result read-back answered nothing ('$got')"
     }
-    lassign $got win dtype dims cur n comp subs labels disp
+    lassign $got win dtype dims cur n comp subs labels disp opts en models added
     set readback $dtype
     return [dict create win $win type $dtype dims $dims subcase $cur nsub $n \
-        component $comp subs $subs labels $labels display $disp]
+        component $comp subs $subs labels $labels display $disp \
+        opts $opts enable $en models $models added $added]
 }
 
 # The file's own spelling of the typed name, or "" when the file does not hold it. An exact
@@ -422,6 +477,162 @@ proc ::pis::result::trace_values {st} {
     return "$base display=$disp"
 }
 
+# T-031 item 5: every display option name poIPost S56 prints, verbatim (S57 spells the isovalue
+# option "iso value"; the S56 spelling is the one sent - if a build answers nothing for it the value
+# is "?", never a fake off). ONE argument each - "section cut" holds a blank and is passed as one
+# word by the foreach in the probe, never by brackets.
+proc ::pis::result::display_options {} {
+    return {tracing tracking contour isovalue tensor vector legend {section cut} measure notes axisymmetry perspective}
+}
+
+# The option answers of one read-back as "name=value,..." with "?" for a getter that answered
+# nothing (never a fake off/0). Used by the STATE DUMP line, `snap` and `diff`; the BEFORE/LATE
+# lines keep the short `display=` form so their documented text stays readable.
+proc ::pis::result::opts_text {st} {
+    set out [list]
+    if {[dict exists $st opts]} {
+        foreach pair [dict get $st opts] {
+            set name [lindex $pair 0]
+            set v [string trim [lindex $pair 1]]
+            if {$v eq ""} { set v "?" }
+            lappend out "$name=$v"
+        }
+    }
+    if {[llength $out] == 0} { return "?" }
+    return [join $out ","]
+}
+
+# T-031: the values `snap`/`diff` keep - the trace values plus every display option, GetEnableState
+# (S54) and the client identity. Read-only, one line per window.
+proc ::pis::result::snap_values {st} {
+    set out [::pis::result::trace_values $st]
+    append out " displayopts=[::pis::result::opts_text $st]"
+    set en "?"
+    if {[dict exists $st enable] && [string trim [dict get $st enable]] ne ""} {
+        set en [string trim [dict get $st enable]]
+    }
+    append out " enablestate=$en"
+    set models "?"
+    if {[dict exists $st models] && [string trim [dict get $st models]] ne ""} {
+        set models [string trim [dict get $st models]]
+    }
+    set added "?"
+    if {[dict exists $st added] && [string trim [dict get $st added]] ne ""} {
+        set added [string trim [dict get $st added]]
+    }
+    append out " models=$models added=$added"
+    return $out
+}
+
+# T-031 item 2: the `now:` part of a STEP line - the read-only state after one setter, in the
+# format SPEC.md prints: type, the three dimension flags, the contour display option, the subcase
+# and the GetEnableState answer (S54, the read-back of SetEnableState). A getter that did not
+# answer prints "?", never a fake off/0.
+proc ::pis::result::step_now_text {st} {
+    set disp "?"
+    if {[dict exists $st display] && [string trim [dict get $st display]] ne ""} {
+        set disp [string trim [dict get $st display]]
+    }
+    set en "?"
+    if {[dict exists $st enable] && [string trim [dict get $st enable]] ne ""} {
+        set en [string trim [dict get $st enable]]
+    }
+    set out [list]
+    set dims [dict get $st dims]
+    set i 0
+    foreach d [::pis::result::dims] {
+        set v [string trim [lindex $dims $i]]
+        incr i
+        if {$v eq ""} { set v "?" }
+        lappend out "$d=$v"
+    }
+    set type [string trim [dict get $st type]]
+    if {$type eq ""} { set type "?" }
+    set sub [string trim [dict get $st subcase]]
+    if {$sub eq ""} { set sub "?" }
+    return [format "type=%s dims=%s display=%s subcase=%s enablestate=%s" \
+        $type [join $out ","] $disp $sub $en]
+}
+
+# T-031: did ANY contour dimension read true in this state? Used to prove the middle verdict really
+# saw "false before AND false after" - a dimension that was on before the apply and off after it is
+# a FAILED apply, never an unconfirmed display.
+proc ::pis::result::any_dim_true {st} {
+    set dims [dict get $st dims]
+    set i 0
+    foreach d [::pis::result::dims] {
+        set v [lindex $dims $i]
+        incr i
+        if {[::pis::result::is_true $v]} { return 1 }
+    }
+    return 0
+}
+
+# answers for the window's client; `added` is the id the window is ACTIVE on (GetActiveModel), which
+# is the model Load All attached - Load All does not keep AddModel's own return value, so this line
+# never calls it that.
+proc ::pis::result::ident_text {win st} {
+    set models "?"
+    if {[dict exists $st models] && [string trim [dict get $st models]] ne ""} {
+        set models [string trim [dict get $st models]]
+    }
+    set added "?"
+    if {[dict exists $st added] && [string trim [dict get $st added]] ne ""} {
+        set added [string trim [dict get $st added]]
+    }
+    return [format "IDENT window %s: client=pisC models=%s added=%s" $win $models $added]
+}
+
+# T-031 item 5: the legend probe. ONE read-only script for window <index> that selects the window
+# first (the probe needs the active window; selecting is not a contour setter), asks the PROVEN
+# legend getter (S02:43-56, `::hwp::GetContourLegend`) only when the command exists, releases a
+# returned handle immediately (S02:57 - a legend handle may be ReleaseHandle'd, nothing else) and
+# answers one of: handle=<h> | empty | absent | ERR <text>. Its meaning is UNVERIFIED, so it never
+# enters the verdict and never writes a journal line.
+proc ::pis::result::legend_script {index} {
+    set tail {set pisRLeg "empty"
+if {[llength [info commands ::hwp::GetContourLegend]] == 0} { set pisRLeg "absent" } else { set pisRH ""; if {[catch {set pisRH [::hwp::GetContourLegend]} pisRErr]} { set pisRLeg "ERR $pisRErr" } elseif {$pisRH ne ""} { catch {$pisRH ReleaseHandle}; set pisRLeg "handle=$pisRH" } }
+set ::pis::result::legend $pisRLeg}
+    return [::pis::result::script $index $tail 1]
+}
+
+# The one line the legend probe leaves: `LEGEND window k: handle=..|empty|absent|ERR ..`.
+proc ::pis::result::legend_line {index win} {
+    variable legend
+    set legend ""
+    set text ""
+    if {[catch {::pis::hw::probe [::pis::result::legend_script $index]} why]} {
+        set text "ERR [string trim $why]"
+    } else {
+        set text [string trim $legend]
+        if {$text eq ""} { set text "empty" }
+    }
+    return [format "LEGEND window %s: %s" $win $text]
+}
+
+# T-031 item 2: is the step trace on? Default 1 until the owner writes `accepted`; an ini value of
+# 0 restores the old one-script-per-window behaviour. A broken value is 1 (the evidence matters
+# more than the preference), never an error in the middle of a run.
+proc ::pis::result::trace_on {cfg} {
+    set v 1
+    catch {set v [::pis::common::get $cfg debug result_trace 1]}
+    set on 1
+    if {[catch {set on [::pis::common::to_bool $v "debug result_trace"]}]} { set on 1 }
+    return $on
+}
+
+# T-031 item 3: after the first APPLIED-UNCONFIRMED, do V2..Vn still run? Default = the trace value
+# (so the evidence keeps coming while result_trace is on), an explicit [debug] result_try_all wins.
+proc ::pis::result::try_all_on {cfg trace} {
+    set on $trace
+    set v ""
+    catch {set v [::pis::common::get $cfg debug result_try_all ""]}
+    if {[string trim $v] ne ""} {
+        if {[catch {set on [::pis::common::to_bool $v "debug result_try_all"]}]} { set on $trace }
+    }
+    return $on
+}
+
 # The ONE line a passing window leaves in the log (SPEC.md A10, T-026):
 #   result window 1: type=Stress enabled=line=true,shell=true,solid=true subcase=1 component=?
 proc ::pis::result::line_text {win st} {
@@ -491,8 +702,23 @@ proc ::pis::result::trace_text {tag win text} {
 # it reads after the variant is identical to the values read before it. That is a different defect
 # from "the read-back contradicts the request", and the log must say which one happened.
 proc ::pis::result::nochange_text {win v n st} {
-    return [format "NOCHANGE window %s variant %s/%s: every value is identical to BEFORE (%s) - the build accepted the commands and ignored them" \
+    return [format "NOCHANGE window %s v%s/%s: every read value equals the state before this variant (%s) - the setter returned without error but the getters did not move" \
         $win $v $n [::pis::result::trace_values $st]]
+}
+
+# T-031 item 3: a variant DID move a value but did not reach APPLIED (and did not raise). Printed at
+# INFO, so the reader can tell it apart from NOCHANGE without reading the values.
+proc ::pis::result::changed_text {win v n st} {
+    return [format "CHANGED window %s v%s/%s: the read values differ from the state before this variant (%s) - the display is still not confirmed" \
+        $win $v $n [::pis::result::trace_values $st]]
+}
+
+# T-031 item 3: the middle verdict. NOT an error: the type and the display option are on, nothing
+# raised, and no dimension flag moved - which is what a nodal result may look like on this build.
+# The ONE thing that can settle it is a human eye (the run then continues with the next window).
+proc ::pis::result::unconfirmed_text {win name v n st} {
+    return [format "result window %s: '%s' applied but the display is NOT confirmed (dimension flags stay false; nodal results may never set them) - look at window %s | variant %s/%s | %s" \
+        $win $name $win $v $n [::pis::result::trace_values $st]]
 }
 
 # T-030: the false-negative guard. A window can DISPLAY the result while every getter still answers
@@ -539,7 +765,7 @@ proc ::pis::result::guard_text {win name st why} {
 # defects (the getters lie / the apply is wrong) need different next steps and only a human eye can
 # tell them apart.
 proc ::pis::result::owner_line {win name} {
-    return [format "OWNER CHECK window %s: look at that window now - is the '%s' contour VISIBLE? visible = the read-backs are wrong, not the apply (send this log + src/02_working/t008_check.txt); not visible = the apply is wrong (send the same two files)" \
+    return [format "OWNER CHECK window %s: look at that window now - is the '%s' contour VISIBLE? visible = the read-backs are wrong, not the apply; not visible = the apply is wrong. Quote this line and the STEP lines above (GUI + log only, no file is needed)" \
         $win $name]
 }
 # The STATUS BAR version of a report line: the first <n> characters plus " (see log)", the same two
@@ -563,24 +789,14 @@ proc ::pis::result::head_cut {text {n 70}} {
 #     answer a value that is not true WHEN THE BUILD ANSWERS IT AT ALL - a window whose display
 #     option is off shows nothing whatever GetDataType says, and a build that does not answer S57
 #     stays a NOTE (an empty value), never a pass and never a failure.
-proc ::pis::result::verdict {st label} {
+proc ::pis::result::verdict3 {st label {raised 0}} {
+    if {$raised} {
+        return [list FAILED "a step raised or returned an error"]
+    }
     set why [list]
     set got [string trim [dict get $st type]]
     if {$got ne $label} {
         lappend why "GetDataType (S29) answered '$got', not '$label'"
-    }
-    set known 0
-    set on 0
-    set dims [dict get $st dims]
-    set i 0
-    foreach d [::pis::result::dims] {
-        set v [lindex $dims $i]
-        incr i
-        if {[string trim $v] ne ""} { set known 1 }
-        if {[::pis::result::is_true $v]} { set on 1 }
-    }
-    if {$known && !$on} {
-        lappend why "no contour dimension is enabled (GetDimensionEnabled, S36)"
     }
     set n [dict get $st nsub]
     if {[string is integer -strict $n] && $n > 0} {
@@ -594,17 +810,41 @@ proc ::pis::result::verdict {st label} {
     if {$disp ne "" && ![::pis::result::is_true $disp]} {
         lappend why "the contour display option of this window is off (poIPost GetDisplayOptions contour, S57) answered '$disp'"
     }
-    if {[llength $why] == 0} {
-        return [list 1 ""]
+    if {[llength $why] > 0} {
+        return [list FAILED [join $why "; "]]
     }
-    return [list 0 [join $why "; "]]
+    # Type, subcase and the window's display option are right. Is any dimension flag true?
+    # T-031: it is NOT evidence of "not displayed" when none is (SPEC.md, T-031 verdict table).
+    set on 0
+    set dims [dict get $st dims]
+    set i 0
+    foreach d [::pis::result::dims] {
+        set v [lindex $dims $i]
+        incr i
+        if {[::pis::result::is_true $v]} { set on 1 }
+    }
+    if {$on} {
+        return [list APPLIED ""]
+    }
+    return [list UNCONFIRMED "no contour dimension reads true (GetDimensionEnabled, S36): the display is not confirmed, which is not evidence that nothing is shown"]
 }
 
-# The variant list, in the order the module tries them. The order and the boolean literal of
-# S35's `state` are the ONLY two things the supplier does not pin down, so each combination is one
-# variant and the READ-BACK - never the order of this list - decides. Documented forms come first.
+# The T-026..T-030 form of the same question, kept for callers that only ask "is it APPLIED?":
+# {1 ""} or {0 why}. APPLIED-UNCONFIRMED is NOT applied.
+proc ::pis::result::verdict {st label} {
+    set v [::pis::result::verdict3 $st $label]
+    if {[lindex $v 0] eq "APPLIED"} {
+        return [list 1 ""]
+    }
+    return [list 0 [lindex $v 1]]
+}
+
+# The variant list, in the order the module tries them. V0 is first: it is the owner's own proven
+# macro (the only form recorded IN USE on this build), and it is the one form that sends no dimension
+# enable. V1..V6 follow as the documented/guessed combinations; the READ-BACK - never the order of
+# this list - decides who wins.
 proc ::pis::result::variants {} {
-    return [list 1 2 3 4 5 6]
+    return [list 0 1 2 3 4 5 6]
 }
 
 # One variant, in one dict:
@@ -638,8 +878,13 @@ proc ::pis::result::variant_info {v} {
     set guess_order {UNVERIFIED-GUESS the doc prints no order; a type change may reset state}
     set doc_display {DOC S56 "contour" + "true for on, or false for off"}
     set proven_enable {OWNER-MACRO test/test_out/TCL_StressExport.tcl lines 55-60 (SetDataType -> ... -> SetEnableState true, recorded in use on this build) + DOC S53 "True if contour data can be loaded; otherwise false"}
+    set proven_v0 {PROVEN docs/refs/HV_OWNER_contour_hits.txt source lines 55-60 (the owner's running macro sends SetDataType -> SetEnableState true and NO SetDimensionEnabled) + DOC S28/S53}
     set info ""
     switch -- $v {
+        0 { set info [dict create order type_first order_src $proven_v0 \
+                        state true state_src $doc_state dims 0 \
+                        enable_state 1 enable_state_src $proven_v0 \
+                        name "owner-macro, enable state on, no dimension flags"] }
         1 { set info [dict create order type_first order_src $guess_order \
                         state true state_src $doc_state] }
         2 { set info [dict create order enable_first order_src $guess_order \
@@ -666,12 +911,18 @@ proc ::pis::result::variant_info {v} {
         dict set info enable_state 0
         dict set info enable_state_src {none - this variant sends no enable-state line}
     }
+    if {![dict exists $info dims]} {
+        dict set info dims 1
+    }
     return $info
 }
 
 # "type-first, true" / "enable-first, 1": the short name a report line and the log use.
 proc ::pis::result::variant_name {v} {
     set info [::pis::result::variant_info $v]
+    if {[dict exists $info name]} {
+        return [dict get $info name]
+    }
     set ord [dict get $info order]
     if {$ord eq "type_first"} {
         set ord "type-first"
@@ -693,7 +944,10 @@ proc ::pis::result::variant_name {v} {
 # sent again - not in this window, not in window 2..N - and a variant that needs it is skipped
 # instead of being counted as a failed attempt (T-027 / SPEC.md A10).
 proc ::pis::result::variant_needs {v} {
-    set out [list [list poIContourCtrl SetDataType] [list poIContourCtrl SetDimensionEnabled]]
+    set out [list [list poIContourCtrl SetDataType]]
+    if {[dict get [::pis::result::variant_info $v] dims]} {
+        lappend out [list poIContourCtrl SetDimensionEnabled]
+    }
     if {[dict get [::pis::result::variant_info $v] display]} {
         lappend out [list poIPost SetDisplayOptions]
     }
@@ -726,8 +980,10 @@ proc ::pis::result::variant_lines {plan variant} {
     set state [dict get $info state]
     set types [list "pisCt SetDataType [::pis::hw::quote [dict get $plan label]]"]
     set dims [list]
-    foreach d [dict get $plan enable] {
-        lappend dims "pisCt SetDimensionEnabled $d $state"
+    if {[dict get $info dims]} {
+        foreach d [dict get $plan enable] {
+            lappend dims "pisCt SetDimensionEnabled $d $state"
+        }
     }
     set lines [list]
     if {[dict get $info order] eq "type_first"} {
@@ -758,19 +1014,63 @@ proc ::pis::result::variant_lines {plan variant} {
     return $lines
 }
 
-# What a variant SENT, as the one-line tail of a TRACE line: the handle prefix is dropped (it is the
-# same chain for every variant) and the steps are joined with " -> ", so one line reads
-#   SetDataType "Stress" -> SetEnableState true -> SetDimensionEnabled line true -> ... -> Draw
+# What a variant SENT, as the one-line tail of a TRACE line: the commands EXACTLY as they stand in
+# the script that is executed (T-031 item 1 - no handle stripping, no re-quoting), joined with
+# " -> ", so one line reads
+#   pisCt SetDataType {1. Endure_SF_A} -> pisCt SetEnableState true -> pisC Draw
 proc ::pis::result::commands_text {plan variant} {
     set out [list]
     foreach line [::pis::result::variant_lines $plan $variant] {
-        set parts [split [string trim $line]]
-        if {[llength $parts] > 1 && [regexp {^pis[A-Z]} [lindex $parts 0]]} {
-            set line [join [lrange $parts 1 end]]
-        }
-        lappend out $line
+        lappend out [string trim $line]
     }
     return [join $out " -> "]
+}
+
+# T-031 item 2: the step name of one command line - the method, plus the dimension for
+# SetDimensionEnabled and the option for SetDisplayOptions (the argument that decides what the step
+# does). Everything else keeps the bare method name; the literal command is the `sent` part.
+proc ::pis::result::step_name {line} {
+    set parts [split [string trim $line]]
+    set method [lindex $parts 1]
+    if {$method eq ""} { return [lindex $parts 0] }
+    if {$method eq "SetDimensionEnabled" || $method eq "SetDisplayOptions"} {
+        return "$method [lindex $parts 2]"
+    }
+    return $method
+}
+
+# T-031 item 2: one variant as an ordered list of {step name literal command} pairs, in the order
+# variant_lines sends them. The pair is what the STEP line prints and what is executed - ONE source.
+proc ::pis::result::step_list {plan variant} {
+    set out [list]
+    foreach line [::pis::result::variant_lines $plan $variant] {
+        lappend out [list [::pis::result::step_name $line] [string trim $line]]
+    }
+    return $out
+}
+
+# T-031 item 2: one setter as its OWN script, with the build's own return value as the LAST value.
+# The command is captured (`set pisRStep [...]`), the usual window chain closes the stack, and the
+# bare `set pisRStep` after it is what exec_hwi returns - so `ret=` is the setter's answer, never the
+# CloseStack's. The journal never holds this wrapper: only build_script (the plain commands) is
+# journaled.
+proc ::pis::result::step_script {index command {select 1}} {
+    set body ""
+    if {[string match {pisCt *} [string trim $command]]} {
+        set body "pisR GetContourCtrlHandle pisCt\n"
+    }
+    set one [::pis::result::script $index "${body}set pisRStep \[$command\]" $select]
+    return "$one\nset pisRStep"
+}
+
+# Does a setter's raw return mean success? The supplier prints "Returns 0 if successful, otherwise
+# an error code" for every setter used here, and this build may answer an empty string; anything
+# else is an error code and fails that step.
+proc ::pis::result::ret_ok {raw} {
+    set t [string trim $raw]
+    if {$t eq ""} { return 1 }
+    if {[string is integer -strict $t]} { return [expr {$t == 0}] }
+    return 0
 }
 
 # Everything one window's apply script needs, in one dict:
@@ -813,6 +1113,8 @@ proc ::pis::result::apply_to_window {cfg index name} {
     variable variant
     variable failed
     variable owner
+    variable unconfirmed
+    variable noted
     ::pis::result::need_common
     ::pis::result::need_hw
     set want [string trim $name]
@@ -845,16 +1147,34 @@ proc ::pis::result::apply_to_window {cfg index name} {
     if {$label eq ""} {
         error [format "result '%s' not found in %s" $want $shown]
     }
-    # T-030: the BEFORE trace - what the window answers before this module touches it.
+    # T-030/T-031: the BEFORE trace - what the window answers before this module touches it - then
+    # the read-only IDENTITY and LEGEND evidence and (once per run) the sentence that says whether
+    # SetDataType was provable at all. Nothing in this block changes the session.
     set before_text [::pis::result::trace_values $st]
     ::pis::common::log $cfg INFO [::pis::result::trace_text BEFORE $win $before_text]
+    set trace [::pis::result::trace_on $cfg]
+    if {$trace} {
+        ::pis::common::log $cfg INFO [::pis::result::ident_text $win $st]
+        ::pis::common::log $cfg INFO [::pis::result::legend_line $index $win]
+        if {!$noted && [string trim [dict get $st type]] eq $label} {
+            set noted 1
+            ::pis::common::log $cfg INFO [format "NOTE type already '%s' before the apply: SetDataType effect is not provable this run" $label]
+        }
+    }
     set plan [::pis::result::plan $st $label]
     set all [::pis::result::variants]
     set n [llength $all]
+    set try_all [::pis::result::try_all_on $cfg $trace]
     set fails [list]
     set first ""
-    set res ""
+    set unconf ""
     set late ""
+    # T-031: {v script state} of the FIRST variant that raised nothing, and its own WARN text - the
+    # window journals that variant and counts as processed when no variant reaches APPLIED.
+    set clean ""
+    # T-031: the state BEFORE the variant being tried (BEFORE itself for the first one), so NOCHANGE
+    # means "this variant moved nothing", not "the window differs from the run's first read".
+    set prev $st
     foreach v $all {
         # ABSENT-METHOD RULE (2nd half): a variant that needs a method this build does not have is
         # skipped - never sent, never counted as a failed attempt, in this window or any later one.
@@ -872,16 +1192,71 @@ proc ::pis::result::apply_to_window {cfg index name} {
             continue
         }
         set scr [::pis::result::build_script $index $plan $v]
-        # T-030: the TRACE line says exactly which commands this variant sends, before it sends them.
+        # T-030/T-031: the TRACE line names exactly which commands this variant sends (the literal
+        # script text), before it sends them, so a variant that dies mid-script still shows with
+        # what arguments.
         ::pis::common::log $cfg INFO [format "TRACE window %s variant %s/%s '%s' sent: %s" \
             $win $v $n [::pis::result::variant_name $v] [::pis::result::commands_text $plan $v]]
-        set code [catch {::pis::hw::exec_hwi $scr -nojournal} res]
-        set raw [string trim $res]
-        if {$code} {
+        # T-031 item 2: trace mode runs every setter as its OWN hwi script and leaves ONE STEP line
+        # per setter (the literal command, the build's own return or its full error, and the
+        # read-only state after it). Non-trace mode is the T-030 form: ONE script per window.
+        set code 0
+        set raw ""
+        set raised 0
+        set ewhy ""
+        set estep ""
+        if {$trace} {
+            set firststep 1
+            foreach step [::pis::result::step_list $plan $v] {
+                set sname [lindex $step 0]
+                set scmd [lindex $step 1]
+                set scode [::pis::result::step_script $index $scmd $firststep]
+                set firststep 0
+                set code [catch {::pis::hw::exec_hwi $scode -nojournal} raw]
+                set raw [string trim $raw]
+                set now "none (the read-back after the step raised)"
+                set one ""
+                if {[catch {set one [::pis::result::read_state $index]} rerr]} {
+                    set now "none ([string trim $rerr])"
+                } else {
+                    set now [::pis::result::step_now_text $one]
+                }
+                if {$code} {
+                    ::pis::common::log $cfg INFO [format "STEP window %s v%s/%s %s: sent %s -> ERR %s | now: %s" \
+                        $win $v $n $sname $scmd $raw $now]
+                    set raised 1
+                    set ewhy $raw
+                    set estep $sname
+                    break
+                }
+                if {![::pis::result::ret_ok $raw]} {
+                    ::pis::common::log $cfg INFO [format "STEP window %s v%s/%s %s: sent %s -> ret=%s (an error code: the supplier prints 0 on success) | now: %s" \
+                        $win $v $n $sname $scmd $raw $now]
+                    set raised 1
+                    set ewhy "the call answered '$raw' (an error code: the supplier prints 0 on success)"
+                    set estep $sname
+                    break
+                }
+                ::pis::common::log $cfg INFO [format "STEP window %s v%s/%s %s: sent %s -> ret=%s | now: %s" \
+                    $win $v $n $sname $scmd [expr {$raw eq "" ? "(empty)" : $raw}] $now]
+            }
+        } else {
+            # Non-trace mode: ONE script per window. Its return value is `hwi CloseStack`'s own answer,
+            # not a setter's, so only a RAISED error can fail the variant here - the step trace is the
+            # mode that judges a per-step return (SPEC.md, T-031 item 2).
+            set code [catch {::pis::hw::exec_hwi $scr -nojournal} raw]
+            set raw [string trim $raw]
+            set raised $code
+            if {$raised} {
+                set ewhy $raw
+                set estep [::pis::result::step_of $raw $v]
+            }
+        }
+        if {$raised} {
             # ABSENT-METHOD RULE (1st half): the build's own text decides. The arguments of every
             # production variant are the documented ones, so `documented 1`; the record is written
             # once per run and the INFO line below is its only announcement.
-            set key [::pis::hw::absent_note $raw 1]
+            set key [::pis::hw::absent_note $ewhy 1]
             if {$key ne ""} {
                 ::pis::common::log $cfg INFO [format "method absent on this build: %s" $key]
             }
@@ -895,17 +1270,17 @@ proc ::pis::result::apply_to_window {cfg index name} {
             set got ""
         }
         set line ""
-        if {$code} {
+        if {$raised} {
             set line [::pis::result::variant_line $win $want $v $n \
-                [::pis::result::variant_name $v] [::pis::result::step_of $raw $v] \
-                [format "the apply script failed: %s%s" $raw [::pis::result::read_suffix $got]]]
+                [::pis::result::variant_name $v] $estep \
+                [format "the apply script failed at %s: %s%s" $estep $ewhy [::pis::result::read_suffix $got]]]
         } elseif {!$rok} {
             set line [::pis::result::variant_line $win $want $v $n \
                 [::pis::result::variant_name $v] "read-back" \
                 [format "the read-back after the change failed: %s" [string trim $rerr]]]
         } else {
-            lassign [::pis::result::verdict $got $label] ok why
-            if {$ok} {
+            lassign [::pis::result::verdict3 $got $label] vstate why
+            if {$vstate eq "APPLIED"} {
                 foreach done $fails {
                     ::pis::common::log $cfg INFO $done
                 }
@@ -920,20 +1295,78 @@ proc ::pis::result::apply_to_window {cfg index name} {
                 # The A10 result line that `run` prints next IS the pass evidence (BEFORE, the sent
                 # lines and that line cover the whole story), so no second copy of the same values is
                 # written here: one window, one values line.
-                return [list $win $label]
+                return [list $win $label "APPLIED" $v]
             }
-            set line [::pis::result::variant_line $win $want $v $n \
-                [::pis::result::variant_name $v] "read-back" \
-                [format "%s | %s" [::pis::result::values_text $got] $why]]
+            if {$vstate eq "UNCONFIRMED"} {
+                # T-031 item 3: the middle verdict. NOT an error: the type and the window's contour
+                # display option are on, nothing raised, and no dimension flag moved - which is what
+                # a nodal result may look like on this build. The dimension flag is not proven
+                # display evidence, so it cannot make this window failed on its own.
+                if {[::pis::result::any_dim_true $st]} {
+                    set vstate "FAILED"
+                    set line [::pis::result::variant_line $win $want $v $n \
+                        [::pis::result::variant_name $v] "read-back" \
+                        [format "%s | a dimension read true BEFORE the apply and false after it (GetDimensionEnabled, S36): the apply disabled it" \
+                            [::pis::result::values_text $got]]]
+                } else {
+                    if {$clean eq ""} { set clean [list $v $scr $got] }
+                    if {$unconf eq ""} {
+                        set unconf [::pis::result::unconfirmed_text $win $want $v $n $got]
+                    }
+                    if {$trace} {
+                        if {[::pis::result::trace_values $got] eq [::pis::result::trace_values $prev]} {
+                            ::pis::common::log $cfg WARN [::pis::result::nochange_text $win $v $n $got]
+                        } else {
+                            ::pis::common::log $cfg INFO [::pis::result::changed_text $win $v $n $got]
+                        }
+                    }
+                    if {$rok} { set late $got ; set prev $got }
+                    # result_try_all = 0: the evidence for this window is complete, stop here.
+                    if {!$try_all} { break }
+                    continue
+                }
+            }
+            if {$vstate eq "FAILED"} {
+                set line [::pis::result::variant_line $win $want $v $n \
+                    [::pis::result::variant_name $v] "read-back" \
+                    [format "%s | %s" [::pis::result::values_text $got] $why]]
+            }
         }
         # T-030: a variant that raised nothing and changed nothing is a different defect from one whose
         # read-back contradicts the request - say which happened, once per such variant, at WARN.
-        if {$rok && !$code && [::pis::result::trace_values $got] eq $before_text} {
+        if {!$raised && $rok && [::pis::result::trace_values $got] eq [::pis::result::trace_values $prev]} {
             ::pis::common::log $cfg WARN [::pis::result::nochange_text $win $v $n $got]
         }
-        if {$rok} { set late $got }
+        if {$rok} { set late $got ; set prev $got }
         lappend fails $line
         if {$first eq ""} { set first $line }
+    }
+    # T-031 item 3: no variant reached APPLIED, but one or more raised nothing and left the type and
+    # the display option right. That window is PROCESSED, not failed: journal the FIRST such variant,
+    # report the middle verdict once, and let the run continue with the next window.
+    if {$clean ne ""} {
+        lassign $clean cv cscr cst
+        foreach done $fails {
+            ::pis::common::log $cfg INFO $done
+        }
+        ::pis::hw::context [::pis::result::title] $label
+        ::pis::hw::journal_run $cscr
+        incr calls
+        set last_window $win
+        set last_type $label
+        set readback [dict get $cst type]
+        set state $cst
+        set variant $cv
+        incr unconfirmed
+        ::pis::common::log $cfg WARN $unconf
+        if {$trace} {
+            if {$late ne ""} {
+                ::pis::common::log $cfg INFO [::pis::result::trace_text LATE $win [::pis::result::trace_values $late]]
+            } else {
+                ::pis::common::log $cfg INFO [::pis::result::trace_text LATE $win "no read-back answered after the last variant"]
+            }
+        }
+        return [list $win $label "UNCONFIRMED" $cv]
     }
     incr failed
     foreach line $fails {
@@ -1002,7 +1435,12 @@ proc ::pis::result::dump_calls {} {
     lappend out [list pisR GetNumberOfSubcases Base]
     lappend out [list pisR GetCurrentSubcase]
     lappend out [list pisR GetSubcaseList Base]
-    lappend out [list pisC GetDisplayOptions contour]
+    # T-031 item 5: every documented display option (S56 list), then the getter that pairs with
+    # SetEnableState (S54). Getters only - the dump never sends a setter.
+    foreach o [::pis::result::display_options] {
+        lappend out [list pisC GetDisplayOptions $o]
+    }
+    lappend out [list pisCt GetEnableState]
     return $out
 }
 
@@ -1093,7 +1531,7 @@ proc ::pis::result::snap {tag {windows ""}} {
         }
         set dump [list]
         catch {set dump [::pis::result::dump_dict $w]}
-        dict set shot $w [dict create values [::pis::result::trace_values $one] dump $dump]
+        dict set shot $w [dict create values [::pis::result::snap_values $one] dump $dump]
     }
     dict set snaps $t $shot
     foreach w [lsort -integer [dict keys $shot]] {
@@ -1159,6 +1597,8 @@ proc ::pis::result::diff {a b} {
 proc ::pis::result::run {root cfg scope} {
     variable applied
     variable failed
+    variable unconfirmed
+    variable noted
     ::pis::result::need_common
     ::pis::result::need_hw
     if {$scope ne "layout" && $scope ne "active"} {
@@ -1166,6 +1606,10 @@ proc ::pis::result::run {root cfg scope} {
     }
     set applied 0
     set failed 0
+    # T-031: the middle verdict is counted per run and reported ONCE in the status bar by the GUI; the
+    # ONE `NOTE type already ...` line is written once per run, not once per window.
+    set unconfirmed 0
+    set noted 0
     # A new run forgets which methods this build lacks, so the ONE "method absent on this build"
     # INFO line is written once per run and not once per session (T-027).
     catch {::pis::hw::absent_reset}
@@ -1177,6 +1621,7 @@ proc ::pis::result::run {root cfg scope} {
     set cont 0
     catch {set cont [::pis::common::to_bool [::pis::common::get $cfg log continue_on_error 0] "log continue_on_error"]}
     set n 0
+    set nu 0
     foreach index [::pis::result::targets $cfg $scope] {
         set code [catch {::pis::result::apply_to_window $cfg $index $name} res]
         if {$code} {
@@ -1186,7 +1631,8 @@ proc ::pis::result::run {root cfg scope} {
             ::pis::common::log $cfg ERROR "[::pis::result::title]: [string trim $res]"
             continue
         }
-        lassign $res win type
+        lassign $res win type vstate
+        if {$vstate eq "UNCONFIRMED"} { incr nu }
         ::pis::common::log $cfg INFO [::pis::result::line_text $win $::pis::result::state]
         incr n
     }
@@ -1195,9 +1641,16 @@ proc ::pis::result::run {root cfg scope} {
         return 0
     }
     set applied $n
+    set unconfirmed $nu
     ::pis::hw::refresh
-    ::pis::common::log $cfg OK [format "%s: %s window(s) now show '%s'" \
-        [::pis::result::title] $n $name]
+    set tail ""
+    if {$nu > 0} {
+        set tail [format ", %s applied with the display NOT confirmed" $nu]
+    }
+    set lvl OK
+    if {$nu > 0} { set lvl WARN }
+    ::pis::common::log $cfg $lvl [format "%s: %s window(s) now show '%s'%s" \
+        [::pis::result::title] $n $name $tail]
     return $n
 }
 
@@ -1213,5 +1666,7 @@ proc ::pis::result::reset_state {} {
     variable state ""
     variable variant 0
     variable answer ""
+    variable unconfirmed 0
+    variable noted 0
     return
 }

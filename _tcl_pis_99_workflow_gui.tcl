@@ -520,6 +520,14 @@ proc ::pis::gui::run_result {scope} {
         }
         return 0
     }
+    # T-031: a window whose type was applied while no dimension flag moved is NOT an error and not a
+    # green pass: the read-back cannot tell whether the window shows a contour, so the status says so
+    # and asks the owner to look. The colour is the log pane's EXISTING warn colour (#9a6400):
+    # docs/refs/SPEC_gui.txt prints no colour rule for the status bar, so none is invented here.
+    if {[info exists ::pis::result::unconfirmed] && $::pis::result::unconfirmed > 0} {
+        ::pis::gui::set_status "Load result: applied, display not confirmed (look at the windows)" #9a6400
+        return $res
+    }
     if {$scope eq "layout"} {
         set msg "Load result: $res window(s) show the selection."
     } else {

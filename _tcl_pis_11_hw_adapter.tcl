@@ -218,7 +218,7 @@ namespace eval ::pis::hw {
 # evidence, the snap/diff API and variant V6, and _tcl_pis_99_workflow_gui.tcl now wraps the log
 # pane (-wrap char). Same rule: the stamp names the whole src/01_scripts copy.
 namespace eval ::pis {
-    variable BUILD "T8d-20261117-0900"
+    variable BUILD "T8e-20261117-1500"
 }
 
 # --- script builders: the hwi handle API is spelled once, here ------------------------
@@ -1941,7 +1941,7 @@ proc ::pis::hw::reset_state {} {
 
 # --- build stamp: ONE line, printed when this file is sourced -------------------------
 # The line answers the first question on a HyperView machine ("which copy is this?"):
-#   BUILD T8d-20261117-0900 | make_grid variants=1 | adapter lines=NNN | layouts=20
+#   BUILD T8e-20261117-1500 | make_grid variants=1 | adapter lines=NNN | layouts=20
 # The line count is measured from the file itself at source time (below), so it cannot go
 # stale the way a hand-written number would. "layouts=" is the size of the STATIC table, so a
 # copy without it shows up before the first Load All.
