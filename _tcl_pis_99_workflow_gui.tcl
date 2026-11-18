@@ -9,7 +9,9 @@
 # verified yet (SPEC Q3, T-002c adapter in place), so that module is partial on purpose.
 # Task T-008 wires the "Load result" block to ::pis::result (radio list + the documented
 # contour call of docs/refs/HV_API.md section 11 with its two read-backs).
-# The other three modules still log one explicit ERROR ("not wired yet"): no silent no-op.
+# Task T-011 wires the "Capture" block to ::pis::capture (checkbox list of views, the documented
+# `hwISession CaptureWindow` call of docs/refs/HV_API.md section 6 and a file check per image).
+# The other two modules still log one explicit ERROR ("not wired yet"): no silent no-op.
 # Module lists (Load result, Load Legend, Measures, Section Cut, Capture) are REAL radiobutton /
 # checkbutton rows in a scrolling canvas (not a text listbox), seeded at start by seed_modules.
 # Tcl 8.5 only: no tcllib, no try/finally, no package require beyond Tk.
@@ -19,7 +21,7 @@
 set _pis_dir [file dirname [file normalize [info script]]]
 foreach _pis_file {_tcl_pis_00_common.tcl _tcl_pis_10_hw.tcl _tcl_pis_11_hw_adapter.tcl \
         _tcl_pis_01_load_model_results.tcl _tcl_pis_02_load_legend.tcl \
-        _tcl_pis_03_load_result.tcl} {
+        _tcl_pis_03_load_result.tcl _tcl_pis_06_capture.tcl} {
     set _pis_path [file join $_pis_dir $_pis_file]
     if {[catch {source $_pis_path} _pis_err]} {
         error "Cannot source $_pis_path: $_pis_err"
@@ -441,9 +443,9 @@ proc ::pis::gui::busy_guard {title} {
     return 0
 }
 
-# Run seam. "result" (T-008) and "legend" (T-007) are wired; the other three modules still
-# report one explicit ERROR naming the module, and an empty module is the WARN required by the
-# SPEC states.
+# Run seam. "result" (T-008), "legend" (T-007) and "capture" (T-011) are wired; the other two
+# modules still report one explicit ERROR naming the module, and an empty module is the WARN
+# required by the SPEC states.
 proc ::pis::gui::run_module {key scope} {
     variable S
     set title [dict get $S title $key]
@@ -456,6 +458,9 @@ proc ::pis::gui::run_module {key scope} {
     }
     if {$key eq "legend"} {
         return [::pis::gui::run_legend $scope]
+    }
+    if {$key eq "capture"} {
+        return [::pis::gui::run_capture $scope]
     }
     if {[llength [::pis::gui::chosen $key]] == 0} {
         ::pis::gui::log_line WARN "module $title: no item selected, nothing run"
@@ -596,6 +601,60 @@ proc ::pis::gui::run_legend {scope} {
         set msg "Load Legend: $res window(s) imported."
     } else {
         set msg "Load Legend: active window imported."
+    }
+    ::pis::gui::set_status $msg darkgreen
+    return $res
+}
+
+# --- Capture wiring (task T-011) -------------------------------------------
+# Widgets -> a THROWAWAY cfg for one run: the typed view list and its ticks use the very keys the
+# ini keeps ([capture] item1..itemN + checked, SPEC.md data model "0 1 1"), so a run reads the
+# session exactly like the start-up restore does and never writes the ini (T-013 owns that write).
+proc ::pis::gui::capture_cfg {} {
+    variable S
+    set cfg [::pis::gui::workflow_cfg]
+    set items [list]
+    if {[dict exists $S items capture]} {
+        set items [dict get $S items capture]
+    }
+    set flags [list]
+    if {[dict exists $S checked capture]} {
+        set flags [dict get $S checked capture]
+    }
+    set sec [dict create count [llength $items] checked $flags]
+    set i 1
+    foreach item $items {
+        dict set sec "item$i" $item
+        incr i
+    }
+    dict set cfg capture $sec
+    return $cfg
+}
+
+# Capture for the active window or for every window of the layout. Same shape as run_legend: build
+# the cfg in memory, busy on, run, ALWAYS busy off, never save the ini. A refused run (no ticked
+# row, unusable folder, a refused size) reaches the ERROR branch with the module's own message,
+# which names the path whenever a path is the problem.
+proc ::pis::gui::run_capture {scope} {
+    set cfg [::pis::gui::capture_cfg]
+    set root [dict get $cfg root]
+    ::pis::gui::set_busy 1
+    set code [catch {::pis::capture::run $root $cfg $scope} res]
+    ::pis::gui::set_busy 0
+    if {$code} {
+        ::pis::gui::log_line ERROR "module [::pis::capture::title]: $res"
+        ::pis::gui::set_status "Error: $res" red
+        return 0
+    }
+    if {$res == 0} {
+        # Nothing ticked: ::pis::capture::run already logged the WARN the SPEC states require.
+        ::pis::gui::set_status "Idle"
+        return 0
+    }
+    if {$scope eq "layout"} {
+        set msg "Capture: $res image(s) written."
+    } else {
+        set msg "Capture: $res image(s) written for the active window."
     }
     ::pis::gui::set_status $msg darkgreen
     return $res

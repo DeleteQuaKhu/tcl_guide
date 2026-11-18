@@ -30,6 +30,7 @@
 #   ::pis::hw::verify_window {index}               read-back: window <index> holds 1 model + 1 result
 #   ::pis::hw::select_window {index}               make window <index> the active one
 #   ::pis::hw::import_legend {path}                import a legend into the active window
+#   ::pis::hw::capture_window {index path unit w h}  one PNG of window <index> (T-011, S91)
 #   ::pis::hw::refresh {}                          let Tk paint after a run (ONE `update idletasks`)
 #
 # T-019 (2026-11-11) - the result step no longer DEPENDS on WaitForResults. The supplier documents
@@ -218,7 +219,7 @@ namespace eval ::pis::hw {
 # evidence, the snap/diff API and variant V6, and _tcl_pis_99_workflow_gui.tcl now wraps the log
 # pane (-wrap char). Same rule: the stamp names the whole src/01_scripts copy.
 namespace eval ::pis {
-    variable BUILD "T8e-20261117-1500"
+    variable BUILD "T11a-20261118-1107"
 }
 
 # --- script builders: the hwi handle API is spelled once, here ------------------------
@@ -1111,11 +1112,39 @@ catch {pisM ReleaseHandle}}
     return "[::pis::hw::window_open pis $idx]\n$body\n[::pis::hw::window_close pis]"
 }
 
+# The body of ONE capture (T-011), with the call docs/refs/HV_API.md section 6 S91 documents
+# verbatim: `<sess> CaptureWindow win_id, type, filename, dimension_type, width, height, quality`,
+# "Success (0) or an error code", and a type list that contains PNG. @dim@ is the whole
+# "dimension_type width height" triple, so the variant table can offer the page's PIXEL form and
+# its PERCENT form without holding two copies of this body.
+# Session handle only: the call names its window (`win_id`), so no page is read and no active
+# window is assumed - the reason this call was chosen over CaptureActiveWindow (S92 lists BMP and
+# JPEG only, so it cannot write the .png name SPEC_gui.txt s.6.5 freezes).
+# The last word is the build's own answer, which is what exec_hwi returns; an INTEGER other than 0
+# is the documented error code and fails the variant BY ITS OWN TEXT. An empty answer is NOT turned
+# into a failure here: the file check of the variant decides, because a capture that wrote nothing
+# is the only thing worth failing.
+proc ::pis::hw::capture_body {dim} {
+    set s {hwi OpenStack
+hwi GetSessionHandle pisCapS
+set pisCapWin %index
+set pisCapRet [pisCapS CaptureWindow $pisCapWin PNG %path @dim@]
+catch {pisCapS ReleaseHandle}
+hwi CloseStack
+if {[string is integer -strict $pisCapRet] && $pisCapRet != 0} {
+    error "window $pisCapWin: CaptureWindow answered error code $pisCapRet - see docs/refs/HV_API.md S91"
+}
+set pisCapRet}
+    return [string map [list @dim@ $dim] $s]
+}
+
 # op -> ordered list of variant dicts, fields:
 #   n     1..N in trial order (start variant = 1 unless ::pis::hw::use moved it)
 #   via   hwi = one handle script through exec_hwi; hwc = one command through exec
 #   cmd   the script; %tokens are filled by ::pis::hw::fill
 #   check read-only script run afterwards through ::pis::hw::probe ("" = no read-back)
+#   local 1 = that check asks no HyperView question (T-011's file proof); every other check is an
+#         `hwi` read-back, which is the default and the only form the adapter test accepts
 #   want  what check must answer, as text ("" = nothing to compare)
 #   src   where the form comes from; note = what a working variant proves
 proc ::pis::hw::table {} {
@@ -1242,6 +1271,23 @@ catch {pisMgr ReleaseHandle}} \
         [dict create n 3 via hwc cmd {result legend import %path} \
             check {} want {} src {UNVERIFIED-GUESS} \
             note {result verb without scalar}]]
+    # --- ONE capture of one window (T-011) -------------------------------------------------
+    # The read-back has no getter to ask: the documented OUTPUT of S91 is a file, so the check is
+    # exactly what the task asks for - the file EXISTS and it has bytes. A build that swallows the
+    # call (or writes a 0-byte image) therefore fails the variant instead of being reported OK.
+    # The module guarantees `%path` did not exist before the call (a name already on disk gets a
+    # `_2`, `_3`, ... suffix), so this check can never be satisfied by an older image.
+    # Variant 2 repeats the SAME documented call with the page's other `dimension_type`: the
+    # example on S91 sizes one capture in `pixels 1280 960` and the other in `percent 150 150`.
+    dict set t capture_window [list \
+        [dict create n 1 via hwi cmd [::pis::hw::capture_body "%unit %width %height"] \
+            check {expr {[file exists %path] && [file size %path] > 0}} want 1 local 1 \
+            src {docs/refs/HV_API.md sec.6 S91 (hwISession CaptureWindow, 2024): type PNG, win_id explicit, "Success (0) or an error code"} \
+            note {the window wrote the image file and the file is not empty}] \
+        [dict create n 2 via hwi cmd [::pis::hw::capture_body "percent 150 150"] \
+            check {expr {[file exists %path] && [file size %path] > 0}} want 1 local 1 \
+            src {docs/refs/HV_API.md sec.6 S91: dimension_type "percent" with the page's own example values 150 150} \
+            note {same call, sized in percent instead of pixels}]]
     return $t
 }
 # Op names, sorted: the only names ::pis::hw::use and ::pis::hw::variants accept.
@@ -1872,11 +1918,63 @@ proc ::pis::hw::select_window {index} {
         [dict create %index $index %zindex [expr {$index - 1}]]]
 }
 
+# The index of the window that is ACTIVE right now (T-011). Read-only and never journaled (it is a
+# question, not a step): poIPage GetActiveWindow is the documented read the result module already
+# uses inside its own script (S33). It answers one clear error instead of a number when the page
+# cannot name a window, because a capture sent to a guessed window would photograph the wrong one.
+proc ::pis::hw::active_window {} {
+    ::pis::hw::need_exec
+    # Braced, then interpolated: a literal `[psiPage ...]` inside a double-quoted script would run
+    # HERE (before the handle exists) instead of in the script being built.
+    set body {set psiAW [psiPage GetActiveWindow]}
+    set script "[::pis::hw::stack_open psi]\n$body\n[::pis::hw::page_close psi]\nset psiAW"
+    set got ""
+    if {[catch {::pis::hw::probe $script} got]} {
+        error "::pis::hw::active_window: the page did not answer (GetActiveWindow): [string trim $got]"
+    }
+    set got [string trim $got]
+    if {![string is integer -strict $got] || $got < 1} {
+        error "::pis::hw::active_window: no window is active (poIPage GetActiveWindow answered '$got')"
+    }
+    return $got
+}
+
 proc ::pis::hw::import_legend {path} {
     set p [string trim $path]
     if {$p eq ""} { error "::pis::hw::import_legend: empty legend path" }
     if {![file isfile $p]} { error "::pis::hw::import_legend: legend file not found: $p" }
     return [::pis::hw::run import_legend [dict create %path $p]]
+}
+
+# One PNG image of ONE window (T-011), through the call docs/refs/HV_API.md section 6 S91 prints:
+# `<sess> CaptureWindow win_id, type, filename, dimension_type, width, height, quality`.
+# `unit` is `pixels` or `percent` (the two `dimension_type` values the page names) and applies to
+# variant 1; variant 2 repeats the SAME call with the page's own `percent 150 150` example, so a
+# build that refuses a large pixel size still has a documented form to fall back to - the log line
+# of the variant that runs always shows the size that was really sent.
+# The output path is the CALLER's (the module builds {model}_{result}_{item}.png and makes it
+# unique); it must not exist yet, because the variant's read-back is "the file exists and has
+# bytes" - an image from an earlier run would make that proof meaningless.
+proc ::pis::hw::capture_window {index path unit width height} {
+    if {![string is integer -strict $index] || $index < 1} {
+        error "::pis::hw::capture_window: window index must be a positive integer, got: '$index'"
+    }
+    set p [string trim $path]
+    if {$p eq ""} { error "::pis::hw::capture_window: empty output path" }
+    if {[file exists $p]} {
+        error "::pis::hw::capture_window: output file already exists: $p"
+    }
+    set u [string tolower [string trim $unit]]
+    if {$u ne "pixels" && $u ne "percent"} {
+        error "::pis::hw::capture_window: dimension unit must be pixels or percent, got: '$unit'"
+    }
+    foreach {label v} [list width $width height $height] {
+        if {![string is integer -strict $v] || $v < 1} {
+            error "::pis::hw::capture_window: $label must be a positive integer, got: '$v'"
+        }
+    }
+    return [::pis::hw::run capture_window \
+        [dict create %index $index %path $p %unit $u %width $width %height $height]]
 }
 
 # Print the whole table, the current variant per op and the one-line way to change it.
@@ -1892,6 +1990,9 @@ proc ::pis::hw::help {} {
             set rd "no read-back"
             if {[dict exists $v check] && [string trim [dict get $v check]] ne ""} {
                 set rd "read-back = [dict get $v want]"
+                if {[dict exists $v local] && [dict get $v local]} {
+                    set rd "file check = [dict get $v want]"
+                }
             }
             puts [format "    %d. %-44s \[%s\] <- %s" \
                 [dict get $v n] [::pis::hw::one_line [dict get $v cmd]] $rd [dict get $v src]]
@@ -1941,7 +2042,7 @@ proc ::pis::hw::reset_state {} {
 
 # --- build stamp: ONE line, printed when this file is sourced -------------------------
 # The line answers the first question on a HyperView machine ("which copy is this?"):
-#   BUILD T8e-20261117-1500 | make_grid variants=1 | adapter lines=NNN | layouts=20
+#   BUILD T11a-20261118-1107 | make_grid variants=1 | adapter lines=NNN | layouts=20
 # The line count is measured from the file itself at source time (below), so it cannot go
 # stale the way a hand-written number would. "layouts=" is the size of the STATIC table, so a
 # copy without it shows up before the first Load All.
