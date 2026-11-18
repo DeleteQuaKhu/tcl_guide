@@ -606,13 +606,20 @@ proc ::pis::gui::run_legend {scope} {
     return $res
 }
 
-# --- Capture wiring (task T-011) -------------------------------------------
+# --- Capture wiring (task T-011, T-032) -------------------------------------
 # Widgets -> a THROWAWAY cfg for one run: the typed view list and its ticks use the very keys the
 # ini keeps ([capture] item1..itemN + checked, SPEC.md data model "0 1 1"), so a run reads the
 # session exactly like the start-up restore does and never writes the ini (T-013 owns that write).
+# T-032: the ini's OTHER [capture] keys (image_type, image_width/image_height, unit/width/height)
+# are kept - the widgets do not edit them, so replacing the whole section would silently drop the
+# owner's size settings.
 proc ::pis::gui::capture_cfg {} {
     variable S
     set cfg [::pis::gui::workflow_cfg]
+    set sec [dict create]
+    if {[dict exists $cfg capture]} {
+        set sec [dict get $cfg capture]
+    }
     set items [list]
     if {[dict exists $S items capture]} {
         set items [dict get $S items capture]
@@ -621,7 +628,8 @@ proc ::pis::gui::capture_cfg {} {
     if {[dict exists $S checked capture]} {
         set flags [dict get $S checked capture]
     }
-    set sec [dict create count [llength $items] checked $flags]
+    dict set sec count [llength $items]
+    dict set sec checked $flags
     set i 1
     foreach item $items {
         dict set sec "item$i" $item

@@ -30,7 +30,10 @@
 #   ::pis::hw::verify_window {index}               read-back: window <index> holds 1 model + 1 result
 #   ::pis::hw::select_window {index}               make window <index> the active one
 #   ::pis::hw::import_legend {path}                import a legend into the active window
-#   ::pis::hw::capture_window {index path unit w h}  one PNG of window <index> (T-011, S91)
+#   ::pis::hw::set_view {index name}               activate a named VIEW in window <index> (T-032)
+#   ::pis::hw::active_window {}                    read-back: the window that is active NOW
+#   ::pis::hw::capture_window {index path view unit w h ?-row r? ?-layout 0|1? ?-trace 0|1?}
+#                                                  one PNG of window <index>, in view <view> (T-032)
 #   ::pis::hw::refresh {}                          let Tk paint after a run (ONE `update idletasks`)
 #
 # T-019 (2026-11-11) - the result step no longer DEPENDS on WaitForResults. The supplier documents
@@ -218,8 +221,11 @@ namespace eval ::pis::hw {
 # T-030 (2026-11-17): bumped again - _tcl_pis_03_load_result.tcl gained the TRACE/NOCHANGE/LATE
 # evidence, the snap/diff API and variant V6, and _tcl_pis_99_workflow_gui.tcl now wraps the log
 # pane (-wrap char). Same rule: the stamp names the whole src/01_scripts copy.
+# T-032 (2026-11-18): bumped for the Capture fix after the owner's `T-011: fail 1` - the adapter's
+# capture op is now a four-step image (select/view/draw/call) with a per-step trace, the variant
+# order is PROVEN-first, and _tcl_pis_06_capture.tcl names files `{result}_{view}.png`.
 namespace eval ::pis {
-    variable BUILD "T11a-20261118-1107"
+    variable BUILD "T32a-20261118-1530"
 }
 
 # --- script builders: the hwi handle API is spelled once, here ------------------------
@@ -1112,30 +1118,118 @@ catch {pisM ReleaseHandle}}
     return "[::pis::hw::window_open pis $idx]\n$body\n[::pis::hw::window_close pis]"
 }
 
-# The body of ONE capture (T-011), with the call docs/refs/HV_API.md section 6 S91 documents
-# verbatim: `<sess> CaptureWindow win_id, type, filename, dimension_type, width, height, quality`,
-# "Success (0) or an error code", and a type list that contains PNG. @dim@ is the whole
-# "dimension_type width height" triple, so the variant table can offer the page's PIXEL form and
-# its PERCENT form without holding two copies of this body.
-# Session handle only: the call names its window (`win_id`), so no page is read and no active
-# window is assumed - the reason this call was chosen over CaptureActiveWindow (S92 lists BMP and
-# JPEG only, so it cannot write the .png name SPEC_gui.txt s.6.5 freezes).
-# The last word is the build's own answer, which is what exec_hwi returns; an INTEGER other than 0
-# is the documented error code and fails the variant BY ITS OWN TEXT. An empty answer is NOT turned
-# into a failure here: the file check of the variant decides, because a capture that wrote nothing
-# is the only thing worth failing.
-proc ::pis::hw::capture_body {dim} {
-    set s {hwi OpenStack
-hwi GetSessionHandle pisCapS
-set pisCapWin %index
-set pisCapRet [pisCapS CaptureWindow $pisCapWin PNG %path @dim@]
-catch {pisCapS ReleaseHandle}
-hwi CloseStack
-if {[string is integer -strict $pisCapRet] && $pisCapRet != 0} {
-    error "window $pisCapWin: CaptureWindow answered error code $pisCapRet - see docs/refs/HV_API.md S91"
+# --- ONE capture is a SEQUENCE of steps (T-032, owner fail F13 on T-011) -----------------
+# The owner's report split one image into four steps and asked to see each of them in the log:
+# select the window, activate the VIEW the ticked row names, let the window redraw, and only
+# then grab the image. A step is ONE complete `hwi` script while the trace is on, and the SAME
+# step texts joined into ONE stack are what lands in the journal - so the journal holds exactly
+# one replayable line per image whether the trace is on or off (the split is a log concern).
+#
+# Sources, PROVEN first (docs/refs/HV_OWNER_capture_hits.txt holds the mined scripts):
+#   select : conrod/tcl_guide/hv_model_loader.tcl:2101-2102 (`mlPage SetActiveWindow $w`,
+#            best effort in the owner's own loader) + conrod/_tmp_hv/ppt2.tcl:185
+#   view   : owner report F13c - HIS working call is `SetActiveView true "View 1"`. The CLASS is
+#            NOT documented: the 2024 method indexes of hwIPage / hwIWindow / hwISession /
+#            hwIViewControl (fetched 2026-11-18, HV_API.md S93-S96) list no SetActiveView, and
+#            no script on this machine calls it. The PAGE handle is the assumption, written down
+#            in HV_API.md section 6 and in the log (UNVERIFIED-GUESS for the class only).
+#   draw   : docs/refs/HV_API_REF.md section 4 patterns 5/6 (S06:241-252 / 255-262: `Draw` and
+#            then `CaptureScreenToSize`) + conrod/tcl_guide/hv_model_loader.tcl:2120-2121
+#
+# The four step texts. The `call` step is the capture fragment of the variant that is running,
+# so the same skeleton serves every variant of the table.
+proc ::pis::hw::capture_frag {step} {
+    switch -- $step {
+        select { return {pisPage SetActiveWindow %index} }
+        view   { return {pisPage SetActiveView true %view} }
+        draw   { return {pisC Draw} }
+    }
+    error "::pis::hw::capture_frag: unknown capture step '$step' (expected select, view or draw)"
 }
+
+# ONE step as ONE complete script (its own stack, closed again). `callcmd` is the ALREADY filled
+# capture fragment of the variant; it is spliced in as script text, never as a quoted value.
+proc ::pis::hw::capture_step_script {step values {callcmd ""}} {
+    if {$step eq "call"} {
+        # The capture call's OWN answer is the script's last word, so the caller can fail a
+        # variant by the documented integer code (0 = success) and show it in the STEP line.
+        return "[::pis::hw::fill [::pis::hw::window_open pis %index] $values]\nset pisCapRet \[$callcmd\]\n[::pis::hw::window_close pis]\nset pisCapRet"
+    }
+    if {$step eq "draw"} {
+        return "[::pis::hw::fill [::pis::hw::window_open pis %index] $values]\n[::pis::hw::capture_frag draw]\n[::pis::hw::window_close pis]"
+    }
+    set body [::pis::hw::capture_frag $step]
+    return [::pis::hw::fill "[::pis::hw::stack_open pis]\n$body\n[::pis::hw::page_close pis]" $values]
+}
+
+# The WHOLE image as ONE replayable script: the steps in order inside a single stack, exactly
+# what the journal keeps. `layout` 0 leaves the page's active window alone (the [Capture] button
+# already captures the active window); 1 makes window %index active first ([Apply all layout]).
+proc ::pis::hw::capture_full_script {layout values callcmd} {
+    set head {hwi OpenStack
+hwi GetSessionHandle pisS
+pisS GetProjectHandle pisP
+set pisPgI [pisP GetActivePage]
+pisP GetPageHandle pisPage $pisPgI}
+    set mid [list]
+    if {$layout} { lappend mid [::pis::hw::capture_frag select] }
+    lappend mid [::pis::hw::capture_frag view]
+    lappend mid {pisPage GetWindowHandle pisWin %index
+pisWin GetClientHandle pisC
+pisC Draw}
+    lappend mid "@@CAPCALL@@"
+    set tail {catch {pisC ReleaseHandle}
+catch {pisWin ReleaseHandle}
+catch {pisPage ReleaseHandle}
+catch {pisP ReleaseHandle}
+catch {pisS ReleaseHandle}
+hwi CloseStack
 set pisCapRet}
-    return [string map [list @dim@ $dim] $s]
+    # The call fragment is spliced in AFTER the fill: it already holds real values, and a path
+    # that happens to contain "%width" must never be rewritten by a second pass.
+    set script [::pis::hw::fill [join [list $head [join $mid "\n"] $tail] "\n"] $values]
+    return [string map [list "@@CAPCALL@@" "set pisCapRet \[$callcmd\]"] $script]
+}
+
+# The read-back of the ACTIVE VIEW. No fetched page names one (2024: hwIPage / hwIWindow /
+# hwISession / hwIViewControl, see HV_API.md S93-S96; also no page in conrod/ or test/ calls
+# GetActiveView), so the getter is EMPTY and nothing is sent: inventing a method would only
+# produce a build error on the owner's machine. A future documented getter is one line here,
+# and ::pis::hw::set_view already compares its answer with the requested name.
+proc ::pis::hw::view_getter {} {
+    return ""
+}
+
+# The documented getter of the page's VIEW LIST - same answer and same reason.
+proc ::pis::hw::view_list_getter {} {
+    return ""
+}
+
+proc ::pis::hw::active_view {} {
+    set script [::pis::hw::view_getter]
+    if {[string trim $script] eq ""} { return "" }
+    return [string trim [::pis::hw::probe $script]]
+}
+
+# The `now:` half of a STEP log line: a read-only question about the session, never journaled.
+# `select` is the only step whose effect can be read (poIPage GetActiveWindow, S33); the view
+# cannot be read without a documented getter, and draw/call have no state of their own.
+proc ::pis::hw::capture_now {step index} {
+    if {$step eq "select"} {
+        set body {set psiAW [psiPage GetActiveWindow]}
+        set script "[::pis::hw::stack_open psi]\n$body\n[::pis::hw::page_close psi]\nset psiAW"
+        set got ""
+        if {[catch {::pis::hw::probe $script} got]} {
+            return [format "active window ? (%s)" [::pis::hw::clip [string trim $got] 120]]
+        }
+        return [format "active window %s" [string trim $got]]
+    }
+    if {$step eq "view"} {
+        if {[string trim [::pis::hw::view_getter]] eq ""} { return "active view ? (no getter documented)" }
+        set got [::pis::hw::active_view]
+        return [format "active view '%s'" $got]
+    }
+    return "-"
 }
 
 # op -> ordered list of variant dicts, fields:
@@ -1143,8 +1237,10 @@ set pisCapRet}
 #   via   hwi = one handle script through exec_hwi; hwc = one command through exec
 #   cmd   the script; %tokens are filled by ::pis::hw::fill
 #   check read-only script run afterwards through ::pis::hw::probe ("" = no read-back)
-#   local 1 = that check asks no HyperView question (T-011's file proof); every other check is an
-#         `hwi` read-back, which is the default and the only form the adapter test accepts
+#   local 1 = that check asks no HyperView question (a file check); every other check is an
+#         `hwi` read-back, which is the default and the only form the adapter test accepts.
+#         T-032: the capture op needs no `local` variant any more - its proof is the file it
+#         wrote, asked in ::pis::hw::capture_image after the steps (see the capture table).
 #   want  what check must answer, as text ("" = nothing to compare)
 #   src   where the form comes from; note = what a working variant proves
 proc ::pis::hw::table {} {
@@ -1271,23 +1367,44 @@ catch {pisMgr ReleaseHandle}} \
         [dict create n 3 via hwc cmd {result legend import %path} \
             check {} want {} src {UNVERIFIED-GUESS} \
             note {result verb without scalar}]]
-    # --- ONE capture of one window (T-011) -------------------------------------------------
-    # The read-back has no getter to ask: the documented OUTPUT of S91 is a file, so the check is
-    # exactly what the task asks for - the file EXISTS and it has bytes. A build that swallows the
-    # call (or writes a 0-byte image) therefore fails the variant instead of being reported OK.
-    # The module guarantees `%path` did not exist before the call (a name already on disk gets a
-    # `_2`, `_3`, ... suffix), so this check can never be satisfied by an older image.
-    # Variant 2 repeats the SAME documented call with the page's other `dimension_type`: the
-    # example on S91 sizes one capture in `pixels 1280 960` and the other in `percent 150 150`.
+    # --- ONE capture of one window (T-032: the owner's proven call first) ------------------
+    # The owner's fail (T-011 F13, 2026-11-18): the DOC call `hwISession CaptureWindow` (S91) was
+    # tried FIRST although his own scripts and the PROVEN digest hold working capture calls. The
+    # precedence is binding - PROVEN > DOC > UNVERIFIED-GUESS - so the order is now:
+    #   1. `<client> CaptureImage <file> PNG 1` - the first form the OWNER's loader tries, and the
+    #      only one that renders ONE window off-screen (docs/refs/HV_API.md S97: "Renders the
+    #      current HyperView window to an off-screen image file", format PNG, quality 1-4);
+    #   2. `<sess> CaptureScreen png <file>` - the spelling of the shipped conrod/_tmp_hv/hvTest.tcl
+    #      (line 140) and of the owner's loader (mode `screen`);
+    #   3. `<sess> CaptureScreenToSize <type> <file> <w> <h>` - PROVEN HV_API_REF.md S06:249/260,
+    #      S07:544, documented by S96 (types BMP/JPEG/TIFF/PNG/Clipboard, 0 or an error code);
+    #   4+5. DOC S91 `CaptureWindow`, kept only as the last fallbacks.
+    # `CaptureActiveWindow` stays rejected (S92 documents BMP and JPEG only, so it cannot write
+    # the `.png` the file name freezes).
+    # No variant carries a `check`: the proof of an image is the FILE it wrote (exists and has
+    # bytes), and ::pis::hw::capture_image asks exactly that after the steps. A capture that
+    # answered 0 but wrote nothing is a FAILURE with both facts in the message.
     dict set t capture_window [list \
-        [dict create n 1 via hwi cmd [::pis::hw::capture_body "%unit %width %height"] \
-            check {expr {[file exists %path] && [file size %path] > 0}} want 1 local 1 \
+        [dict create n 1 via hwi frag 1 call CaptureImage \
+            cmd {pisC CaptureImage %path PNG 1} \
+            src {conrod/tcl_guide/hv_model_loader.tcl:1936-1938 (mode clientImage, tried first) + docs/refs/HV_API.md S97 (poIPost CaptureImage, 2024: off-screen PNG of the current window, returns 0 or an error code)} \
+            note {the window's graphic area is rendered off-screen into the image file}] \
+        [dict create n 2 via hwi frag 1 call CaptureScreen \
+            cmd {pisS CaptureScreen png %path} \
+            src {conrod/_tmp_hv/hvTest.tcl:140 (`sessObj CaptureScreen png test_$i.png`) + conrod/tcl_guide/hv_model_loader.tcl:1944-1945} \
+            note {the shipped screen capture spelling wrote the file}] \
+        [dict create n 3 via hwi frag 1 call CaptureScreenToSize needpx 1 \
+            cmd {pisS CaptureScreenToSize %type %path %width %height} \
+            src {docs/refs/HV_API_REF.md S06:249/260 + S07:544 (PROVEN) + docs/refs/HV_API.md S96 (hwISession CaptureScreenToSize, 2024: PNG, width height, 0 or an error code)} \
+            note {the sized screen capture of the owner's own scripts wrote the file}] \
+        [dict create n 4 via hwi frag 1 call CaptureWindow \
+            cmd {pisS CaptureWindow %index PNG %path %unit %width %height} \
             src {docs/refs/HV_API.md sec.6 S91 (hwISession CaptureWindow, 2024): type PNG, win_id explicit, "Success (0) or an error code"} \
-            note {the window wrote the image file and the file is not empty}] \
-        [dict create n 2 via hwi cmd [::pis::hw::capture_body "percent 150 150"] \
-            check {expr {[file exists %path] && [file size %path] > 0}} want 1 local 1 \
+            note {the documented window capture wrote the image file}] \
+        [dict create n 5 via hwi frag 1 call CaptureWindow \
+            cmd {pisS CaptureWindow %index PNG %path percent 150 150} \
             src {docs/refs/HV_API.md sec.6 S91: dimension_type "percent" with the page's own example values 150 150} \
-            note {same call, sized in percent instead of pixels}]]
+            note {same documented call, sized in percent instead of pixels}]]
     return $t
 }
 # Op names, sorted: the only names ::pis::hw::use and ::pis::hw::variants accept.
@@ -1946,16 +2063,207 @@ proc ::pis::hw::import_legend {path} {
     return [::pis::hw::run import_legend [dict create %path $p]]
 }
 
-# One PNG image of ONE window (T-011), through the call docs/refs/HV_API.md section 6 S91 prints:
-# `<sess> CaptureWindow win_id, type, filename, dimension_type, width, height, quality`.
-# `unit` is `pixels` or `percent` (the two `dimension_type` values the page names) and applies to
-# variant 1; variant 2 repeats the SAME call with the page's own `percent 150 150` example, so a
-# build that refuses a large pixel size still has a documented form to fall back to - the log line
-# of the variant that runs always shows the size that was really sent.
-# The output path is the CALLER's (the module builds {model}_{result}_{item}.png and makes it
-# unique); it must not exist yet, because the variant's read-back is "the file exists and has
-# bytes" - an image from an earlier run would make that proof meaningless.
-proc ::pis::hw::capture_window {index path unit width height} {
+# The view of ONE window (T-032): the ONE place `<page> SetActiveView true "<name>"` is spelled.
+# It is the owner's own working call (F13c: `SetActiveView true "View 1"`) - the LITERAL comes
+# from him; the CLASS (the page handle) is an assumption, because no fetched page documents the
+# method (see ::pis::hw::view_getter). The name is passed as ONE argument through
+# ::pis::hw::quote, so `View 1` and `a.b c` survive.
+# After the call the window is redrawn (Draw on ITS client) and Tk is allowed to paint - the
+# refresh the owner's scripts do before a capture. Nothing is journaled here: the capture
+# journals the whole image as ONE line, and this proc returns the script it sent so a caller can
+# log it verbatim.
+proc ::pis::hw::set_view {index name} {
+    ::pis::hw::need_exec
+    if {![string is integer -strict $index] || $index < 1} {
+        error "::pis::hw::set_view: window index must be a positive integer, got: '$index'"
+    }
+    set n [string trim $name]
+    if {$n eq ""} { error "::pis::hw::set_view: empty view name" }
+    # A documented list getter would let us refuse a name the page does not offer BEFORE anything
+    # is sent. None is documented (view_list_getter answers ""), so this branch is dormant.
+    set listScript [::pis::hw::view_list_getter]
+    if {[string trim $listScript] ne ""} {
+        set names [string trim [::pis::hw::probe $listScript]]
+        if {[lsearch -exact $names $n] < 0} {
+            error "view '$n' not found in window $index"
+        }
+    }
+    set values [dict create %index $index %view $n]
+    set script [::pis::hw::capture_step_script view $values]
+    set code [catch {::pis::hw::exec_hwi $script -nojournal} res]
+    if {$code} {
+        error "::pis::hw::set_view: window $index: [string trim $res] (sent: [::pis::hw::one_line $script])"
+    }
+    set draw [::pis::hw::capture_step_script draw $values]
+    set code [catch {::pis::hw::exec_hwi $draw -nojournal} res]
+    ::pis::hw::refresh
+    if {$code} {
+        error "::pis::hw::set_view: window $index: the redraw after the view change failed: [string trim $res]"
+    }
+    set got [::pis::hw::active_view]
+    if {$got ne "" && $got ne $n} {
+        error "view '$n' not active in window $index (read: $got)"
+    }
+    return $script
+}
+
+# ONE image, step by step (T-032). `values` holds %index %path %view %unit %width %height %type;
+# `layout` 1 makes window %index active first, 0 leaves the page's active window alone; `trace` 1
+# sends every step as its OWN hwi script and logs one STEP line per step, 0 sends the joined
+# script - the journal text is the SAME (one line per image) in both modes.
+# The proof is the FILE: exists and size > 0. A call that answered 0 and wrote nothing fails,
+# with both facts in the message. `row` is a log label only (0 = not a module row).
+proc ::pis::hw::capture_image {values layout trace row} {
+    ::pis::hw::need_exec
+    set index [dict get $values %index]
+    set path [dict get $values %path]
+    set view [dict get $values %view]
+    set list [::pis::hw::variants capture_window]
+    set total [llength $list]
+    set start [::pis::hw::at capture_window]
+    if {![string is integer -strict $start] || $start < 1 || $start > $total} { set start 1 }
+    set steps [list]
+    if {$layout} { lappend steps select }
+    lappend steps view draw call
+    set tried {}
+    set firsterr ""
+    set lasterr ""
+    set n $start
+    while {$n <= $total} {
+        set v [lindex $list [expr {$n - 1}]]
+        set call [dict get $v call]
+        if {[dict exists $v needpx] && [dict get $v needpx] && [dict get $values %unit] ne "pixels"} {
+            ::pis::hw::note INFO [format \
+                "capture_window window %d: variant %d/%d skipped (%s takes a pixel size, unit is '%s')" \
+                $index $n $total $call [dict get $values %unit]]
+            incr n
+            continue
+        }
+        set callcmd [::pis::hw::fill [dict get $v cmd] $values]
+        set full [::pis::hw::capture_full_script $layout $values $callcmd]
+        set failedstep ""
+        set errtext ""
+        set res ""
+        set code 0
+        # Split the steps when the trace is on - and ALSO when this build documents a getter for
+        # the active view, because then the view has to be read back BEFORE the capture call runs
+        # (a wrong view must cost 0 capture calls). No build documents one, so the usual second
+        # run is a single joined script.
+        set split [expr {$trace || [string trim [::pis::hw::view_getter]] ne "" ? 1 : 0}]
+        if {$split} {
+            foreach step $steps {
+                if {$step eq "call" && $trace} {
+                    ::pis::hw::note INFO [format "CAPTURE ctx window %d row %d view '%s' call %s" \
+                        $index $row $view $call]
+                }
+                set script [::pis::hw::capture_step_script $step $values $callcmd]
+                set code [catch {::pis::hw::exec_hwi $script -nojournal} res]
+                set raw [string trim $res]
+                # The log shows the LITERAL script that was sent (folded, no display transform of
+                # brackets or braces): a truncated "hwi OpenStack ..." would hide the very call the
+                # owner has to recognise (F13 asked for per-step evidence, not a summary).
+                set literal [::pis::hw::fold_script $script]
+                if {$code} {
+                    set failedstep $step
+                    set errtext $raw
+                    if {$trace} {
+                        ::pis::hw::note ERROR [format "STEP capture window %d row %d %s: sent %s -> ERR %s" \
+                            $index $row $step $literal $errtext]
+                    }
+                    break
+                }
+                if {$trace} {
+                    set now [::pis::hw::capture_now $step $index]
+                    if {$raw eq ""} { set raw "(empty)" }
+                    ::pis::hw::note INFO [format "STEP capture window %d row %d %s: sent %s -> ret=%s | now: %s" \
+                        $index $row $step $literal $raw $now]
+                }
+                # The documented read-back of the view, when this build has one: a view that is
+                # not the requested one is an ERROR naming both, and the capture call never runs.
+                if {$step eq "view" && [string trim [::pis::hw::view_getter]] ne ""} {
+                    set got [::pis::hw::active_view]
+                    if {$got ne "" && $got ne $view} {
+                        set failedstep view
+                        set errtext "view '$view' not active in window $index (read: $got)"
+                        set code 1
+                        set res $errtext
+                        if {$trace} {
+                            ::pis::hw::note ERROR [format \
+                                "STEP capture window %d row %d view: sent %s -> ERR %s" \
+                                $index $row $literal $errtext]
+                        }
+                        break
+                    }
+                }
+            }
+            if {!$code} { ::pis::hw::refresh }
+        } else {
+            set code [catch {::pis::hw::exec_hwi $full -nojournal} res]
+            if {!$code} { ::pis::hw::refresh }
+        }
+        # The documented answer is an INTEGER: 0 = success, anything else = an error code that
+        # fails the variant by its own number. An empty answer is left to the file check.
+        set say ""
+        if {$code} {
+            if {$failedstep ne ""} {
+                set say "step $failedstep: $errtext"
+            } else {
+                set say "step (joined script): [string trim $res]"
+            }
+        } elseif {[string is integer -strict [string trim $res]] && [string trim $res] != 0} {
+            set say "call $call answered error code [string trim $res]"
+        } elseif {![file exists $path]} {
+            set say "call $call answered '[string trim $res]' but wrote no file: $path"
+        } elseif {[file size $path] <= 0} {
+            set say "call $call wrote an empty file: $path"
+        }
+        if {$say eq ""} {
+            set bytes [file size $path]
+            set line ""
+            catch {set line [::pis::hw::journal_run $full]}
+            ::pis::hw::record [::pis::hw::used_key capture_window $values] $n
+            set tail "variant $n/$total used and confirmed by the file ($bytes bytes, src: [dict get $v src])"
+            if {$n == $start} {
+                ::pis::hw::note OK [format "capture_window window %d: %s" $index $tail]
+            } else {
+                ::pis::hw::note OK [format \
+                    "capture_window window %d: %s; keep it with: ::pis::hw::use capture_window %d" \
+                    $index $tail $n]
+            }
+            return [dict create path $path bytes $bytes variant $n call $call \
+                view $view script $line]
+        }
+        lappend tried [format "%d/%d failed" $n $total]
+        set lasterr $say
+        if {$firsterr eq ""} { set firsterr $say }
+        if {$n < $total} {
+            ::pis::hw::note WARN [format "capture_window window %d: variant %d/%d failed (%s); trying the next one" \
+                $index $n $total $say]
+        } else {
+            ::pis::hw::note WARN [format "capture_window window %d: variant %d/%d failed (%s); that was the last variant" \
+                $index $n $total $say]
+        }
+        incr n
+    }
+    ::pis::hw::record [::pis::hw::used_key capture_window $values] 0
+    set detail $firsterr
+    if {$detail eq ""} { set detail $lasterr }
+    if {[llength $tried] > 1} {
+        append detail [format " (tried %s)" [join $tried {, }]]
+    }
+    error [format \
+        "capture_window window %d view '%s' variant %d/%d failed: %s | pick another variant with: ::pis::hw::use capture_window <n>" \
+        $index $view $total $total $detail]
+}
+
+# One image of ONE window (T-032), through the steps above:
+#   select window (layout scope only) -> set the VIEW the row names -> Draw -> the capture call.
+# The variant order is the PROVEN one (owner script, owner script, HV_API_REF digest) and only
+# then the DOC call S91 - see the table.
+# `view` is the ticked row's view name. The output path is the CALLER's (the module builds
+# {result}_{view}.png and makes it unique); it must not exist yet, because the proof is "the file
+# exists and has bytes" - an image from an earlier run would make that proof meaningless.
+proc ::pis::hw::capture_window {index path view unit width height args} {
     if {![string is integer -strict $index] || $index < 1} {
         error "::pis::hw::capture_window: window index must be a positive integer, got: '$index'"
     }
@@ -1964,17 +2272,49 @@ proc ::pis::hw::capture_window {index path unit width height} {
     if {[file exists $p]} {
         error "::pis::hw::capture_window: output file already exists: $p"
     }
+    set vw [string trim $view]
+    if {$vw eq ""} { error "::pis::hw::capture_window: empty view name" }
     set u [string tolower [string trim $unit]]
     if {$u ne "pixels" && $u ne "percent"} {
         error "::pis::hw::capture_window: dimension unit must be pixels or percent, got: '$unit'"
     }
-    foreach {label v} [list width $width height $height] {
-        if {![string is integer -strict $v] || $v < 1} {
-            error "::pis::hw::capture_window: $label must be a positive integer, got: '$v'"
+    foreach {label val} [list width $width height $height] {
+        if {![string is integer -strict $val] || $val < 1} {
+            error "::pis::hw::capture_window: $label must be a positive integer, got: '$val'"
         }
     }
-    return [::pis::hw::run capture_window \
-        [dict create %index $index %path $p %unit $u %width $width %height $height]]
+    if {[llength $args] % 2 != 0} {
+        error "::pis::hw::capture_window: options come in pairs (-row <r> -layout <0|1> -trace <0|1>)"
+    }
+    set layout 0
+    set trace 1
+    set row 0
+    foreach {opt val} $args {
+        switch -- $opt {
+            -row {
+                if {![string is integer -strict $val] || $val < 0} {
+                    error "::pis::hw::capture_window: -row must be a non-negative integer, got: '$val'"
+                }
+                set row $val
+            }
+            -layout {
+                set layout [expr {($val eq "1" || $val eq "true") ? 1 : 0}]
+            }
+            -trace {
+                set trace [expr {($val eq "1" || $val eq "true") ? 1 : 0}]
+            }
+            default {
+                error "::pis::hw::capture_window: unknown option '$opt' (expected -row, -layout, -trace)"
+            }
+        }
+    }
+    # The image type is the file extension (S06/S07 take it from the config): a `.png` file is
+    # asked for as `png`, and a name with no extension defaults to `png`.
+    set type [string tolower [string trim [file extension $p] .]]
+    if {$type eq ""} { set type png }
+    set values [dict create %index $index %path $p %view $vw %unit $u \
+        %width $width %height $height %type $type]
+    return [::pis::hw::capture_image $values $layout $trace $row]
 }
 
 # Print the whole table, the current variant per op and the one-line way to change it.
@@ -2042,7 +2382,7 @@ proc ::pis::hw::reset_state {} {
 
 # --- build stamp: ONE line, printed when this file is sourced -------------------------
 # The line answers the first question on a HyperView machine ("which copy is this?"):
-#   BUILD T11a-20261118-1107 | make_grid variants=1 | adapter lines=NNN | layouts=20
+#   BUILD T32a-20261118-1530 | make_grid variants=1 | adapter lines=NNN | layouts=20
 # The line count is measured from the file itself at source time (below), so it cannot go
 # stale the way a hand-written number would. "layouts=" is the size of the STATIC table, so a
 # copy without it shows up before the first Load All.

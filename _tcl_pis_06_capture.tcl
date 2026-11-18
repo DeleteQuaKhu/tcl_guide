@@ -1,22 +1,18 @@
 # src/01_scripts/_tcl_pis_06_capture.tcl
-# ::pis::capture - the "Capture" module (task T-011).
+# ::pis::capture - the "Capture" module (task T-011, fixed by T-032).
 # SPEC_gui.txt s.6.5: "List of views (View 1..n). Apply: for each checked view, set the view and
-# capture an image. Image name: {model}_{result}_{item}.png so files never overwrite each other.
-# Capture only captures; it does not trigger other modules."
-# The HyperView call is the one docs/refs/HV_API.md section 6 names for this task (S91):
-# `<sess> CaptureWindow win_id, type, filename, dimension_type, width, height` - the only fetched
-# capture call that documents PNG, and the only one that takes the window id instead of relying on
-# "whatever is active". It is sent through ::pis::hw::capture_window, so the whole step goes through
-# the ONE HyperView door and the journal keeps one replayable `hwi ...` line per capture.
+# capture an image. Image name: {result_file_name}_{view}.png so files never overwrite each
+# other. Capture only captures; it does not trigger other modules."
+# T-032 (owner fail F13, 2026-11-18) changed three things:
+#   1. every image is a SEQUENCE of steps, each sent through the adapter: select the window
+#      (layout scope) -> activate the VIEW the ticked row names -> Draw -> the capture call ->
+#      the file check. One STEP log line per step while [debug] capture_trace is 1, and the
+#      journal still holds exactly ONE replayable hwi line per image;
+#   2. the capture call order follows the source precedence PROVEN > DOC (owner scripts first,
+#      `hwISession CaptureWindow` S91 last) - see the adapter's capture_window table;
+#   3. the name is `{result_file_name}_{view}.png`: the model is dropped (owner's order).
 # Tcl/Tk 8.5 compatible, no tcllib, no network, no package require, no Tk.
 # Sourcing this file defines procs only: it never calls HyperView.
-#
-# What "set the view" means here (ASSUMPTION-T011/U1, written down because SPEC_gui s.6.5 names no
-# view command): the checked row is the LABEL of one capture (it lands in the file name), and the
-# window it captures is decided exactly like every other module - the active window, or every
-# window of the layout for [Apply all layout] (SPEC_gui s.7's loop: for window -> for item). A
-# layout run therefore sets each window with `SetActiveWindow k` (S5) before capturing it, and the
-# log line names the window, the item and the final path, so the mapping is never guessed.
 #
 # Public procs:
 #   ::pis::capture::run {root cfg scope}      -> images written (0 = skipped)
@@ -27,9 +23,12 @@
 #   ::pis::capture::checked_rows {cfg}        -> 1-based rows the [capture] checked string ticks
 #   ::pis::capture::item_text {cfg row}       -> one row's text (raises when it is empty)
 #   ::pis::capture::size_spec {cfg}           -> {unit width height} for the capture call
+#   ::pis::capture::image_type {cfg}          -> the image type (only png, the frozen extension)
+#   ::pis::capture::trace_spec {cfg}          -> 1 = one STEP log line per step (default)
+#   ::pis::capture::continue_on_error {cfg}   -> [log] continue_on_error as 0/1
 #   ::pis::capture::output_dir {root cfg}     -> absolute folder for the images (created if needed)
-#   ::pis::capture::file_base {cfg k item}    -> {model}_{result}_{item}, sanitized, no extension
-#   ::pis::capture::file_name {cfg k item}    -> that base plus ".png"
+#   ::pis::capture::file_base {cfg k view}    -> {result}_{view}, sanitized, no extension
+#   ::pis::capture::file_name {cfg k view}    -> that base plus ".png"
 #   ::pis::capture::unique_path {dir base used} -> {path used'} that cannot collide
 #   ::pis::capture::windows {cfg scope}       -> window indexes the run captures
 #   ::pis::capture::sanitize {text}           -> one file-name-safe part
@@ -62,7 +61,7 @@ proc ::pis::capture::need_common {} {
 # The capture call itself lives in the adapter (one op, one variant list). Without it this module
 # can do nothing, and saying so here beats a "no such command" from the middle of a run.
 proc ::pis::capture::need_adapter {} {
-    foreach p {capture_window select_window context} {
+    foreach p {capture_window set_view active_window context} {
         if {[llength [info commands ::pis::hw::$p]] == 0} {
             error "::pis::capture: source _tcl_pis_10_hw.tcl and _tcl_pis_11_hw_adapter.tcl first (missing ::pis::hw::$p)"
         }
@@ -164,8 +163,10 @@ proc ::pis::capture::item_text {cfg row} {
 }
 
 # The size of the image, {unit width height}, for the capture call: `[capture] unit/width/height`
-# with the documented defaults `pixels 1280 960` (the page's own example numbers, HV_API S91). An
-# unknown unit or a non-positive number is refused HERE, before anything is sent.
+# with the documented defaults `pixels 1280 960` (the page's own example numbers, HV_API S91).
+# T-032 also accepts the owner's script key names `image_width`/`image_height` (S06/S07 read
+# `display image_width` from their config); the older `width`/`height` keys keep working.
+# An unknown unit or a non-positive number is refused HERE, before anything is sent.
 proc ::pis::capture::size_spec {cfg} {
     ::pis::capture::need_common
     set unit [string tolower [string trim [::pis::common::get $cfg capture unit pixels]]]
@@ -174,15 +175,49 @@ proc ::pis::capture::size_spec {cfg} {
         error "capture: \[capture\] unit must be pixels or percent, got '$unit'"
     }
     set out [list $unit]
-    foreach {key def} {width 1280 height 960} {
-        set v [string trim [::pis::common::get $cfg capture $key $def]]
+    foreach {keys def} {{image_width width} 1280 {image_height height} 960} {
+        set v ""
+        foreach key $keys {
+            set v [string trim [::pis::common::get $cfg capture $key ""]]
+            if {$v ne ""} { break }
+        }
         if {$v eq ""} { set v $def }
         if {![string is integer -strict $v] || $v < 1} {
-            error "capture: \[capture\] $key must be a positive integer, got '$v'"
+            error "capture: \[capture\] [lindex $keys 0] must be a positive integer, got '$v'"
         }
         lappend out $v
     }
     return $out
+}
+
+# The image TYPE the capture call is asked for. The file name is frozen to `.png` by SPEC_gui
+# s.6.5, so a type that is not png would write a JPEG with a .png name: refused by name, before
+# anything is sent. `[capture] image_type` is the owner's own config key (S06/S07).
+proc ::pis::capture::image_type {cfg} {
+    ::pis::capture::need_common
+    set t [string tolower [string trim [::pis::common::get $cfg capture image_type png]]]
+    if {$t eq ""} { set t png }
+    if {$t ne "png"} {
+        error "capture: \[capture\] image_type must be png (the image name ends in .png), got '$t'"
+    }
+    return $t
+}
+
+# The per-step trace (T-032): `[debug] capture_trace`, default 1 until the owner writes accepted.
+# It is a LOG switch only - the journal text is identical either way.
+proc ::pis::capture::trace_spec {cfg} {
+    ::pis::capture::need_common
+    set raw [string trim [::pis::common::get $cfg debug capture_trace 1]]
+    if {$raw eq ""} { return 1 }
+    return [::pis::common::to_bool $raw "debug capture_trace"]
+}
+
+# Whether a failed image stops the run (`[log] continue_on_error`, SPEC.md data model).
+proc ::pis::capture::continue_on_error {cfg} {
+    ::pis::capture::need_common
+    set raw [string trim [::pis::common::get $cfg log continue_on_error 0]]
+    if {$raw eq ""} { return 0 }
+    return [::pis::common::to_bool $raw "log continue_on_error"]
 }
 
 # The folder the images go into: `[folders] working_dir` (default 02_working, resolved against the
@@ -209,41 +244,35 @@ proc ::pis::capture::output_dir {root cfg} {
     return $dir
 }
 
-# The {result} part of the name: the result FILE of that window (its basename without extension),
-# because that is the only value that makes the three parts unique across a layout - a window is
-# "one result file" (SPEC_gui s.4) and the whole point of the pattern is, in s.6.5's own words,
-# "so files never overwrite each other". A window with no result line (fewer files than windows)
-# falls back to the SELECTED result type, then to "noresult"; the uniqueness pass below still
-# guarantees that no image is ever overwritten.
+# The {result_file_name} part of the name: the result FILE of that window (its basename without
+# extension, exactly as the result module knows it - window k is "one result file", SPEC_gui s.4).
+# T-032 (owner's order): the MODEL is no longer part of the name, and a window with no result
+# line (fewer files than windows) is `noresult`. The uniqueness pass below still guarantees that
+# no image is ever overwritten.
 proc ::pis::capture::result_part {cfg k} {
     ::pis::capture::need_common
     set files [::pis::common::get $cfg session result_files ""]
     if {[string is integer -strict $k] && $k >= 1 && $k <= [llength $files]} {
         set f [string trim [lindex $files [expr {$k - 1}]]]
-        if {$f ne ""} { return [::pis::capture::file_stem $f] }
-    }
-    set sel [string trim [::pis::common::get $cfg result selected 0]]
-    if {[string is integer -strict $sel] && $sel >= 1} {
-        set t [string trim [::pis::common::get $cfg result "item$sel" ""]]
-        if {$t ne ""} { return $t }
+        if {$f ne ""} {
+            set stem [::pis::capture::file_stem $f]
+            if {$stem ne ""} { return $stem }
+        }
     }
     return "noresult"
 }
 
-# {model}_{result}_{item}, every part sanitized: SPEC_gui s.6.5's pattern, no extension.
-proc ::pis::capture::file_base {cfg k item} {
+# {result_file_name}_{view}, every part sanitized: the pattern T-032 fixes, no extension.
+proc ::pis::capture::file_base {cfg k view} {
     ::pis::capture::need_common
-    set m [::pis::capture::file_stem [::pis::common::get $cfg session model_file ""]]
-    if {$m eq ""} { set m "nomodel" }
     return [join [list \
-        [::pis::capture::sanitize $m] \
         [::pis::capture::sanitize [::pis::capture::result_part $cfg $k]] \
-        [::pis::capture::sanitize $item]] _]
+        [::pis::capture::sanitize $view]] _]
 }
 
 # The same, with the extension the task freezes.
-proc ::pis::capture::file_name {cfg k item} {
-    return "[::pis::capture::file_base $cfg $k $item].png"
+proc ::pis::capture::file_name {cfg k view} {
+    return "[::pis::capture::file_base $cfg $k $view].png"
 }
 
 # A path in `dir` built from `base` that neither this run nor the folder already holds: the first
@@ -274,7 +303,12 @@ proc ::pis::capture::unique_path {dir base used} {
 # has not run, so a module never "applies" to a session that holds nothing.
 proc ::pis::capture::windows {cfg scope} {
     if {$scope ne "layout"} {
-        return [list [::pis::hw::active_window]]
+        # T-032: ONE clear line and NOTHING sent - a capture sent to a guessed window would
+        # photograph the wrong one.
+        if {[catch {::pis::hw::active_window} aw]} {
+            error "capture: no active window ([string trim $aw])"
+        }
+        return [list $aw]
     }
     set loaded 0
     if {[llength [info commands ::pis::step01::loaded]] > 0} {
@@ -301,13 +335,16 @@ proc ::pis::capture::windows {cfg scope} {
     return $out
 }
 
-# Run the module once. SPEC_gui s.6.5 + s.7: the CHECKED ROWS are the items (each one becomes one
-# image), the scope decides the windows - [Apply all layout] captures every window of the load,
-# the module button captures the window that is active. Everything that can be refused is refused
-# BEFORE the first capture (folder, size, a row without text, every name), so a refused run sends
-# nothing and journals nothing; a failure DURING the run names the window, the item and the output
-# path and stops (whether a stop ends the whole run is the GUI's continue-on-error decision).
-# Nothing here writes the ini and nothing calls another module: "Capture only captures".
+# Run the module once (T-032). SPEC_gui s.6.5 + s.7: the CHECKED ROWS are the VIEWS (each one
+# becomes one image of the row's view), the scope decides the windows - [Apply all layout]
+# captures every window of the load, the module button captures the window that is active.
+# Everything that can be refused is refused BEFORE the first capture (folder, size, type, a row
+# without text, every name), so a refused run sends nothing and journals nothing.
+# Per image the adapter sends: select window (layout only) -> view -> Draw -> capture -> file
+# check, with ONE STEP log line per step while the trace is on and ONE journal line per image
+# either way. A failure names window, row, view, step, the raw answer and the output path; with
+# [log] continue_on_error = 1 the next image is attempted, otherwise the run stops and says which
+# windows were not attempted. Nothing here writes the ini: "Capture only captures".
 proc ::pis::capture::run {root cfg scope} {
     variable captured
     variable calls
@@ -326,65 +363,129 @@ proc ::pis::capture::run {root cfg scope} {
         return 0
     }
     set dir [::pis::capture::output_dir $root $cfg]
-    set size [::pis::capture::size_spec $cfg]
-    set unit [lindex $size 0]
-    set width [lindex $size 1]
-    set height [lindex $size 2]
+    lassign [::pis::capture::size_spec $cfg] unit width height
+    set type [::pis::capture::image_type $cfg]
+    set trace [::pis::capture::trace_spec $cfg]
+    set cont [::pis::capture::continue_on_error $cfg]
     set windows [::pis::capture::windows $cfg $scope]
-    # ONE plan of {window row item path} built before anything is sent: every name is fixed then,
+    # ONE plan of {window row view path} built before anything is sent: every name is fixed then,
     # so no capture can be told a name a later capture of the same run will take.
     set plan [list]
     set used [dict create]
     foreach k $windows {
         foreach row $rows {
-            set item [::pis::capture::item_text $cfg $row]
-            set made [::pis::capture::unique_path $dir [::pis::capture::file_base $cfg $k $item] $used]
+            set view [::pis::capture::item_text $cfg $row]
+            set made [::pis::capture::unique_path $dir [::pis::capture::file_base $cfg $k $view] $used]
             set used [lindex $made 1]
-            lappend plan [list $k $row $item [lindex $made 0]]
+            lappend plan [list $k $row $view [lindex $made 0]]
         }
     }
     set total [llength $plan]
-    ::pis::common::log $cfg INFO [format "%s: %d image(s), %s %d x %d, into %s" \
-        $title $total $unit $width $height $dir]
+    ::pis::common::log $cfg INFO [format "%s: %d image(s), %s %d x %d, type %s, into %s" \
+        $title $total $unit $width $height $type $dir]
+    ::pis::common::log $cfg INFO [format "%s: steps per image %s, trace %s (\[debug\] capture_trace)" \
+        $title \
+        [expr {$scope eq "layout" ? "select/view/draw/capture/file" : "view/draw/capture/file"}] \
+        [expr {$trace ? "on" : "off"}]]
+    # Does this build document a getter for the ACTIVE VIEW? None does (adapter view_getter), so
+    # the usual answer is "no": the windows stay on the last captured view and that is said ONCE.
+    set restore [expr {[string trim [::pis::hw::view_getter]] ne "" ? 1 : 0}]
+    set captured 0
     set done 0
+    set lastwin 0
+    set orig ""
+    set stopped ""
     foreach step $plan {
         set k [lindex $step 0]
         set row [lindex $step 1]
-        set item [lindex $step 2]
+        set view [lindex $step 2]
         set path [lindex $step 3]
-        incr done
-        ::pis::capture::status [format "Capture %d/%d running..." $done $total]
-        ::pis::hw::context $title $item
-        # "set the view" (SPEC_gui s.6.5): the layout scope makes the window active first; the
-        # active scope already IS that window, so it sends nothing extra.
-        if {$scope eq "layout"} {
-            ::pis::hw::select_window $k
+        if {$restore} {
+            if {$k != $lastwin} {
+                if {$lastwin != 0 && $orig ne ""} {
+                    ::pis::capture::restore_view $cfg $lastwin $orig
+                }
+                set lastwin $k
+                set orig ""
+                catch {set orig [::pis::hw::active_view]}
+            }
         }
+        incr done
         incr calls
-        set code [catch {::pis::hw::capture_window $k $path $unit $width $height} res]
+        ::pis::capture::status [format "Capture %d/%d running..." $done $total]
+        ::pis::hw::context $title $view
+        set code [catch {
+            ::pis::hw::capture_window $k $path $view $unit $width $height \
+                -row $row -layout [expr {$scope eq "layout" ? 1 : 0}] -trace $trace
+        } res]
         if {$code} {
-            set msg "capture window $k '$item' failed: [string trim $res] | output: $path"
+            set msg "capture window $k row $row view '$view' failed: [string trim $res] | output: $path"
+            set later [::pis::capture::not_attempted $plan $k]
+            if {$later ne ""} { append msg " | $later" }
             ::pis::common::log $cfg ERROR $msg
             ::pis::capture::status "Error: capture window $k failed (see log)"
-            error $msg
+            if {$cont} { continue }
+            set stopped $msg
+            break
         }
-        # The adapter's own read-back already proved the file; the module looks once more because
-        # the task asks for the check AFTER the call and because the size goes into the log line.
-        if {![file exists $path]} {
-            error "capture window $k '$item' wrote no file: $path"
-        }
-        set bytes [file size $path]
+        # The adapter proved the file; the module reads the size it reports (the same two facts,
+        # once more, so the OK line can never claim an image the disk does not hold).
+        set bytes 0
+        if {[dict exists $res bytes]} { set bytes [dict get $res bytes] }
         if {$bytes <= 0} {
-            error "capture window $k '$item' wrote an empty file: $path"
+            set msg "capture window $k row $row view '$view' wrote no bytes: $path"
+            ::pis::common::log $cfg ERROR $msg
+            ::pis::capture::status "Error: capture window $k failed (see log)"
+            if {$cont} { continue }
+            set stopped $msg
+            break
         }
         set last_path $path
+        incr captured
         ::pis::common::log $cfg OK [format "capture window %d '%s' row %d: %s (%d bytes)" \
-            $k $item $row $path $bytes]
+            $k $view $row $path $bytes]
     }
-    set captured $total
+    if {$restore && $lastwin != 0 && $orig ne ""} {
+        ::pis::capture::restore_view $cfg $lastwin $orig
+    }
+    if {!$restore} {
+        ::pis::common::log $cfg INFO \
+            "capture: no getter for the active view, windows stay on the last captured view"
+    }
     set last_dir $dir
-    ::pis::common::log $cfg OK [format "%s: %d image(s) in %s" $title $total $dir]
-    return $total
+    if {$captured == $total} {
+        ::pis::common::log $cfg OK [format "%s: captured %d of %d image(s) in %s" \
+            $title $captured $total $dir]
+    } else {
+        ::pis::common::log $cfg WARN [format "%s: captured %d of %d image(s) in %s" \
+            $title $captured $total $dir]
+    }
+    if {$stopped ne ""} { error $stopped }
+    return $captured
+}
+
+# The windows of the plan that a stop left untouched, as ONE clause for the stop line
+# ("windows 3..4 not attempted"), or "" when the failure was on the last window.
+proc ::pis::capture::not_attempted {plan k} {
+    set later [list]
+    foreach step $plan {
+        if {[lindex $step 0] > $k} { lappend later [lindex $step 0] }
+    }
+    if {[llength $later] == 0} { return "" }
+    set later [lsort -unique -integer $later]
+    return [format "windows %d..%d not attempted" [lindex $later 0] [lindex $later end]]
+}
+
+# Set a window back to the view it had before the run. Only reachable when the build documents a
+# getter for the active view (none does), and a refusal is a WARN - the image is already written.
+proc ::pis::capture::restore_view {cfg k name} {
+    if {[catch {::pis::hw::set_view $k $name} err]} {
+        ::pis::common::log $cfg WARN [format \
+            "capture: window %d could not be set back to view '%s': %s" $k $name [string trim $err]]
+        return 0
+    }
+    ::pis::common::log $cfg INFO [format "capture: window %d restored to view '%s'" $k $name]
+    return 1
 }
 
 # Counters back to zero; used by tests/tcl/test_capture.tcl between cases.
