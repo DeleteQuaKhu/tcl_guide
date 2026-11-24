@@ -20,8 +20,16 @@
 #
 # Sourcing order for a HyperView session: this file sources everything it needs, so
 # `source <root>/01_scripts/_tcl_pis_99_workflow_gui.tcl` is the only command required.
+# T-039 (F18): the list is the WHOLE wiring. Omitted here, a module's procs do not exist in the
+# owner's session and the first press dies with `invalid command name "::pis::notes::title"` -
+# which is exactly what happened while every suite was green, because the suites sourced the
+# module files themselves. Every module file belongs in this list, and
+# tests/tcl/test_wiring.tcl reads this very list (never a copy of it) and drives the real
+# buttons. The `::pis::<ns>::<name>` procs each module needs are in ::pis::gui::module_calls,
+# checked at start-up by ::pis::gui::check_modules.
 set _pis_dir [file dirname [file normalize [info script]]]
 foreach _pis_file {_tcl_pis_00_common.tcl _tcl_pis_10_hw.tcl _tcl_pis_11_hw_adapter.tcl \
+        _tcl_pis_07_datalog.tcl _tcl_pis_08_notes.tcl \
         _tcl_pis_01_load_model_results.tcl _tcl_pis_02_load_legend.tcl \
         _tcl_pis_03_load_result.tcl _tcl_pis_06_capture.tcl _tcl_pis_20_journal_ui.tcl} {
     set _pis_path [file join $_pis_dir $_pis_file]
@@ -448,15 +456,103 @@ proc ::pis::gui::busy_guard {title} {
     return 0
 }
 
-# Run seam. "result" (T-008), "legend" (T-007), "capture" (T-011) and "notes" (T-038) are wired;
-# Measures and Section Cut still report one explicit ERROR naming the module, and an empty module
-# is the WARN required by the SPEC states.
-proc ::pis::gui::run_module {key scope} {
-    variable S
-    set title [dict get $S title $key]
-    if {[::pis::gui::busy_guard $title]} {
-        return 0
+# Run seam. "result" (T-008), "legend" (T-007), "capture" (T-011), "notes" (T-038) and the two
+# unwired panels run through ONE guard (T-039): dispatch does the work, run_module turns any Tcl
+# error into ONE `ERROR module <Name>: <message>` log line plus a red status, so a broken module
+# can never reach Tk as a raw traceback again (F18). "measures" and "section" still report one
+# explicit ERROR naming the module, and an empty module is the WARN required by the SPEC states.
+#
+# The procs of another file that one module needs. This table IS the start-up self-check
+# (::pis::gui::check_modules): a module whose entry procs are absent is reported once and its
+# buttons are disabled, instead of throwing `invalid command name "..."` on the first press.
+# tests/tcl/test_wiring.tcl cross-checks every row against this file's own `::pis::<ns>::<name>`
+# references, so a call added below without its row fails the suite.
+proc ::pis::gui::module_calls {key} {
+    switch -- $key {
+        result  { return [list ::pis::result::title ::pis::result::run \
+                              ::pis::result::selected_item] }
+        legend  { return [list ::pis::legend::title ::pis::legend::run] }
+        capture { return [list ::pis::capture::title ::pis::capture::run] }
+        notes   { return [list ::pis::notes::title ::pis::notes::run \
+                              ::pis::notes::macro_add] }
     }
+    return [list]
+}
+
+# The three buttons of one module (title, [Apply all layout], [Macro Add] when it has one).
+# Widgets that do not exist (offline tests) are skipped by the caller.
+proc ::pis::gui::module_buttons {key} {
+    variable S
+    set out [list]
+    if {![dict exists $S mods $key]} {
+        return $out
+    }
+    set mods [dict get $S mods $key]
+    foreach f {name apply} {
+        if {[dict exists $mods $f]} {
+            lappend out [dict get $mods $f]
+        }
+    }
+    if {[dict exists $S macro $key]} {
+        lappend out [dict get $S macro $key]
+    }
+    return $out
+}
+
+# A module that is not loaded: remember WHY and disable its three buttons. Every press still
+# logs the same sentence (run_module reads S disabled before it dispatches), so a disabled
+# widget that a queued event still reaches cannot look like a working button.
+proc ::pis::gui::disable_module {key missing} {
+    variable S
+    dict set S disabled $key 1
+    dict set S missing $key $missing
+    foreach w [::pis::gui::module_buttons $key] {
+        # `winfo` exists only once Tk is loaded (offline tests run this headless); the S flags
+        # below are what a press reads, so nothing depends on the widget being there.
+        if {[llength [info commands winfo]] > 0 && [winfo exists $w]} {
+            catch {$w configure -state disabled}
+        }
+    }
+    return $missing
+}
+
+# Start-up self-check (T-039, F18): after the source list has run, every module's entry procs
+# must exist. ONE line when all are there, ONE ERROR naming the missing procs otherwise - and
+# the BUILD line stays the first line of the log, because this runs after it.
+# Returns the number of modules that are not loaded.
+proc ::pis::gui::check_modules {} {
+    variable S
+    set bad 0
+    foreach spec [::pis::gui::module_specs] {
+        set key [dict get $spec key]
+        set missing [list]
+        foreach p [::pis::gui::module_calls $key] {
+            if {[llength [info commands $p]] == 0} {
+                lappend missing $p
+            }
+        }
+        if {[llength $missing] > 0} {
+            incr bad
+            ::pis::gui::disable_module $key $missing
+            ::pis::gui::log_line ERROR \
+                "module [dict get $spec title] not loaded: missing $missing"
+            continue
+        }
+        if {[dict exists $S disabled $key]} {
+            catch {dict unset S disabled $key}
+            catch {dict unset S missing $key}
+        }
+    }
+    if {$bad == 0} {
+        ::pis::gui::log_line INFO "MODULES loaded: ok"
+    }
+    return $bad
+}
+
+# The work of one press, without the guard. A module runner returns its own count; a raised
+# error is the caller's to report.
+proc ::pis::gui::dispatch {key scope} {
+    variable S
     ::pis::gui::commit $key
     if {$key eq "result"} {
         return [::pis::gui::run_result $scope]
@@ -468,8 +564,13 @@ proc ::pis::gui::run_module {key scope} {
         return [::pis::gui::run_capture $scope]
     }
     if {$key eq "notes"} {
+        # scope "macro" is the panel's own [Macro Add] (a file action, not a window scope).
+        if {$scope eq "macro"} {
+            return [::pis::gui::macro_add_notes]
+        }
         return [::pis::gui::run_notes $scope]
     }
+    set title [dict get $S title $key]
     if {[llength [::pis::gui::chosen $key]] == 0} {
         ::pis::gui::log_line WARN "module $title: no item selected, nothing run"
         return 0
@@ -477,6 +578,37 @@ proc ::pis::gui::run_module {key scope} {
     ::pis::gui::log_line ERROR "module $title: execution is not wired yet (frame task T-003, scope $scope)"
     ::pis::gui::set_status "Error: $title not available yet" red
     return 0
+}
+
+proc ::pis::gui::run_module {key scope} {
+    variable S
+    # A press always names a key the window has; a key nobody knows must still not reach Tk as a
+    # traceback, so the title falls back to the key itself.
+    set title $key
+    catch {set title [dict get $S title $key]}
+    if {[::pis::gui::busy_guard $title]} {
+        return 0
+    }
+    if {[dict exists $S disabled $key]} {
+        ::pis::gui::log_line ERROR \
+            "module $title not loaded: missing [dict get $S missing $key]"
+        ::pis::gui::set_status "Error: $title not loaded (see log)" red
+        return 0
+    }
+    set code [catch {::pis::gui::dispatch $key $scope} res]
+    if {$code} {
+        # The module's own message in full, then the first 6 lines of the traceback ONCE, so the
+        # owner's log names the proc that was missing without a Tk dialog (F18).
+        set msg [string trim $res]
+        ::pis::gui::log_line ERROR "module $title: $msg"
+        set head [lrange [split $::errorInfo "\n"] 0 5]
+        if {[llength $head] > 1} {
+            ::pis::gui::log_line ERROR "  | [join $head { | }]"
+        }
+        ::pis::gui::set_status "$title: internal error (see log)" red
+        return 0
+    }
+    return $res
 }
 
 # --- Load result wiring (task T-008) ----------------------------------------
@@ -925,10 +1057,13 @@ proc ::pis::gui::module_block {parent spec} {
     pack $plus -side left
     pack $minus -side left -padx {4 0}
     pack $apply -side right
-    # T-038: the Notes panel reads the owner's Result/Notes log file with one button (SPEC_gui
+    # T-038: the Notes panel reads the owner's result file with one button (SPEC_gui
     # s.14.2). Measures gets the same button when its reader lands; the spec key decides.
+    # T-039 (F18): the press goes through run_module like the other two controls, so it gets the
+    # same error guard and the same not-loaded check. scope "macro" = a file action.
     if {[dict get $spec extra] eq "macro_add"} {
-        set ma [ttk::button $bar.macro -text "Macro Add" -command [list ::pis::gui::macro_add_notes]]
+        set ma [ttk::button $bar.macro -text "Macro Add" \
+            -command [list ::pis::gui::run_module $key macro]]
         pack $ma -side left -padx {8 0}
         ::pis::gui::lock $ma
         dict set S macro $key $ma
@@ -1328,8 +1463,12 @@ proc ::pis::gui::build {} {
     ::pis::gui::lock $save
     ::pis::gui::lock $load
     ::pis::gui::lock $clear
-    ::pis::gui::log_line INFO "BUILD $::pis::BUILD | Workflow GUI started (block 0 + Load result + Load Legend + Capture + Notes + log pane wired; tasks T-006, T-007, T-008, T-011, T-012, T-038; module lists = real radio/check buttons)"
+    ::pis::gui::log_line INFO "BUILD $::pis::BUILD | Workflow GUI started (block 0 + Load result + Load Legend + Capture + Notes + log pane wired; tasks T-006, T-007, T-008, T-011, T-012, T-038, T-039; module lists = real radio/check buttons)"
     ::pis::gui::set_status "Idle"
+    # T-039: BUILD stays the first line; the very next line says whether every module's procs
+    # arrived with the source list above (F18). A missing module is one ERROR and three disabled
+    # buttons - never a Tk traceback on the first press.
+    ::pis::gui::check_modules
     ::pis::gui::fill_block0 [::pis::gui::fields_from_cfg [::pis::gui::workflow_cfg]]
     ::pis::gui::seed_modules
     return $top

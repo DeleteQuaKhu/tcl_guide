@@ -27,6 +27,16 @@
 # ("Notes: applied, display not confirmed (look at the windows)"); this module writes ONE
 # `notes: no documented getter, window k must be checked by eye` per run.
 #
+# T-039 (F18): the three controls of the panel - the title button (ACTIVE window), [Apply all
+# layout] (every window of the layout) and [Macro Add] (Notes.log) - are all reached through
+# ::pis::gui::run_module, so one shared guard turns any error into `ERROR module <Name>: ...`
+# instead of a Tk traceback. Nothing ticked is exactly ONE `WARN Notes: no row ticked` (0 calls,
+# 0 journal lines). The T-038 file grammar has NO verb column: every accepted data line IS one
+# `hwc annotation note ... display ...` row (name, text, coordinates), so `Macro Add` can DISPLAY
+# a note and cannot ADJUST one (reported, not invented). A line that is not a row, a `#Note<N>`
+# comment or a blank is refused with `Notes.log line <n>: ...`, and the WHOLE file - every name
+# and every window - is validated before the first HyperView call (all-or-nothing).
+#
 # Public procs:
 #   ::pis::notes::run {root cfg scope}          -> windows done ([Apply all layout] / the title)
 #   ::pis::notes::macro_add {root cfg}          -> notes created from Notes.log (the file action)
@@ -280,8 +290,9 @@ proc ::pis::notes::run {root cfg scope} {
     catch {::pis::hw::note_begin}
     set rows [::pis::notes::chosen $cfg]
     if {[llength $rows] == 0} {
-        ::pis::common::log $cfg WARN \
-            "module [::pis::notes::title]: no item selected, nothing run"
+        # T-039: the one WARN the SPEC states for this panel, and nothing else happens - 0
+        # HyperView calls, 0 journal lines.
+        ::pis::common::log $cfg WARN "[::pis::notes::title]: no row ticked"
         return 0
     }
     set targets [::pis::notes::targets $cfg $scope]
@@ -310,12 +321,17 @@ proc ::pis::notes::run {root cfg scope} {
         set unconfirmed 1
     }
     set tail ""
-    if {$failed > 0} { set tail [format ", %d failed" $failed] }
+    if {$done < $total} {
+        set tail [format ", %d of %d window(s) did not finish" [expr {$total - $done}] $total]
+    }
+    if {$failed > 0} { append tail [format ", %d note(s) failed" $failed] }
     set level OK
     if {$failed > 0} { set level WARN }
+    # T-039 (item 5): the closing line starts with `Notes: <n> note(s) in <w> window(s)` and keeps
+    # the amber sentence, because no press on this build can be a green pass (A19).
     ::pis::common::log $cfg $level [format \
-        "Notes: %d note(s) in %d of %d window(s) applied%s, display not confirmed (look at the windows)" \
-        $applied $done $total $tail]
+        "Notes: %d note(s) in %d window(s)%s, display not confirmed (look at the windows)" \
+        $applied $done $tail]
     return $applied
 }
 
@@ -468,13 +484,11 @@ proc ::pis::notes::macro_add {root cfg} {
     set cont 0
     catch {set cont [::pis::common::to_bool \
         [::pis::common::get $cfg log continue_on_error 0] "log continue_on_error"]}
-    catch {::pis::hw::absent_reset}
-    catch {::pis::hw::note_begin}
-    set done 0
+    # T-039: validate the WHOLE file before the first call - every section's windows AND every
+    # Name - so a bad Name or an orphan section on the LAST line costs no HyperView call at all
+    # (all-or-nothing, the rule of s.15.1 applied to the whole press).
+    set plan [list]
     foreach section [dict get $doc sections] {
-        set sec [dict get $section name]
-        # A section that names no window is A20's ERROR and stops the press unless continue-on-error.
-        set targets [::pis::dlog::windows $cfg $path $section $count $id]
         set rows [list]
         set ord 0
         foreach row [::pis::dlog::rows $section] {
@@ -483,7 +497,17 @@ proc ::pis::notes::macro_add {root cfg} {
             dict set row name [::pis::notes::name_from $row $path]
             lappend rows $row
         }
-        foreach k $targets {
+        # A section that names no window is A20's ERROR and stops the press unless continue-on-error.
+        lappend plan [dict create section [dict get $section name] \
+            targets [::pis::dlog::windows $cfg $path $section $count $id] rows $rows]
+    }
+    catch {::pis::hw::absent_reset}
+    catch {::pis::hw::note_begin}
+    set done 0
+    foreach step $plan {
+        set sec [dict get $step section]
+        set rows [dict get $step rows]
+        foreach k [dict get $step targets] {
             # A section holding only its column row is legal: ONE INFO, that window is skipped.
             if {[llength $rows] == 0} {
                 ::pis::common::log $cfg INFO [format \

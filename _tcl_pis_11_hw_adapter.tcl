@@ -245,8 +245,10 @@ namespace eval ::pis::hw {
 # T-038 (2026-11-24): bumped for the `Notes` module - the note seam (`note_begin`, `note_send`,
 # `note_now`, `note_eye`) sends the owner's PROVEN sequence one command at a time, journaling each
 # command only after it ran, and _tcl_pis_07_datalog.tcl / _tcl_pis_08_notes.tcl are new files.
+# T-039 (2026-11-24): bumped for the F18 fix - the GUI's source list now holds the reader and the
+# Notes module, and ::pis::gui::run_module carries the ONE error guard + the start-up self-check.
 namespace eval ::pis {
-    variable BUILD "T13a-20261124-1348"
+    variable BUILD "T13b-20261124-1506"
 }
 
 # --- script builders: the hwi handle API is spelled once, here ------------------------
