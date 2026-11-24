@@ -88,6 +88,11 @@
 #   ::pis::hw::reset_state {}   variants + order back to 1, nothing recorded, no last grid (tests)
 #   ::pis::hw::run {op values}  run an op (the six operations call this)
 #   ::pis::hw::used {op {win}}  variant number that step really used (0 = none worked)
+#   ::pis::hw::note_begin {}    start of one Notes press: the per-run flags go back to 0
+#   ::pis::hw::note_send {k r step words ?trace? ?soft?}  ONE PROVEN note command, journaled after
+#                               it ran; `soft` is the delete step (S07:312 wraps it in `catch`)
+#   ::pis::hw::note_now {k}     read-only GetDisplayOptions notes ("" = the build has no such getter)
+#   ::pis::hw::note_eye {k}     the ONE "notes: no documented getter ..." INFO of a press
 #   ::pis::hw::build_line {}    the ONE BUILD line (stamp, grid variants, line count, layout ids)
 #   ::pis::hw::announce {}      print that line to the console and to the GUI log
 #
@@ -237,8 +242,11 @@ namespace eval ::pis::hw {
 # receiver list (the documented poI3DViewCtrl first, ::pis::hw::set_view), the capture call is the
 # only thing the variants apply to, every ReleaseHandle on session/project/page/window/client is
 # gone from the generated scripts, and `[capture] on_view_unavailable` can capture the current view.
+# T-038 (2026-11-24): bumped for the `Notes` module - the note seam (`note_begin`, `note_send`,
+# `note_now`, `note_eye`) sends the owner's PROVEN sequence one command at a time, journaling each
+# command only after it ran, and _tcl_pis_07_datalog.tcl / _tcl_pis_08_notes.tcl are new files.
 namespace eval ::pis {
-    variable BUILD "T35a-20261118-2200"
+    variable BUILD "T13a-20261124-1348"
 }
 
 # --- script builders: the hwi handle API is spelled once, here ------------------------
@@ -2985,6 +2993,114 @@ proc ::pis::hw::reset_state {} {
     catch {array unset adapt_models}
     array set adapt_models {}
     return
+}
+
+# --- the Notes module's seam (T-038) -------------------------------------------------------
+# Every call below is PROVEN in the owner's own scripts (docs/refs/HV_API_REF.md: S07:312-344,
+# common patterns 8/9). Nothing here tries a second spelling: a note has no readable answer, so a
+# variant list would only produce commands nobody proved. What the seam adds is the two rules the
+# legend seam already follows (T-035):
+#   - a journal line is written only AFTER the command ran without raising, so a saved journal can
+#     never hold half a note; and
+#   - a STEP line names the exact literal and the build's exact answer, because the trace IS the
+#     evidence a note cannot otherwise give (docs/SPEC.md A19).
+namespace eval ::pis::hw {
+    # "-" = GetDisplayOptions notes not asked yet, 1 = it answers, 0 = this build lacks it.
+    if {![info exists adapt_note_getter]} { set adapt_note_getter "-" }
+    # Has THIS press already written its one "checked by eye" line?
+    if {![info exists adapt_note_eye]} { set adapt_note_eye 0 }
+    # Commands this press has sent (the module reports the count it made from its own rows).
+    if {![info exists adapt_note_steps]} { set adapt_note_steps 0 }
+}
+
+# Start of one press: the per-run flags go back to 0, so the "checked by eye" line is written ONCE
+# per press and never once per window.
+proc ::pis::hw::note_begin {} {
+    variable adapt_note_eye
+    variable adapt_note_steps
+    set adapt_note_eye 0
+    set adapt_note_steps 0
+    return
+}
+
+# ONE PROVEN `hwc` note command. `words` is the command WITHOUT the leading `hwc` (the wrapper's own
+# form, like ::pis::hw::hwc_line), e.g. {annotation note create pis_note_1_2}.
+#   `k` / `r`   the window and the row the STEP line names,
+#   `step`      the step's short name for that line (select/delete/create/text/...),
+#   `trace`     1 = write the STEP line; the journal text is IDENTICAL either way,
+#   `soft`      1 = the delete step: a name that does not exist raises, and the owner's own script
+#               wraps exactly that call in `catch` (S07:312), so it is reported and the note goes on.
+# Returns the build's raw answer ("" when the call answered nothing). Raises the build's own text
+# otherwise, so the module can stop (or continue under [log] continue_on_error).
+proc ::pis::hw::note_send {k r step words {trace 1} {soft 0}} {
+    variable adapt_note_steps
+    ::pis::hw::need_exec
+    if {[llength $words] == 0} {
+        error "::pis::hw::note_send: no HyperView command given"
+    }
+    incr adapt_note_steps
+    set literal [::pis::hw::hwc_line $words]
+    set code [catch {::pis::hw::hwc_defer $words} res]
+    set raw [string trim $res]
+    if {$code} {
+        if {$trace} {
+            set level ERROR
+            if {$soft} { set level WARN }
+            ::pis::hw::note $level [format \
+                "STEP notes window %s row %s %s: sent %s -> ERR %s" $k $r $step $literal $raw]
+        }
+        if {$soft} { return "" }
+        error $raw
+    }
+    if {$trace} {
+        set shown $raw
+        if {$shown eq ""} { set shown "(empty)" }
+        ::pis::hw::note INFO [format \
+            "STEP notes window %s row %s %s: sent %s -> ret=%s" $k $r $step $literal $shown]
+    }
+    # Journaled only now: the command has run and did not raise (the T-035 deferred-journal rule).
+    catch {::pis::hw::hwc_journal $words}
+    return $raw
+}
+
+# Read-only: `poIPost GetDisplayOptions notes` of window k (S57; `notes` is in S56's name list).
+# "" = this build has no such getter (the absent-method text is the proof, T-027 rule) or the
+# window answered nothing; any OTHER error is the build's own words and is raised whole. Never
+# journaled (it is a question) and never used as a verdict: it speaks for the WINDOW's notes
+# category, not for one note (docs/SPEC.md Q12).
+proc ::pis::hw::note_now {k} {
+    variable adapt_note_getter
+    if {$adapt_note_getter eq "0"} { return "" }
+    ::pis::hw::need_exec
+    set body {set psiNV [psiC GetDisplayOptions notes]}
+    set script "[::pis::hw::window_open psi $k]\n$body\n[::pis::hw::window_close psi]\nset psiNV"
+    set got ""
+    if {[catch {::pis::hw::probe $script} got]} {
+        set raw [string trim $got]
+        set parsed [::pis::hw::absent_parse $raw]
+        if {[llength $parsed] >= 3} {
+            lassign $parsed class mname ambiguous
+            if {$mname eq "GetDisplayOptions"} {
+                set adapt_note_getter 0
+                return ""
+            }
+        }
+        error $raw
+    }
+    set adapt_note_getter 1
+    return [string trim $got]
+}
+
+# The ONE `notes: no documented getter, window k must be checked by eye` INFO of a press
+# (docs/SPEC.md A19), written by the window that needed it. Returns 1 when it was written now, 0
+# when this press already wrote it.
+proc ::pis::hw::note_eye {k} {
+    variable adapt_note_eye
+    if {$adapt_note_eye} { return 0 }
+    set adapt_note_eye 1
+    ::pis::hw::note INFO [format \
+        "notes: no documented getter, window %s must be checked by eye" $k]
+    return 1
 }
 
 # --- build stamp: ONE line, printed when this file is sourced -------------------------

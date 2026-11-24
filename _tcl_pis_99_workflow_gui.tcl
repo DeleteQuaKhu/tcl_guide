@@ -11,6 +11,8 @@
 # contour call of docs/refs/HV_API.md section 11 with its two read-backs).
 # Task T-011 wires the "Capture" block to ::pis::capture (checkbox list of views, the documented
 # `hwISession CaptureWindow` call of docs/refs/HV_API.md section 6 and a file check per image).
+# Task T-012 wires the four log-pane buttons to ::pis::jui ([Clear] [Save] [Load...] [Run log >],
+# continue-on-error, status bar): the pane logic lives there, this file only opens the dialogs.
 # The other two modules still log one explicit ERROR ("not wired yet"): no silent no-op.
 # Module lists (Load result, Load Legend, Measures, Section Cut, Capture) are REAL radiobutton /
 # checkbutton rows in a scrolling canvas (not a text listbox), seeded at start by seed_modules.
@@ -21,7 +23,7 @@
 set _pis_dir [file dirname [file normalize [info script]]]
 foreach _pis_file {_tcl_pis_00_common.tcl _tcl_pis_10_hw.tcl _tcl_pis_11_hw_adapter.tcl \
         _tcl_pis_01_load_model_results.tcl _tcl_pis_02_load_legend.tcl \
-        _tcl_pis_03_load_result.tcl _tcl_pis_06_capture.tcl} {
+        _tcl_pis_03_load_result.tcl _tcl_pis_06_capture.tcl _tcl_pis_20_journal_ui.tcl} {
     set _pis_path [file join $_pis_dir $_pis_file]
     if {[catch {source $_pis_path} _pis_err]} {
         error "Cannot source $_pis_path: $_pis_err"
@@ -102,14 +104,16 @@ proc ::pis::gui::set_busy {flag} {
     return $flag
 }
 
-# key | title | mode (radio = exactly one, check = multiple) | extra ("on" = legend switch)
+# key | title | mode (radio = exactly one, check = multiple) | extra ("on" = legend switch,
+# "macro_add" = the panel carries its own [Macro Add] button; T-038 adds the sixth one).
 proc ::pis::gui::module_specs {} {
     return [list \
         [dict create key result title "Load result" mode radio extra ""] \
         [dict create key legend title "Load Legend" mode radio extra on] \
         [dict create key measures title "Measures" mode check extra ""] \
         [dict create key section title "Section Cut" mode check extra ""] \
-        [dict create key capture title "Capture" mode check extra ""]]
+        [dict create key capture title "Capture" mode check extra ""] \
+        [dict create key notes title "Notes" mode check extra macro_add]]
 }
 
 # Row indexes a module would run: the radio row, or every ticked checkbox row.
@@ -145,11 +149,12 @@ proc ::pis::gui::chosen {key} {
 # file path would only produce a "file not found" at run time.
 proc ::pis::gui::default_items {} {
     return [dict create \
-        result {{1.  Endure_SF_A} {1.  Mean Stress} {1. Stres Ampl.} CPRESS} \
+        result {{1.  Endure_SF_A} {1.  Mean Stress} {1. Stress Ampl.} CPRESS} \
         legend {} \
         measures {{Measures 1} {Measures 2} {Measures 3}} \
         section {section1 section2 section3} \
-        capture {{View 1} {View 2} {View 3}}]
+        capture {{View 1} {View 2} {View 3}} \
+        notes {{Note 1} {Note 2} {Note 3}}]
 }
 
 # ini section named like the module key: item1..itemN, selected (1-based, 0 = none), and for
@@ -443,9 +448,9 @@ proc ::pis::gui::busy_guard {title} {
     return 0
 }
 
-# Run seam. "result" (T-008), "legend" (T-007) and "capture" (T-011) are wired; the other two
-# modules still report one explicit ERROR naming the module, and an empty module is the WARN
-# required by the SPEC states.
+# Run seam. "result" (T-008), "legend" (T-007), "capture" (T-011) and "notes" (T-038) are wired;
+# Measures and Section Cut still report one explicit ERROR naming the module, and an empty module
+# is the WARN required by the SPEC states.
 proc ::pis::gui::run_module {key scope} {
     variable S
     set title [dict get $S title $key]
@@ -461,6 +466,9 @@ proc ::pis::gui::run_module {key scope} {
     }
     if {$key eq "capture"} {
         return [::pis::gui::run_capture $scope]
+    }
+    if {$key eq "notes"} {
+        return [::pis::gui::run_notes $scope]
     }
     if {[llength [::pis::gui::chosen $key]] == 0} {
         ::pis::gui::log_line WARN "module $title: no item selected, nothing run"
@@ -676,18 +684,203 @@ proc ::pis::gui::run_capture {scope} {
     return $res
 }
 
+# --- Notes wiring (task T-038) ----------------------------------------------
+# The sixth panel (SPEC_gui s.14.1/14.2): the ticked rows, [Apply all layout] / the title button,
+# and its own [Macro Add]. Same shape as capture: a THROWAWAY cfg built from the widgets + the
+# session ini, run with the busy lock on, never saved.
+proc ::pis::gui::notes_cfg {} {
+    variable S
+    set cfg [::pis::gui::workflow_cfg]
+    set sec [dict create]
+    if {[dict exists $cfg notes]} {
+        set sec [dict get $cfg notes]
+    }
+    set items [list]
+    if {[dict exists $S items notes]} {
+        set items [dict get $S items notes]
+    }
+    set flags [list]
+    if {[dict exists $S checked notes]} {
+        set flags [dict get $S checked notes]
+    }
+    dict set sec count [llength $items]
+    dict set sec checked $flags
+    set i 1
+    foreach item $items {
+        dict set sec "item$i" $item
+        incr i
+    }
+    dict set cfg notes $sec
+    # The log-pane switch (s.7) speaks for every module, Notes included.
+    dict set cfg log continue_on_error [expr {$::pis::gui::continue_on_error ? 1 : 0}]
+    return $cfg
+}
+
+# The amber status of A19/Q12. It reuses the log pane's warn colour (#9a6400, the T-031 rule: no
+# new colour is invented), because a note that was SENT must never look like a green success.
+proc ::pis::gui::notes_status {res} {
+    if {$res == 0} {
+        ::pis::gui::set_status "Idle"
+        return 0
+    }
+    ::pis::gui::set_status "Notes: applied, display not confirmed (look at the windows)" #9a6400
+    return $res
+}
+
+proc ::pis::gui::run_notes {scope} {
+    set cfg [::pis::gui::notes_cfg]
+    set root [dict get $cfg root]
+    ::pis::gui::set_busy 1
+    set code [catch {::pis::notes::run $root $cfg $scope} res]
+    ::pis::gui::set_busy 0
+    if {$code} {
+        ::pis::gui::log_line ERROR "module [::pis::notes::title]: $res"
+        ::pis::gui::set_status "Error: $res" red
+        return 0
+    }
+    if {$res == 0} {
+        # Nothing ticked (or every row empty): ::pis::notes::run already logged the WARN.
+        ::pis::gui::set_status "Idle"
+        return 0
+    }
+    if {$scope eq "layout"} {
+        ::pis::gui::log_line INFO "Notes: $res note(s) applied to every window of the layout"
+    } else {
+        ::pis::gui::log_line INFO "Notes: $res note(s) applied to the active window"
+    }
+    return [::pis::gui::notes_status $res]
+}
+
+# [Macro Add] on Notes (s.14.2/14.5): reads the Result/Notes log file, builds the notes of every
+# `#Note<N>` section. ::pis::notes::macro_add refuses BEFORE any call when Load All has not
+# succeeded and parses the whole file before the first command, so a refused press leaves the
+# journal untouched; its message reaches the log and the status bar unchanged.
+proc ::pis::gui::macro_add_notes {} {
+    if {[::pis::gui::busy_guard "Notes"]} {
+        return 0
+    }
+    set cfg [::pis::gui::notes_cfg]
+    set root [dict get $cfg root]
+    ::pis::gui::set_busy 1
+    set code [catch {::pis::notes::macro_add $root $cfg} res]
+    ::pis::gui::set_busy 0
+    if {$code} {
+        set msg [string trim $res]
+        ::pis::gui::log_line ERROR "module [::pis::notes::title]: $msg"
+        ::pis::gui::set_status "Error: $msg" red
+        return 0
+    }
+    return [::pis::gui::notes_status $res]
+}
+
 proc ::pis::gui::not_wired {what} {
     ::pis::gui::log_line ERROR "$what: not wired yet (frame task T-003)"
     ::pis::gui::set_status "Error: $what not available yet" red
     return 0
 }
 
+# --- log pane wiring (task T-012) ------------------------------------------
+# The pane logic lives in ::pis::jui (no widget there, so the suites test it in plain tclsh).
+# This block owns only what needs Tk: the four buttons, the file dialogs and the status bar.
+# [Clear] (SPEC_gui s.8) empties the display log AND the journal, and ::pis::jui::clear asks
+# for a confirmation only when the journal is dirty; a "no" leaves both untouched.
 proc ::pis::gui::clear_log {} {
     variable S
-    set w [dict get $S log]
-    $w configure -state normal
-    $w delete 1.0 end
-    $w configure -state disabled
+    if {![::pis::jui::clear]} {
+        return 0
+    }
+    if {[dict exists $S log] && [winfo exists [dict get $S log]]} {
+        set w [dict get $S log]
+        $w configure -state normal
+        $w delete 1.0 end
+        $w configure -state disabled
+    }
+    ::pis::gui::log_line INFO "Clear: display log and journal emptied"
+    return 1
+}
+
+# [Save] (A3): where to write, then ::pis::jui::save writes the filtered journal. The ini's
+# [log] journal_file is the suggested name; nothing is written into the ini here (T-013 owns
+# that moment).
+proc ::pis::gui::save_journal {} {
+    variable ROOT
+    set cfg [::pis::gui::workflow_cfg]
+    set initial [::pis::common::get $cfg log journal_file ""]
+    if {$initial eq ""} {
+        set initial [file join $ROOT 02_working journal.tcl]
+    }
+    set opts [list -title "Save journal" -defaultextension .tcl \
+        -initialfile [file tail $initial] -filetypes {{{Tcl journal} .tcl} {{All files} *}}]
+    if {[file isdirectory [file dirname $initial]]} {
+        lappend opts -initialdir [file dirname $initial]
+    }
+    set path [tk_getSaveFile {*}$opts]
+    if {$path eq ""} {
+        ::pis::gui::log_line INFO "Save: cancelled by the user"
+        return 0
+    }
+    if {[catch {::pis::jui::save $path} res]} {
+        ::pis::gui::log_line ERROR "Save: $res"
+        ::pis::gui::set_status "Error: Save journal failed" red
+        return 0
+    }
+    ::pis::gui::set_status "Journal saved: [dict get $res path]"
+    return 1
+}
+
+# [Load...] (SPEC_gui s.8): show an external journal in the pane - ::pis::jui::load only reads
+# it, nothing is executed until [Run log >] is pressed and confirmed.
+proc ::pis::gui::load_journal {} {
+    set path [tk_getOpenFile -title "Load log or journal" \
+        -filetypes {{{Tcl journal} .tcl} {{Log files} .txt} {{All files} *}}]
+    if {$path eq ""} {
+        ::pis::gui::log_line INFO "Load: cancelled by the user"
+        return 0
+    }
+    if {[catch {::pis::jui::load $path} txt]} {
+        ::pis::gui::log_line ERROR "Load: $txt"
+        ::pis::gui::set_status "Error: Load log failed" red
+        return 0
+    }
+    set n 0
+    foreach line [split $txt "\n"] {
+        set t [string trim [string trimright $line "\r"]]
+        if {$t eq ""} {
+            continue
+        }
+        incr n
+        ::pis::gui::log_line INFO "| $t"
+    }
+    ::pis::gui::log_line INFO "Load: $path ($n line(s) shown, nothing run)"
+    ::pis::gui::set_status "Log loaded: [file tail $path]"
+    return 1
+}
+
+# [Run log >] (A4 / A5): ::pis::jui::run confirms with the command count, executes the hwc/hwi
+# lines, logs one OK line per command and reports the failing line number. The busy lock makes
+# a second click impossible while the replay runs (A11).
+proc ::pis::gui::run_journal {} {
+    if {[::pis::gui::busy_guard "Run log"]} {
+        return 0
+    }
+    ::pis::gui::set_busy 1
+    ::pis::gui::set_status "Run log: running..."
+    set code [catch {::pis::jui::run} res]
+    ::pis::gui::set_busy 0
+    if {$code} {
+        ::pis::gui::log_line ERROR "Run log: $res"
+        ::pis::gui::set_status "Error: Run log failed" red
+        return 0
+    }
+    if {[dict get $res cancelled]} {
+        ::pis::gui::set_status "Idle"
+        return 0
+    }
+    if {[dict get $res failed]} {
+        ::pis::gui::set_status "Error: Run log line [dict get $res failed] failed" red
+        return 0
+    }
+    ::pis::gui::set_status "Run log: [dict get $res executed] command(s) executed"
     return 1
 }
 
@@ -732,6 +925,14 @@ proc ::pis::gui::module_block {parent spec} {
     pack $plus -side left
     pack $minus -side left -padx {4 0}
     pack $apply -side right
+    # T-038: the Notes panel reads the owner's Result/Notes log file with one button (SPEC_gui
+    # s.14.2). Measures gets the same button when its reader lands; the spec key decides.
+    if {[dict get $spec extra] eq "macro_add"} {
+        set ma [ttk::button $bar.macro -text "Macro Add" -command [list ::pis::gui::macro_add_notes]]
+        pack $ma -side left -padx {8 0}
+        ::pis::gui::lock $ma
+        dict set S macro $key $ma
+    }
     dict set S mods $key [dict create frame $f name $name lb $inner inner $inner canvas $cv apply $apply]
     dict set S items $key [list]
     dict set S checked $key [list]
@@ -1086,10 +1287,15 @@ proc ::pis::gui::build {} {
     grid rowconfigure $right 1 -weight 1
     set bar [ttk::frame $right.bar]
     grid $bar -row 0 -column 0 -sticky we
-    pack [ttk::button $bar.clear -text "Clear" -command [list ::pis::gui::clear_log]] -side left
-    pack [ttk::button $bar.save -text "Save" -command [list ::pis::gui::not_wired "Save journal (T-012)"]] -side left -padx {4 0}
-    pack [ttk::button $bar.load -text "Load..." -command [list ::pis::gui::not_wired "Load log (T-012)"]] -side left -padx {4 0}
-    set run [ttk::button $bar.run -text "Run log >" -command [list ::pis::gui::not_wired "Run log (T-012)"]]
+    # T-012: the four buttons of SPEC_gui s.8. The pane logic is ::pis::jui; these commands only
+    # open the dialogs (file dialogs in the GUI block above) and keep the status bar honest.
+    set clear [ttk::button $bar.clear -text "Clear" -command [list ::pis::gui::clear_log]]
+    set save [ttk::button $bar.save -text "Save" -command [list ::pis::gui::save_journal]]
+    set load [ttk::button $bar.load -text "Load..." -command [list ::pis::gui::load_journal]]
+    set run [ttk::button $bar.run -text "Run log >" -command [list ::pis::gui::run_journal]]
+    pack $clear -side left
+    pack $save -side left -padx {4 0}
+    pack $load -side left -padx {4 0}
     pack $run -side left -padx {4 0}
     set ::pis::gui::continue_on_error 0
     pack [ttk::checkbutton $bar.coe -text "continue on error" -variable ::pis::gui::continue_on_error] -side left -padx {12 0}
@@ -1119,7 +1325,10 @@ proc ::pis::gui::build {} {
     dict set S log $log
     dict set S status $status
     ::pis::gui::lock $run
-    ::pis::gui::log_line INFO "BUILD $::pis::BUILD | Workflow GUI started (block 0 + Load result + Load Legend wired; tasks T-006, T-007, T-008; module lists = real radio/check buttons)"
+    ::pis::gui::lock $save
+    ::pis::gui::lock $load
+    ::pis::gui::lock $clear
+    ::pis::gui::log_line INFO "BUILD $::pis::BUILD | Workflow GUI started (block 0 + Load result + Load Legend + Capture + Notes + log pane wired; tasks T-006, T-007, T-008, T-011, T-012, T-038; module lists = real radio/check buttons)"
     ::pis::gui::set_status "Idle"
     ::pis::gui::fill_block0 [::pis::gui::fields_from_cfg [::pis::gui::workflow_cfg]]
     ::pis::gui::seed_modules
